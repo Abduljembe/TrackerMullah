@@ -1,0 +1,457 @@
+import React, { useState } from 'react';
+import {
+  Menu,
+  AlertCircle,
+  CheckCircle2,
+  AlertTriangle,
+  Plus,
+  RotateCcw,
+  Sparkles,
+  Lock,
+  User as UserIcon,
+  LogOut,
+  Cloud,
+  Globe,
+  RefreshCw,
+  ArrowRightLeft,
+  X,
+  Database,
+} from 'lucide-react';
+import { useFinance } from '../context/FinanceContext.tsx';
+import { useAuth } from '../context/AuthContext.tsx';
+import { AppLogoIcon } from './common/AppLogo.tsx';
+import { PWAInstallButton } from './pwa/PWAInstallButton.tsx';
+
+interface HeaderProps {
+  onOpenMobileMenu: () => void;
+}
+
+export const Header: React.FC<HeaderProps> = ({
+  onOpenMobileMenu,
+}) => {
+  const {
+    activeTab,
+    currentPeriod,
+    setCurrentPeriod,
+    financialHealth,
+    setIsQuickAddOpen,
+    setIsHealthModalOpen,
+    setIsClearDataModalOpen,
+    setIsCurrencyConverterOpen,
+    setIsBackupRestoreOpen,
+    hasAnyData,
+    currency,
+    setCurrency,
+    exchangeRates,
+    refreshApp,
+    currencyNotice,
+    dismissCurrencyNotice,
+    dataNotice,
+    dismissDataNotice,
+    isCloudSyncing,
+  } = useFinance();
+
+  const { user, setIsAuthModalOpen, setAuthMode, logout } = useAuth();
+  const [showUserDropdown, setShowUserDropdown] = useState(false);
+  const [isRefreshingRates, setIsRefreshingRates] = useState(false);
+  const [ratesSyncSuccess, setRatesSyncSuccess] = useState(false);
+
+  const handleRefreshRates = async () => {
+    if (isRefreshingRates) return;
+    setIsRefreshingRates(true);
+    try {
+      await refreshApp();
+      setRatesSyncSuccess(true);
+      setTimeout(() => setRatesSyncSuccess(false), 2600);
+    } catch (err) {
+      console.warn('Failed to refresh app and exchange rates:', err);
+    } finally {
+      setTimeout(() => setIsRefreshingRates(false), 600);
+    }
+  };
+
+  // Title mapped from activeTab
+  const getTabTitle = () => {
+    switch (activeTab) {
+      case 'dashboard':
+        return 'Dashboard';
+      case 'insights':
+        return 'Insights & Analytics';
+      case 'income':
+        return 'Income Streams';
+      case 'expenses':
+        return 'Expense Tracker';
+      case 'wallets':
+        return 'Multi-Wallet Accounts & Balances';
+      case 'bills':
+        return 'Upcoming Bills & Subscriptions Calendar';
+      case 'budget':
+        return 'Monthly Budget';
+      case 'savings':
+        return 'Savings Goals';
+      case 'emergency':
+        return 'Emergency Fund';
+      case 'investments':
+        return 'Investments Portfolio';
+      case 'stocks':
+        return 'AI Stock Radar & Live Market Charts';
+      case 'orderflow':
+        return 'Institutional Order Flow & Liquidity Radar';
+      case 'livetv':
+        return 'Bloomberg Live TV & Real-Time Stocks Ticker';
+      case 'debt':
+        return 'Debt Payoff Tracker';
+      case 'mpesa':
+        return 'M-Pesa SMS Statement Parser';
+      case 'tax':
+        return 'KRA PAYE & Net Salary Calculator';
+      case 'chama':
+        return 'Chama & Group Savings Tracker';
+      case 'cashflow':
+        return '12-Month Cash Flow Forecast';
+      case 'milestones':
+        return 'Milestones & Achievement Badges';
+      case 'calculator':
+        return 'Financial Freedom (FIRE) Calculator';
+      case 'sacco-mmf':
+        return 'SACCO Dividends & MMF Compounding Yield Calculator';
+      case 'reports':
+        return 'Reports & Cashflow';
+      default:
+        return 'Dashboard';
+    }
+  };
+
+  const getHealthBadge = () => {
+    const { status, score } = financialHealth;
+
+    if (score >= 80) {
+      return {
+        bg: 'bg-emerald-950/70 border-emerald-500/30 text-emerald-300',
+        icon: <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />,
+      };
+    }
+    if (score >= 60) {
+      return {
+        bg: 'bg-teal-950/70 border-teal-500/30 text-teal-300',
+        icon: <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />,
+      };
+    }
+    if (score >= 40) {
+      return {
+        bg: 'bg-amber-950/70 border-amber-500/30 text-amber-300',
+        icon: <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />,
+      };
+    }
+    // Screenshot style: reddish dark badge with exclamation icon and "Needs work"
+    return {
+      bg: 'bg-[#35141e]/90 border-[#6b1e2e]/80 text-[#ff637e]',
+      icon: <AlertCircle className="w-3.5 h-3.5 text-[#ff4b6b] shrink-0" />,
+    };
+  };
+
+  const healthBadge = getHealthBadge();
+
+  return (
+    <header className="sticky top-0 z-20 backdrop-blur-md bg-[#080d17]/90 border-b border-[#141e30] px-4 md:px-8 py-3 flex flex-col gap-2">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        {/* Top Left: Title, Subtitle, and Health Pill matching screenshot */}
+        <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={onOpenMobileMenu}
+            className="md:hidden p-2 -ml-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/60 flex items-center gap-2"
+            aria-label="Open navigation menu"
+          >
+            <Menu className="w-5 h-5" />
+            <AppLogoIcon sizePx={24} />
+          </button>
+
+          <div>
+            <div className="flex items-center gap-3">
+              <h1 className="text-xl md:text-2xl font-bold tracking-tight text-white">
+                {getTabTitle()}
+              </h1>
+
+              {/* Health pill matching screenshot */}
+              <button
+                onClick={() => setIsHealthModalOpen(true)}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-semibold cursor-pointer transition-transform hover:scale-105 ${healthBadge.bg}`}
+                title="Click to view Financial Health breakdown"
+              >
+                {healthBadge.icon}
+                <span>{financialHealth.status}</span>
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400 mt-0.5">
+              <span>{currentPeriod}</span>
+              <span className="mx-1.5 text-slate-500">·</span>
+              <button
+                onClick={() => setIsHealthModalOpen(true)}
+                className="hover:text-slate-200 underline decoration-dotted underline-offset-2 transition-colors cursor-pointer"
+              >
+                Health: {financialHealth.score}/100
+              </button>
+            </p>
+          </div>
+        </div>
+
+        {/* Mobile quick add button */}
+        <div className="flex md:hidden items-center gap-2">
+          <button
+            onClick={() => setIsQuickAddOpen(true)}
+            className="p-2 rounded-xl bg-gradient-to-r from-teal-500 to-cyan-500 text-slate-950 font-bold shadow-md shadow-teal-500/20"
+          >
+            <Plus className="w-5 h-5" />
+          </button>
+        </div>
+      </div>
+
+      {/* Top Right: Actions & Tools */}
+      <div className="flex items-center flex-wrap gap-2.5 self-end md:self-auto text-xs">
+        {/* Currency Switcher & Real-time Rates */}
+        <div className="flex items-center gap-1.5">
+          <div className="flex items-center bg-[#0d1524] border border-[#1a273e] rounded-lg p-0.5 text-slate-300">
+            {(['USD', 'KES', 'EUR'] as const).map((c) => {
+              const symbol = c === 'USD' ? '$' : c === 'KES' ? 'KSh' : '€';
+              return (
+                <button
+                  key={c}
+                  onClick={() => setCurrency(c)}
+                  title={`Switch active currency to ${c} (auto-converts recorded balances)`}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-all flex items-center gap-1 ${
+                    currency === c
+                      ? 'bg-gradient-to-r from-teal-500/25 to-cyan-500/25 text-[#0df2c9] border border-teal-500/40 shadow-sm shadow-teal-500/10'
+                      : 'hover:text-white hover:bg-slate-800/40'
+                  }`}
+                >
+                  <span className="text-[10px] text-teal-400 font-normal">{symbol}</span>
+                  <span>{c}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Real-time FX Rates Ticker & Converter Trigger */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setIsCurrencyConverterOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0a1220] hover:bg-[#121f33] border border-[#17253b] hover:border-teal-500/40 text-[11px] text-slate-400 hover:text-white transition-colors cursor-pointer group"
+              title="Open Live Currency Converter (convert any amount between USD, KES, EUR, GBP)"
+            >
+              <ArrowRightLeft className="w-3 h-3 text-[#0df2c9] group-hover:scale-110 transition-transform" />
+              <span className="hidden sm:inline font-medium text-teal-400">1 USD =</span>
+              <span className="font-mono text-slate-200 font-semibold">
+                {exchangeRates.KES ? `${exchangeRates.KES.toFixed(2)} KES` : '129.86 KES'}
+              </span>
+              <span className="hidden xl:inline text-slate-600">·</span>
+              <span className="hidden xl:inline font-mono text-slate-300">
+                {exchangeRates.EUR ? `${exchangeRates.EUR.toFixed(2)} EUR` : '0.91 EUR'}
+              </span>
+              <span className="px-1.5 py-0.5 rounded text-[10px] bg-teal-500/15 text-[#0df2c9] font-semibold border border-teal-500/30 ml-0.5">
+                Convert
+              </span>
+            </button>
+            <div className="relative">
+              <button
+                onClick={handleRefreshRates}
+                disabled={isRefreshingRates}
+                aria-label="Refresh entire app, live TradingView prices, and FX rates"
+                className={`p-1.5 rounded-lg border transition-all cursor-pointer ${
+                  isRefreshingRates
+                    ? 'bg-teal-500/20 border-teal-500/50 text-[#0df2c9] shadow-[0_0_10px_rgba(13,242,201,0.3)]'
+                    : ratesSyncSuccess
+                    ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400'
+                    : 'bg-[#0a1220] hover:bg-[#121f33] border-[#17253b] hover:border-teal-500/40 text-slate-400 hover:text-teal-300'
+                }`}
+                title="Refresh entire app, live TradingView prices & FX rates"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${
+                    isRefreshingRates ? 'animate-spin text-[#0df2c9]' : ratesSyncSuccess ? 'text-emerald-400' : ''
+                  }`}
+                />
+              </button>
+
+              {ratesSyncSuccess && (
+                <div className="absolute top-9 right-0 z-50 px-2.5 py-1 rounded-lg bg-[#091322] border border-emerald-500/40 shadow-xl text-[10px] font-mono text-emerald-300 whitespace-nowrap animate-in fade-in slide-in-from-top-1 flex items-center gap-1.5 pointer-events-none">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                  <span>App &amp; Market Rates Refreshed · 1 USD = {exchangeRates.KES ? `${exchangeRates.KES.toFixed(2)} KES` : '129.86 KES'}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Backup & Restore Data */}
+        <button
+          onClick={() => setIsBackupRestoreOpen(true)}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0e1626] hover:bg-[#142036] border border-[#17253c] hover:border-teal-500/40 text-slate-300 hover:text-teal-300 transition-colors cursor-pointer text-xs"
+          title="Backup or restore financial data in JSON"
+        >
+          <Database className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+          <span className="hidden sm:inline font-medium">Backup</span>
+        </button>
+
+        {/* PWA Install Button */}
+        <PWAInstallButton variant="compact" />
+
+        {/* Reset / Clear Data */}
+        <button
+          onClick={() => setIsClearDataModalOpen(true)}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition-colors cursor-pointer ${
+            hasAnyData
+              ? 'bg-[#111929] hover:bg-rose-950/40 border-[#1d2d48] hover:border-rose-500/40 text-slate-300 hover:text-rose-300'
+              : 'bg-[#0a1220] hover:bg-[#101b2d] border-[#15233c] text-slate-400 hover:text-slate-200'
+          }`}
+          title="Reset or clear recorded financial data"
+        >
+          <RotateCcw className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+          <span className="font-medium">Clear Data</span>
+        </button>
+
+        {/* Period Selector */}
+        <select
+          value={currentPeriod}
+          onChange={(e) => setCurrentPeriod(e.target.value)}
+          className="bg-[#0e1626] border border-[#1d2c47] rounded-lg px-2.5 py-1.5 text-slate-300 focus:outline-none focus:border-teal-400 cursor-pointer"
+        >
+          <option value="October 2026">October 2026</option>
+          <option value="September 2026">September 2026</option>
+          <option value="November 2026">November 2026</option>
+          <option value="December 2026">December 2026</option>
+          <option value="June 2026">June 2026</option>
+          <option value="Year 2026">Full Year 2026</option>
+        </select>
+
+        {/* Quick Add modal trigger */}
+        <button
+          onClick={() => setIsQuickAddOpen(true)}
+          className="hidden md:flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-teal-400 to-[#00d2b4] text-[#071317] font-semibold tracking-tight shadow-md shadow-teal-500/20 hover:brightness-110 active:scale-95 transition-all"
+        >
+          <Plus className="w-4 h-4 stroke-[2.5]" />
+          <span>Add Transaction</span>
+        </button>
+
+        {/* Auth / Security Login Button */}
+        {user ? (
+          <div className="relative">
+            <button
+              onClick={() => setShowUserDropdown(!showUserDropdown)}
+              className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-[#111a2b] hover:bg-[#162238] border border-[#1d2d48] text-slate-200 transition-colors cursor-pointer"
+            >
+              <div className="w-6 h-6 rounded-full bg-teal-500/20 border border-teal-500/40 text-teal-300 font-bold flex items-center justify-center text-[10px] uppercase">
+                {user.displayName ? user.displayName.charAt(0) : user.email ? user.email.charAt(0) : 'U'}
+              </div>
+              <span className="hidden sm:inline font-medium text-xs max-w-[110px] truncate">
+                {user.displayName || user.email?.split('@')[0] || 'User'}
+              </span>
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  isCloudSyncing ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
+                }`}
+                title={isCloudSyncing ? 'Syncing to cloud...' : 'Encrypted Cloud Sync Active'}
+              />
+            </button>
+
+            {showUserDropdown && (
+              <div className="absolute right-0 mt-1.5 w-52 bg-[#0e1626] border border-[#1d2d48] rounded-xl shadow-2xl p-2 z-50 animate-in fade-in zoom-in-95 duration-150">
+                <div className="p-2 border-b border-[#162237] text-xs">
+                  <div className="font-bold text-white truncate">
+                    {user.displayName || 'Investor'}
+                  </div>
+                  <div className="text-[11px] text-slate-400 truncate">
+                    {user.email || 'Anonymous Guest'}
+                  </div>
+                  <div className="flex items-center gap-1 text-[10px] text-emerald-400 mt-1">
+                    <Cloud className="w-3 h-3" />
+                    <span>{user.provider === 'firebase' ? 'Cloud Database Synced' : 'Private Vault Active'}</span>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => {
+                    setIsClearDataModalOpen(true);
+                    setShowUserDropdown(false);
+                  }}
+                  className="w-full flex items-center gap-2 p-2 mt-1 rounded-lg text-xs text-slate-300 hover:text-rose-300 hover:bg-rose-950/30 transition-colors cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Reset / Clear Data</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    logout();
+                    setShowUserDropdown(false);
+                  }}
+                  className="w-full flex items-center gap-2 p-2 mt-1 rounded-lg text-xs text-rose-300 hover:bg-rose-950/40 transition-colors cursor-pointer"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Sign Out</span>
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <button
+            onClick={() => {
+              setAuthMode('login');
+              setIsAuthModalOpen(true);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-teal-500/10 hover:bg-teal-500/20 border border-teal-500/30 text-teal-300 font-semibold text-xs transition-colors"
+          >
+            <Lock className="w-3.5 h-3.5 text-teal-400" />
+            <span>Sign In / Sign Up</span>
+          </button>
+        )}
+      </div>
+      </div>
+
+      {/* Real-time Currency Conversion Notification Banner */}
+      {currencyNotice && (
+        <div className="flex items-center justify-between gap-3 px-3 py-1.5 rounded-lg bg-gradient-to-r from-teal-950/70 via-[#0b2430]/70 to-[#0e1f32]/70 border border-teal-500/40 text-teal-200 text-xs shadow-lg shadow-teal-950/30">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="flex h-2 w-2 relative shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-teal-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-[#0df2c9]"></span>
+            </span>
+            <ArrowRightLeft className="w-3.5 h-3.5 text-[#0df2c9] shrink-0" />
+            <span className="truncate font-medium">{currencyNotice.message}</span>
+          </div>
+          <button
+            onClick={dismissCurrencyNotice}
+            className="p-1 hover:text-white hover:bg-teal-500/20 rounded-md transition-colors text-teal-400/80 cursor-pointer shrink-0"
+            title="Dismiss notification"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Data Notice Banner (e.g. data cleared or demo data loaded) */}
+      {dataNotice && (
+        <div
+          className={`flex items-center justify-between gap-3 px-3 py-1.5 rounded-lg border text-xs shadow-lg ${
+            dataNotice.type === 'success'
+              ? 'bg-emerald-950/80 border-emerald-500/50 text-emerald-200 shadow-emerald-950/30'
+              : 'bg-teal-950/80 border-teal-500/50 text-teal-200 shadow-teal-950/30'
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span className="font-medium truncate">{dataNotice.message}</span>
+          </div>
+          <button
+            onClick={dismissDataNotice}
+            className="p-1 hover:text-white rounded-md transition-colors cursor-pointer shrink-0"
+            title="Dismiss notification"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+    </header>
+  );
+};
