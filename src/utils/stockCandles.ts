@@ -265,6 +265,22 @@ export function generateCandles(
     prevClose = close;
   }
 
+  return enrichCandlesWithIndicators(rawCandles, intervalSec);
+}
+
+export function enrichCandlesWithIndicators(
+  rawCandles: Omit<Candle, 'ema20' | 'ema50' | 'bbUpper' | 'bbLower' | 'bbMiddle'>[],
+  intervalSec = 3600
+): Candle[] {
+  if (!rawCandles || rawCandles.length === 0) return [];
+
+  const roundPrice = (p: number) => {
+    if (p >= 100) return Math.round(p * 100) / 100;
+    if (p >= 10) return Math.round(p * 100) / 100;
+    if (p >= 5) return Math.round(p * 1000) / 1000;
+    return Math.round(p * 10000) / 10000;
+  };
+
   // Ensure timestamps are strictly increasing and unique
   const finalCandles: Candle[] = [];
   let lastTime = 0;
@@ -297,7 +313,6 @@ export function generateCandles(
     finalCandles[i].ema20 = roundPrice(ema20);
     finalCandles[i].ema50 = roundPrice(ema50);
 
-    // Bollinger Bands (20 periods)
     const windowStart = Math.max(0, i - 19);
     const windowCloses = finalCandles.slice(windowStart, i + 1).map((c) => c.close);
     const mean = windowCloses.reduce((a, b) => a + b, 0) / windowCloses.length;

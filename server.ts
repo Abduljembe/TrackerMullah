@@ -76,6 +76,76 @@ interface TradingViewQuote {
   ema200?: number;
   atr?: number;
   adx?: number;
+  volume?: number;
+  marketCap?: number;
+  peRatio?: number;
+  dividendYield?: number;
+  high52w?: number;
+  low52w?: number;
+}
+
+function isServer24x7Symbol(symbol: string): boolean {
+  const upper = symbol.toUpperCase().trim();
+  const clean = upper.replace(/[/_\s-]/g, '');
+  if (
+    clean.startsWith('BTC') ||
+    clean.startsWith('ETH') ||
+    clean.startsWith('SOL') ||
+    clean.startsWith('XRP') ||
+    clean.startsWith('LTC') ||
+    clean.startsWith('DOGE') ||
+    clean.startsWith('ADA') ||
+    clean.startsWith('BNB') ||
+    clean.endsWith('USDT')
+  ) {
+    return true;
+  }
+  if (
+    upper.startsWith('R_') ||
+    /^R(10|25|50|75|100)$/.test(clean) ||
+    clean.includes('1HZ') ||
+    clean.startsWith('VOL') ||
+    clean === 'V75' ||
+    clean.includes('BOOM') ||
+    clean.includes('CRASH') ||
+    clean === 'STP' ||
+    clean.startsWith('STEP') ||
+    /^RB(100|200)$/.test(clean) ||
+    /^JD(10|25|50|75|100)$/.test(clean)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isServerMarketOpen(symbol: string, now = new Date()): boolean {
+  if (isServer24x7Symbol(symbol)) return true;
+
+  const clean = symbol.toUpperCase().replace(/[/_\s-]/g, '');
+  const nseTickers = new Set(['SCOM', 'EQTY', 'KCB', 'EABL', 'SCBK', 'BAT', 'NASI', 'NSE20']);
+  const usTickers = new Set(['AAPL', 'NVDA', 'MSFT', 'TSLA', 'SPY', 'AMZN', 'GOOGL', 'META', 'QQQ']);
+
+  if (nseTickers.has(clean)) {
+    const nairobiDate = new Date(now.toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
+    const d = nairobiDate.getDay();
+    const mins = nairobiDate.getHours() * 60 + nairobiDate.getMinutes();
+    return d >= 1 && d <= 5 && mins >= 9 * 60 && mins < 15 * 60;
+  }
+
+  if (usTickers.has(clean)) {
+    const nyDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const d = nyDate.getDay();
+    const mins = nyDate.getHours() * 60 + nyDate.getMinutes();
+    return d >= 1 && d <= 5 && mins >= 9 * 60 + 30 && mins < 16 * 60;
+  }
+
+  // Global Forex / Metals / Index Futures: Sunday 22:00 UTC to Friday 22:00 UTC
+  const utcDay = now.getUTCDay();
+  const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  if (utcDay >= 1 && utcDay <= 4) return true;
+  if (utcDay === 5) return utcMins < 22 * 60;
+  if (utcDay === 0) return utcMins >= 22 * 60;
+  return false;
 }
 
 let tvQuotesCache: Record<string, TradingViewQuote> = {};
@@ -236,6 +306,9 @@ function applyTvQuoteAliases(target: Record<string, TradingViewQuote>, rawSym: s
     target[slashed] = q;
     target[base] = q;
   }
+  if (rawSym.startsWith('NSEKE:')) {
+    target[cleanTicker] = q;
+  }
 }
 
 const TV_WS_SYMBOLS = [
@@ -246,7 +319,8 @@ const TV_WS_SYMBOLS = [
   "FX:USDZAR","FX:USDMXN","FX:USDTRY","FX_IDC:USDSGD","FX_IDC:USDKES","FX_IDC:GBPKES","FX_IDC:EURKES","FX_IDC:USDUGX","FX_IDC:USDTZS",
   "OANDA:XAUUSD","OANDA:XAGUSD","OANDA:XPTUSD","OANDA:XPDUSD","OANDA:XAUEUR","OANDA:XCUUSD",
   "SP:SPX","DJ:DJI","XETR:DAX","TVC:UKX","EURONEXT:PX1","TVC:NI225","TVC:HSI","OANDA:AU200AUD","TVC:SX5E","TVC:DXY",
-  "NASDAQ:NDX","NASDAQ:AAPL","NASDAQ:NVDA","NASDAQ:MSFT","NASDAQ:TSLA","AMEX:SPY",
+  "NASDAQ:NDX","NASDAQ:AAPL","NASDAQ:NVDA","NASDAQ:MSFT","NASDAQ:TSLA","NASDAQ:AMZN","NASDAQ:GOOGL","NASDAQ:META","AMEX:SPY",
+  "NSEKE:SCOM","NSEKE:EQTY","NSEKE:KCB","NSEKE:EABL","NSEKE:SCBK","NSEKE:BAT",
   "BINANCE:BTCUSDT","BINANCE:ETHUSDT","BINANCE:SOLUSDT","BINANCE:XRPUSDT",
   "BINANCE:LTCUSDT","BINANCE:DOGEUSDT","BINANCE:ADAUSDT","BINANCE:BNBUSDT",
   "NYMEX:CL1!","ICEEUR:BRN1!","COMEX:HG1!","TVC:US10Y","TVC:US02Y"
@@ -373,8 +447,8 @@ function injectDerivQuotes(target: Record<string, TradingViewQuote>, timeIso: st
       const q: TradingViewQuote = {
         symbol: clean,
         price: Number(price.toFixed(digits)),
-        changePercent: Number(((Math.random() * 0.8) - 0.35).toFixed(2)),
-        changeValue: Number((price * 0.002).toFixed(4)),
+        changePercent: isSynthetic ? Number(((Math.random() * 0.8) - 0.35).toFixed(2)) : 0,
+        changeValue: isSynthetic ? Number((price * 0.002).toFixed(4)) : 0,
         high: Number((price + spread).toFixed(digits)),
         low: Number((price - spread).toFixed(digits)),
         open: Number((price - (spread * 0.4)).toFixed(digits)),
@@ -514,7 +588,10 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
     "SP:SPX","DJ:DJI","XETR:DAX","TVC:UKX","EURONEXT:PX1","TVC:NI225","TVC:HSI","OANDA:AU200AUD","TVC:SX5E","TVC:DXY"
   ];
   const americaTickers = [
-    "NASDAQ:NDX","NASDAQ:AAPL","NASDAQ:NVDA","NASDAQ:MSFT","NASDAQ:TSLA","AMEX:SPY"
+    "NASDAQ:NDX","NASDAQ:AAPL","NASDAQ:NVDA","NASDAQ:MSFT","NASDAQ:TSLA","NASDAQ:AMZN","NASDAQ:GOOGL","NASDAQ:META","AMEX:SPY"
+  ];
+  const kenyaTickers = [
+    "NSEKE:SCOM","NSEKE:EQTY","NSEKE:KCB","NSEKE:EABL","NSEKE:SCBK","NSEKE:BAT"
   ];
   const cryptoTickers = [
     "BINANCE:BTCUSDT","BINANCE:ETHUSDT","BINANCE:SOLUSDT","BINANCE:XRPUSDT",
@@ -532,9 +609,13 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
     "Recommend.All", "Recommend.MA", "Recommend.Other", "RSI",
     "MACD.macd", "MACD.signal", "EMA20", "EMA50", "EMA200", "ATR", "ADX"
   ];
+  const stockColumns = [
+    ...tvColumns,
+    "volume", "market_cap_basic", "price_earnings_ttm", "dividends_yield_current", "price_52_week_high", "price_52_week_low"
+  ];
 
   try {
-    const [forexRes, cfdRes, americaRes, cryptoRes, futuresRes, bondRes] = await Promise.all([
+    const [forexRes, cfdRes, americaRes, kenyaRes, cryptoRes, futuresRes, bondRes] = await Promise.all([
       fetch("https://scanner.tradingview.com/forex/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -548,7 +629,12 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
       fetch("https://scanner.tradingview.com/america/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: { tickers: americaTickers }, columns: tvColumns }),
+        body: JSON.stringify({ symbols: { tickers: americaTickers }, columns: stockColumns }),
+      }).then((r) => (r.ok ? r.json() : { data: [] })).catch(() => ({ data: [] })),
+      fetch("https://scanner.tradingview.com/kenya/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbols: { tickers: kenyaTickers }, columns: stockColumns }),
       }).then((r) => (r.ok ? r.json() : { data: [] })).catch(() => ({ data: [] })),
       fetch("https://scanner.tradingview.com/crypto/scan", {
         method: "POST",
@@ -576,7 +662,8 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
         if (!item?.s || !Array.isArray(item.d)) continue;
         const rawSym = String(item.s);
         const existing = updated[rawSym];
-        const hasFreshWsTick = existing && tvWsLastTickBySymbol[rawSym] && (Date.now() - tvWsLastTickBySymbol[rawSym] < 15000);
+        const isLiveSym = isServerMarketOpen(rawSym.split(':')[1] || rawSym);
+        const hasFreshWsTick = isLiveSym && existing && tvWsLastTickBySymbol[rawSym] && (Date.now() - tvWsLastTickBySymbol[rawSym] < 15000);
 
         const q: TradingViewQuote = {
           symbol: rawSym,
@@ -598,6 +685,12 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
           ema200: typeof item.d[14] === 'number' ? Number(item.d[14]) : existing?.ema200,
           atr: typeof item.d[15] === 'number' ? Number(item.d[15]) : existing?.atr,
           adx: typeof item.d[16] === 'number' ? Math.round(Number(item.d[16]) * 10) / 10 : existing?.adx,
+          volume: typeof item.d[17] === 'number' ? Number(item.d[17]) : existing?.volume,
+          marketCap: typeof item.d[18] === 'number' ? Number(item.d[18]) : existing?.marketCap,
+          peRatio: typeof item.d[19] === 'number' ? Math.round(Number(item.d[19]) * 10) / 10 : existing?.peRatio,
+          dividendYield: typeof item.d[20] === 'number' ? Math.round(Number(item.d[20]) * 100) / 100 : existing?.dividendYield,
+          high52w: typeof item.d[21] === 'number' ? Number(item.d[21]) : existing?.high52w,
+          low52w: typeof item.d[22] === 'number' ? Number(item.d[22]) : existing?.low52w,
         };
         applyTvQuoteAliases(updated, rawSym, q);
       }
@@ -606,6 +699,7 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
     processData(forexRes.data);
     processData(cfdRes.data);
     processData(americaRes.data);
+    processData(kenyaRes.data);
     processData(cryptoRes.data);
     processData(futuresRes.data);
     processData(bondRes.data);
@@ -634,12 +728,13 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
         const goldSpot = paxgRes?.price ? parseFloat(paxgRes.price) : 3878.46;
 
         const populateQuote = (clean: string, price: number, atr: number, rsi: number = 52.4) => {
+          const isSynth = isServer24x7Symbol(clean);
           const spread = price * 0.0015;
           const q: TradingViewQuote = {
             symbol: clean,
             price: Number(price.toFixed(clean.includes('JPY') ? 3 : clean.includes('XAU') || clean.includes('NAS') || clean.includes('US30') ? 2 : 5)),
-            changePercent: Number(((Math.random() * 0.8) - 0.35).toFixed(2)),
-            changeValue: Number((price * 0.002).toFixed(4)),
+            changePercent: isSynth ? Number(((Math.random() * 0.8) - 0.35).toFixed(2)) : 0,
+            changeValue: isSynth ? Number((price * 0.002).toFixed(4)) : 0,
             high: Number((price + spread).toFixed(clean.includes('JPY') ? 3 : clean.includes('XAU') || clean.includes('NAS') || clean.includes('US30') ? 2 : 5)),
             low: Number((price - spread).toFixed(clean.includes('JPY') ? 3 : clean.includes('XAU') || clean.includes('NAS') || clean.includes('US30') ? 2 : 5)),
             open: Number((price - (spread * 0.4)).toFixed(clean.includes('JPY') ? 3 : clean.includes('XAU') || clean.includes('NAS') || clean.includes('US30') ? 2 : 5)),
@@ -1010,6 +1105,9 @@ app.get('/api/ea/status', async (_req, res) => {
   try {
     const liveQuotes = await fetchLiveTradingViewQuotes();
     botState.activePositions = botState.activePositions.map((pos) => {
+      if (!isServerMarketOpen(pos.symbol)) {
+        return pos;
+      }
       const clean = pos.symbol.replace('/', '').replace('_', '').toUpperCase();
       const q = liveQuotes[clean] || liveQuotes[pos.symbol] || liveQuotes[`OANDA:${clean}`] || liveQuotes[`FX:${clean}`];
       if (q && q.price > 0) {
@@ -1122,6 +1220,20 @@ app.get('/api/ea/signal', async (req, res) => {
   const symbol = String(req.query.symbol || 'XAUUSD').toUpperCase();
   const tf = String(req.query.tf || 'M5').toUpperCase();
   const magic = req.query.magic ? parseInt(String(req.query.magic), 10) : 884422;
+
+  // Check if the requested instrument's exchange is currently closed (Forex 24/5, NSE/US stocks vs 24/7 Crypto/Synthetics)
+  if (!isServerMarketOpen(symbol)) {
+    return res.json({
+      status: 'market_closed',
+      botRunning: botState.isRunning,
+      lastCommand: botState.lastCommand,
+      symbol,
+      timeframe: tf,
+      action: 'WAIT',
+      message: `${symbol} market is currently CLOSED (weekend / outside exchange hours). Execution paused per Forex rules until session opens. Switch to BTCUSD or Deriv Synthetics (R_75) for 24/7 trading.`,
+      serverTimeUtc: new Date().toISOString(),
+    });
+  }
 
   // Check if user has commanded STOP or CLOSE_ALL from the app
   if (!botState.isRunning) {
@@ -1388,13 +1500,67 @@ app.post('/api/ea/ai-scan-and-open', async (req, res) => {
       }
     ];
 
-    // Sort opportunities by AI score descending
-    const sortedOpportunities = candidateAssets.sort((a, b) => b.score - a.score);
-    const bestOpp = sortedOpportunities[0]; // Top #1 A+ Grade Setup
+    // Filter to currently open markets; on weekends include 24/7 Crypto & Deriv Synthetics
+    const btcQ = liveQuotes['BTCUSD'] || liveQuotes['BINANCE:BTCUSDT'];
+    const btcP = btcQ?.price || 68208.49;
+    const v75Q = liveQuotes['R_75'];
+    const v75P = v75Q?.price || 428950.40;
+    const weekend24x7Assets = [
+      {
+        symbol: 'BTCUSD',
+        name: 'Bitcoin / US Dollar (24/7 Spot Crypto)',
+        basePrice: btcP,
+        timeframe: 'M5',
+        type: 'BUY' as const,
+        score: 94,
+        grade: 'A+ 24/7 CRYPTO',
+        setup: '24/7 Liquidity Sweep & Order Block Continuation',
+        entryZone: `${(btcP - 180).toFixed(2)} - ${(btcP + 150).toFixed(2)}`,
+        sl: Number((btcP - 720).toFixed(2)),
+        tp1: Number((btcP + 1150).toFixed(2)),
+        tp2: Number((btcP + 2400).toFixed(2)),
+        riskReward: '1:2.6',
+        projectedGain: '+$115 - $240 (0.10L)',
+        confluences: {
+          smc: `24/7 spot Bitcoin demand absorption at ${btcP.toFixed(2)}.`,
+          indicators: `TradingView Rating: ${btcQ?.recommendAll ?? '+0.25'} | RSI: ${btcQ?.rsi ?? 54.2} | ADX: ${btcQ?.adx ?? 29.4}`,
+          macro: 'Weekend 24/7 Crypto liquidity active while TradFi Forex is closed.',
+          killzone: '24/7 Continuous Spot Crypto Session.'
+        },
+        aiThesis: `TradFi Forex/Stocks are closed or evaluated per session rules; BTCUSD streams 24/7 at $${btcP.toFixed(2)}.`
+      },
+      {
+        symbol: 'R_75',
+        name: 'Volatility 75 Index (Deriv 24/7)',
+        basePrice: v75P,
+        timeframe: 'M5',
+        type: 'BUY' as const,
+        score: 91,
+        grade: 'A+ 24/7 SYNTHETIC',
+        setup: '24/7 Synthetic Mean-Reversion & Breakout',
+        entryZone: `${(v75P - 650).toFixed(2)} - ${(v75P + 650).toFixed(2)}`,
+        sl: Number((v75P - 2800).toFixed(2)),
+        tp1: Number((v75P + 4500).toFixed(2)),
+        tp2: Number((v75P + 8800).toFixed(2)),
+        riskReward: '1:2.5',
+        projectedGain: '+$45 - $88 (0.01L)',
+        confluences: {
+          smc: `Algorithmic Volatility 75 synthetic sweep at ${v75P.toFixed(2)}.`,
+          indicators: `RSI: ${v75Q?.rsi ?? 68.5} | ATR: ${v75Q?.atr ?? 2800}`,
+          macro: 'Deriv synthetic engine operates 24/7 including weekends.',
+          killzone: '24/7 Continuous Synthetic Session.'
+        },
+        aiThesis: `Volatility 75 Index operates 24/7 regardless of weekend Forex closures.`
+      }
+    ];
+
+    const openCandidates = [...candidateAssets, ...weekend24x7Assets].filter((c) => isServerMarketOpen(c.symbol));
+    const sortedOpportunities = openCandidates.sort((a, b) => b.score - a.score);
+    const bestOpp = sortedOpportunities[0]; // Top #1 A+ Grade Setup in an open market
 
     let openedPosition = null;
 
-    if (autoOpen && bestOpp && bestOpp.score >= minScore) {
+    if (autoOpen && bestOpp && bestOpp.score >= minScore && isServerMarketOpen(bestOpp.symbol)) {
       const lot = typeof lots === 'number' && lots > 0
         ? Math.round(lots * 100) / 100
         : (typeof lotSize === 'number' && lotSize > 0 ? Math.round(lotSize * 100) / 100 : 0.10);
@@ -1445,6 +1611,12 @@ app.post('/api/ea/open-trade', async (req, res) => {
   }
 
   const cleanSym = String(symbol).replace('/', '').toUpperCase();
+  if (!isServerMarketOpen(cleanSym)) {
+    return res.status(400).json({
+      error: `${cleanSym} market is currently CLOSED (weekend / outside exchange hours). Per Forex & exchange rules, trade execution is halted until market open. Trade 24/7 Crypto (BTCUSD, ETHUSD) or Deriv Synthetics (R_75, BOOM1000) instead.`,
+      marketClosed: true,
+    });
+  }
 
   const chosenLot = typeof lots === 'number' && lots > 0
     ? (lots < 0.01 ? Math.round(lots * 1000) / 1000 : Math.round(lots * 100) / 100)
@@ -2551,6 +2723,129 @@ Provide a crisp, actionable, financial analysis with real numbers, valuation con
     return res.json({
       answer: 'Market conditions suggest maintaining balanced portfolio diversification across growth and dividend assets.'
     });
+  }
+});
+
+// Endpoint 2.4: Real Historical OHLCV Candles via Yahoo Finance for US Equities, Forex, Metals, Indices & Crypto
+app.get('/api/stocks/history', async (req, res) => {
+  try {
+    const rawTicker = String(req.query.ticker || '').toUpperCase().trim();
+    const tf = String(req.query.timeframe || '1D').toUpperCase();
+    if (!rawTicker) {
+      return res.status(400).json({ success: false, error: 'Ticker is required' });
+    }
+
+    const clean = rawTicker.replace(/\s+/g, '');
+    const yahooMap: Record<string, string> = {
+      AAPL: 'AAPL',
+      NVDA: 'NVDA',
+      MSFT: 'MSFT',
+      TSLA: 'TSLA',
+      AMZN: 'AMZN',
+      GOOGL: 'GOOGL',
+      META: 'META',
+      SPY: 'SPY',
+      QQQ: 'QQQ',
+      'XAU/USD': 'GC=F',
+      XAUUSD: 'GC=F',
+      'XAG/USD': 'SI=F',
+      XAGUSD: 'SI=F',
+      'WTI/USD': 'CL=F',
+      BRENT: 'BZ=F',
+      US500: '^GSPC',
+      NAS100: '^NDX',
+      US30: '^DJI',
+      GER40: '^GDAXI',
+      UK100: '^FTSE',
+      JPN225: '^N225',
+      HK50: '^HSI',
+      DXY: 'DX-Y.NYB',
+      BTCUSD: 'BTC-USD',
+      'BTC/USD': 'BTC-USD',
+      ETHUSD: 'ETH-USD',
+      'ETH/USD': 'ETH-USD',
+      SOLUSD: 'SOL-USD',
+      'SOL/USD': 'SOL-USD',
+      'EUR/USD': 'EURUSD=X',
+      'GBP/USD': 'GBPUSD=X',
+      'USD/JPY': 'USDJPY=X',
+      'USD/KES': 'USDKES=X',
+    };
+
+    const yahooSym = yahooMap[clean] || (clean.includes('/') ? `${clean.replace('/', '')}=X` : '');
+    if (!yahooSym) {
+      return res.json({ success: false, candles: [], reason: 'no_yahoo_symbol' });
+    }
+
+    let range = '3mo';
+    let interval = '1d';
+    if (tf === '1M' && req.query.timeframe === '1m') { range = '1d'; interval = '1m'; }
+    else if (tf === '3M' && req.query.timeframe === '3m') { range = '5d'; interval = '5m'; }
+    else if (tf === '5M') { range = '5d'; interval = '5m'; }
+    else if (tf === '15M') { range = '5d'; interval = '15m'; }
+    else if (tf === '30M' || tf === '45M') { range = '1mo'; interval = '30m'; }
+    else if (tf === '1H' || tf === '2H' || tf === '4H') { range = '3mo'; interval = '1h'; }
+    else if (tf === '1D') { range = '6mo'; interval = '1d'; }
+    else if (tf === '1W') { range = '2y'; interval = '1wk'; }
+    else if (tf === '1M') { range = '5y'; interval = '1mo'; }
+    else if (tf === '6M') { range = '6mo'; interval = '1d'; }
+    else if (tf === '1Y') { range = '1y'; interval = '1d'; }
+    else if (tf === 'ALL') { range = '5y'; interval = '1wk'; }
+
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}?range=${range}&interval=${interval}`;
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!r.ok) {
+      return res.json({ success: false, candles: [] });
+    }
+    const data: any = await r.json();
+    const result = data?.chart?.result?.[0];
+    const timestamps: number[] = result?.timestamp || [];
+    const quote = result?.indicators?.quote?.[0] || {};
+    const opens: number[] = quote.open || [];
+    const highs: number[] = quote.high || [];
+    const lows: number[] = quote.low || [];
+    const closes: number[] = quote.close || [];
+    const volumes: number[] = quote.volume || [];
+
+    const candles = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      const o = opens[i];
+      const h = highs[i];
+      const l = lows[i];
+      const c = closes[i];
+      if (typeof o !== 'number' || typeof h !== 'number' || typeof l !== 'number' || typeof c !== 'number') continue;
+      if (o <= 0 || c <= 0) continue;
+      const t = timestamps[i];
+      const d = new Date(t * 1000);
+      const isIntraday = ['1m', '5m', '15m', '30m', '1h'].includes(interval);
+      const timeLabel = isIntraday
+        ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+        : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      const fullDate = isIntraday
+        ? `${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} ${timeLabel}`
+        : d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+
+      candles.push({
+        time: t,
+        timeLabel,
+        fullDate,
+        open: Number(o.toFixed(o < 10 ? 4 : 2)),
+        high: Number(h.toFixed(h < 10 ? 4 : 2)),
+        low: Number(l.toFixed(l < 10 ? 4 : 2)),
+        close: Number(c.toFixed(c < 10 ? 4 : 2)),
+        volume: Math.round(typeof volumes[i] === 'number' ? volumes[i] : 0),
+      });
+    }
+
+    return res.json({
+      success: candles.length > 0,
+      ticker: rawTicker,
+      yahooSymbol: yahooSym,
+      interval,
+      candles,
+    });
+  } catch {
+    return res.json({ success: false, candles: [] });
   }
 });
 

@@ -20,6 +20,12 @@ export interface LiveTvQuote {
   ema200?: number;
   atr?: number;
   adx?: number;
+  volume?: number;
+  marketCap?: number;
+  peRatio?: number;
+  dividendYield?: number;
+  high52w?: number;
+  low52w?: number;
 }
 
 /**
@@ -179,6 +185,17 @@ export const TV_BENCHMARK_PRICES: Record<string, number> = {
   MSFT: 521.08,
   TSLA: 387.97,
   SPY: 749.82,
+  AMZN: 210.50,
+  GOOGL: 185.20,
+  META: 615.40,
+
+  // Nairobi Securities Exchange (NSEKE) Equities
+  SCOM: 35.0,
+  EQTY: 100.0,
+  KCB: 89.0,
+  EABL: 273.0,
+  SCBK: 310.0,
+  BAT: 550.0,
 };
 
 let sharedQuotesCache: Record<string, LiveTvQuote> = {};
@@ -314,6 +331,16 @@ export function lookupTradingViewQuote(
     DOGEUSD: ['BINANCE:DOGEUSDT', 'DOGE/USD'],
     ADAUSD: ['BINANCE:ADAUSDT', 'ADA/USD'],
     BNBUSD: ['BINANCE:BNBUSDT', 'BNB/USD'],
+    SCOM: ['NSEKE:SCOM', 'SCOM'],
+    EQTY: ['NSEKE:EQTY', 'EQTY'],
+    KCB: ['NSEKE:KCB', 'KCB'],
+    EABL: ['NSEKE:EABL', 'EABL'],
+    SCBK: ['NSEKE:SCBK', 'SCBK'],
+    BAT: ['NSEKE:BAT', 'BAT'],
+    SPY: ['AMEX:SPY', 'SPY'],
+    AMZN: ['NASDAQ:AMZN', 'AMZN'],
+    GOOGL: ['NASDAQ:GOOGL', 'GOOGL'],
+    META: ['NASDAQ:META', 'META'],
   };
 
   const candidates = [
@@ -321,7 +348,10 @@ export function lookupTradingViewQuote(
     `OANDA:${clean}`,
     `FX:${clean}`,
     `FX_IDC:${clean}`,
+    `NSEKE:${clean}`,
     `NASDAQ:${clean}`,
+    `AMEX:${clean}`,
+    `NYSE:${clean}`,
     `SP:${clean}`,
     `DJ:${clean}`,
     `TVC:${clean}`,

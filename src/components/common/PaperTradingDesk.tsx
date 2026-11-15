@@ -25,6 +25,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
+import { getAssetMarketSession } from '../../utils/marketHours.ts';
 
 export interface Position {
   id: string;
@@ -200,10 +201,14 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
   const liveAsk = Number((currentPrice + spread / 2).toFixed(digits));
   const liveBid = Number((currentPrice - spread / 2).toFixed(digits));
 
-  // Update open positions with current live price and MT5 contract multiplier
+  const assetSession = getAssetMarketSession(ticker, market);
+
+  // Update open positions matching current active ticker when its market is open
   useEffect(() => {
+    if (!assetSession.isOpen) return;
     setPositions((prevPositions) =>
       prevPositions.map((pos) => {
+        if (pos.ticker !== ticker) return pos;
         const isPosGold = pos.ticker.includes('XAU');
         const isPosForex = pos.market === 'FOREX' || pos.market === 'METALS';
         // Standard gold contract: 100 troy oz per lot; standard forex: 100,000 units
@@ -221,10 +226,13 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
         };
       })
     );
-  }, [currentPrice, liveAsk, liveBid, ticker]);
+  }, [currentPrice, liveAsk, liveBid, ticker, assetSession.isOpen]);
 
   // Handle open real-style MT5 trade
   const handleExecuteOrder = (dir: 'LONG' | 'SHORT') => {
+    if (!getAssetMarketSession(ticker, market).isOpen) {
+      return;
+    }
     const sl = parseFloat(customSl) || (defaultSl ? parseFloat(defaultSl.replace(/[^0-9.]/g, '')) : undefined);
     const tp = parseFloat(customTp) || (defaultTp ? parseFloat(defaultTp.replace(/[^0-9.]/g, '')) : undefined);
 
@@ -558,11 +566,28 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
             </div>
           </div>
 
+          {!assetSession.isOpen && (
+            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-2 text-xs text-amber-200">
+              <span>
+                <strong>Market Closed ({assetSession.exchangeName}):</strong> New market orders for{' '}
+                <strong>{ticker}</strong> are disabled until session reopens ({assetSession.nextSessionText}).
+              </span>
+              <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold shrink-0">
+                CLOSED
+              </span>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* 1-Click BUY Button (Executes at live Ask) */}
             <button
               onClick={() => handleExecuteOrder('LONG')}
-              className="p-3.5 rounded-xl bg-gradient-to-br from-emerald-600/30 to-emerald-950/60 border border-emerald-500/50 hover:border-emerald-400 text-left transition-all group cursor-pointer hover:shadow-lg hover:shadow-emerald-500/10"
+              disabled={!assetSession.isOpen}
+              className={`p-3.5 rounded-xl bg-gradient-to-br from-emerald-600/30 to-emerald-950/60 border border-emerald-500/50 text-left transition-all group ${
+                assetSession.isOpen
+                  ? 'hover:border-emerald-400 cursor-pointer hover:shadow-lg hover:shadow-emerald-500/10'
+                  : 'opacity-45 cursor-not-allowed'
+              }`}
             >
               <div className="flex items-center justify-between mb-1">
                 <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1">
@@ -570,7 +595,7 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
                   BUY / LONG (Ask)
                 </span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold">
-                  Instant MT5 Fill
+                  {assetSession.isOpen ? 'Instant MT5 Fill' : 'Market Closed'}
                 </span>
               </div>
               <div className="text-xl font-extrabold font-mono text-white group-hover:text-emerald-300 transition-colors">
@@ -585,7 +610,12 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
             {/* 1-Click SELL Button (Executes at live Bid) */}
             <button
               onClick={() => handleExecuteOrder('SHORT')}
-              className="p-3.5 rounded-xl bg-gradient-to-br from-rose-600/30 to-rose-950/60 border border-rose-500/50 hover:border-rose-400 text-left transition-all group cursor-pointer hover:shadow-lg hover:shadow-rose-500/10"
+              disabled={!assetSession.isOpen}
+              className={`p-3.5 rounded-xl bg-gradient-to-br from-rose-600/30 to-rose-950/60 border border-rose-500/50 text-left transition-all group ${
+                assetSession.isOpen
+                  ? 'hover:border-rose-400 cursor-pointer hover:shadow-lg hover:shadow-rose-500/10'
+                  : 'opacity-45 cursor-not-allowed'
+              }`}
             >
               <div className="flex items-center justify-between mb-1">
                 <span className="text-xs font-bold text-rose-400 uppercase tracking-wider flex items-center gap-1">
@@ -593,7 +623,7 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
                   SELL / SHORT (Bid)
                 </span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold">
-                  Instant MT5 Fill
+                  {assetSession.isOpen ? 'Instant MT5 Fill' : 'Market Closed'}
                 </span>
               </div>
               <div className="text-xl font-extrabold font-mono text-white group-hover:text-rose-300 transition-colors">

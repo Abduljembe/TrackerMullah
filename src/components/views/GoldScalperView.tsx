@@ -49,6 +49,7 @@ import {
 } from 'lucide-react';
 import { useFinance } from '../../context/FinanceContext.tsx';
 import { useTradingViewQuotes, lookupTradingViewQuote } from '../../utils/tradingViewSync.ts';
+import { getMarketSession } from '../../utils/marketHours.ts';
 
 // =========================================================================
 // TRADINGVIEW GOLD CHART ADVANCED EMBED
@@ -397,8 +398,15 @@ export const GoldScalperView: React.FC = () => {
   // -------------------------------------------------------------------------
   // 5. LIVE SIMULATION & EA EXECUTION ENGINE LOOP
   // -------------------------------------------------------------------------
+  const goldMarketSession = useMemo(() => getMarketSession('METALS'), [goldPrice]);
+
   useEffect(() => {
     const tickInterval = setInterval(() => {
+      const session = getMarketSession('METALS');
+      if (!session.isOpen) {
+        // Global Spot Gold (XAU/USD) follows 24/5 Sun 22:00 UTC - Fri 22:00 UTC schedule
+        return;
+      }
       // 1. Update micro-tick price of Gold
       const delta = (Math.random() - 0.48) * 0.40;
       setGoldPrice((prev) => {
@@ -1827,14 +1835,32 @@ void CloseAllGoldPositions()
         <div className="mt-4 pt-4 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2">
-              <span className={`w-2.5 h-2.5 rounded-full ${isBotRunning ? 'bg-emerald-400 animate-ping' : 'bg-slate-500'}`} />
+              <span
+                className={`w-2.5 h-2.5 rounded-full ${
+                  !goldMarketSession.isOpen
+                    ? 'bg-amber-400'
+                    : isBotRunning
+                    ? 'bg-emerald-400 animate-ping'
+                    : 'bg-slate-500'
+                }`}
+              />
               <span className="font-semibold text-white">
-                {isBotRunning ? 'RUNNING · ARMED ON M1 XAUUSD' : 'BOT STANDBY / PAUSED'}
+                {!goldMarketSession.isOpen
+                  ? 'XAUUSD MARKET CLOSED (WEEKEND) · PRICE FROZEN'
+                  : isBotRunning
+                  ? 'RUNNING · ARMED ON M1 XAUUSD'
+                  : 'BOT STANDBY / PAUSED'}
               </span>
             </div>
             <span className="text-slate-600">·</span>
             <span className="text-slate-400">
-              Next M1 Evaluation in <strong className="font-mono text-amber-300">{barTimerSeconds}s</strong>
+              {goldMarketSession.isOpen ? (
+                <>
+                  Next M1 Evaluation in <strong className="font-mono text-amber-300">{barTimerSeconds}s</strong>
+                </>
+              ) : (
+                <strong className="font-mono text-amber-300">{goldMarketSession.nextSessionText}</strong>
+              )}
             </span>
           </div>
 

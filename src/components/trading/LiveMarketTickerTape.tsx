@@ -9,6 +9,7 @@ import React, { useState, useEffect } from 'react';
 import { TrendingUp, TrendingDown, Zap, Radio, Globe } from 'lucide-react';
 import { DERIV_INSTRUMENTS } from '../../utils/derivInstruments.ts';
 import { lookupTradingViewQuote } from '../../utils/tradingViewSync.ts';
+import { getAssetMarketSession } from '../../utils/marketHours.ts';
 
 interface TickerItem {
   symbol: string;
@@ -123,6 +124,7 @@ export const LiveMarketTickerTape: React.FC<LiveMarketTickerTapeProps> = ({
         {tickers.map((item) => {
           const isUp = item.changePercent >= 0;
           const isSelected = activeSymbol === item.symbol;
+          const itemSession = getAssetMarketSession(item.symbol, item.category);
           return (
             <button
               key={item.symbol}
@@ -136,9 +138,11 @@ export const LiveMarketTickerTape: React.FC<LiveMarketTickerTapeProps> = ({
             >
               <div className="flex items-center gap-1">
                 <span className="font-bold text-white text-[11px]">{item.symbol}</span>
-                {item.is24_7 && (
+                {item.is24_7 ? (
                   <span className="text-[8px] font-mono text-teal-400 font-semibold">24/7</span>
-                )}
+                ) : !itemSession.isOpen ? (
+                  <span className="text-[8px] font-mono text-amber-400 font-semibold">CLOSED</span>
+                ) : null}
               </div>
 
               <span className="font-bold text-slate-200 tabular-nums text-[11px]">

@@ -125,11 +125,12 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   const [barCountdown, setBarCountdown] = useState<number>(45);
 
   useEffect(() => {
+    if (!isMarketLive || !isLiveStreaming) return;
     const timer = setInterval(() => {
       setBarCountdown((prev) => (prev <= 1 ? 60 : prev - 1));
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [isMarketLive, isLiveStreaming]);
 
   // Close menus on outside click
   useEffect(() => {
@@ -748,13 +749,20 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           <button
             onClick={onToggleLiveStreaming}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-mono text-[10px] font-bold transition-all cursor-pointer ${
-              isLiveStreaming
+              !isMarketLive
+                ? 'bg-amber-500/15 border border-amber-500/30 text-amber-300'
+                : isLiveStreaming
                 ? 'bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.25)]'
                 : 'bg-slate-800/80 border border-slate-700 text-slate-400 hover:text-white'
             }`}
-            title="Toggle Live Real-time Price Ticking Feed"
+            title={!isMarketLive ? marketSession?.nextSessionText || 'Market Closed' : 'Toggle Live Real-time Price Ticking Feed'}
           >
-            {isLiveStreaming ? (
+            {!isMarketLive ? (
+              <>
+                <Clock className="w-3 h-3 text-amber-400" />
+                <span>MARKET CLOSED</span>
+              </>
+            ) : isLiveStreaming ? (
               <>
                 <span className="relative flex h-2 w-2">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>

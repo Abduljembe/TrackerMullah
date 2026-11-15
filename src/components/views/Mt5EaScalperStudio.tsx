@@ -86,6 +86,7 @@ import { GamerTradingCockpit } from '../trading/GamerTradingCockpit.tsx';
 import { LiveMarketTickerTape } from '../trading/LiveMarketTickerTape.tsx';
 import { BotArsenalHub } from '../trading/BotArsenalHub.tsx';
 import { BotDefinition, getBotById } from '../../utils/eaCatalog.ts';
+import { getAssetMarketSession } from '../../utils/marketHours.ts';
 
 export interface ScannedOpportunity {
   symbol: string;
@@ -1639,15 +1640,19 @@ export const Mt5EaScalperStudio: React.FC = () => {
         tickDelta = (anchor - livePriceRef.current) * 0.10 + (Math.random() - 0.495) * 0.00018;
       }
 
-      const nextPrice = Number((livePriceRef.current + tickDelta).toFixed(digits));
-      if (nextPrice > 0 && nextPrice !== livePriceRef.current) {
-        livePriceRef.current = nextPrice;
-        setLivePrice(nextPrice);
-        setPriceFlash(tickDelta >= 0 ? 'up' : 'down');
-        setTimeout(() => setPriceFlash(null), 220);
+      const activeSession = getAssetMarketSession(activeSym);
+
+      if (activeSession.isOpen) {
+        const nextPrice = Number((livePriceRef.current + tickDelta).toFixed(digits));
+        if (nextPrice > 0 && nextPrice !== livePriceRef.current) {
+          livePriceRef.current = nextPrice;
+          setLivePrice(nextPrice);
+          setPriceFlash(tickDelta >= 0 ? 'up' : 'down');
+          setTimeout(() => setPriceFlash(null), 220);
+        }
       }
 
-      // 2. Real-Time Floating P&L & Auto TP/SL Execution for all active positions
+      // 2. Real-Time Floating P&L & Auto TP/SL Execution for all active positions (only for OPEN markets)
       setActivePositions((prevPositions) => {
         if (prevPositions.length === 0) return prevPositions;
 
@@ -1655,6 +1660,10 @@ export const Mt5EaScalperStudio: React.FC = () => {
         let triggeredClosedAny = false;
 
         for (const pos of prevPositions) {
+          if (!getAssetMarketSession(pos.symbol).isOpen) {
+            updatedPositions.push(pos);
+            continue;
+          }
           const sym = pos.symbol.replace('/', '').toUpperCase();
           const posIsActiveSym = sym === activeSym;
           const posIsGold = sym.includes('XAU') || sym.includes('GOLD');
@@ -1668,7 +1677,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
           // Determine live tick price for this position
           let curPrice = pos.currentPrice;
           if (posIsActiveSym) {
-            curPrice = nextPrice;
+            curPrice = livePriceRef.current;
           } else {
             // Slight tick variation for background open trades
             const posAnchor = anchorQuotesRef.current[sym]?.price || pos.currentPrice;
@@ -2205,12 +2214,26 @@ export const Mt5EaScalperStudio: React.FC = () => {
 
           {/* Active Pair Spot & Feed Status */}
           <div className="space-y-0.5">
-            <div className="flex items-center gap-2">
-              <span className="font-mono font-black text-sm text-white">{params.symbol}</span>
-              <span className="text-[10px] font-mono text-teal-400 bg-teal-500/10 px-2 py-0.5 rounded border border-teal-500/20">
-                {derivWsConnected ? 'DERIV 24/7 WS' : 'FEED ACTIVE'}
-              </span>
-            </div>
+            {(() => {
+              const symSession = getAssetMarketSession(params.symbol);
+              return (
+                <div className="flex items-center gap-2">
+                  <span className="font-mono font-black text-sm text-white">{params.symbol}</span>
+                  {symSession.isOpen ? (
+                    <span className="text-[10px] font-mono text-teal-400 bg-teal-500/10 px-2 py-0.5 rounded border border-teal-500/20">
+                      {derivWsConnected && symSession.is24x7 ? 'DERIV 24/7 WS' : symSession.is24x7 ? '24/7 LIVE' : 'MARKET LIVE'}
+                    </span>
+                  ) : (
+                    <span
+                      className="text-[10px] font-mono text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/30"
+                      title={symSession.nextSessionText}
+                    >
+                      MARKET CLOSED · FROZEN
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
             <div className="text-xs font-mono text-slate-400 flex items-center gap-1.5">
               <span className="text-teal-300 font-bold">${formatPrice(livePrice, params.symbol)}</span>
               <span>·</span>

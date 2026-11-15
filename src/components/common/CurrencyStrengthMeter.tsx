@@ -9,6 +9,7 @@ import {
   Globe,
   RotateCcw,
 } from 'lucide-react';
+import { getMarketSession } from '../../utils/marketHours.ts';
 
 interface CurrencyScore {
   code: string;
@@ -24,6 +25,7 @@ interface CurrencyStrengthMeterProps {
 }
 
 export const CurrencyStrengthMeter: React.FC<CurrencyStrengthMeterProps> = ({ onSelectPair }) => {
+  const fxSession = getMarketSession('FOREX');
   // Live dynamic currency scores across all global reserve currencies + Gold + KES
   const [currencies, setCurrencies] = useState<CurrencyScore[]>([
     { code: 'XAU', name: 'Gold Bullion', score: 9.4, change24h: 0.71, bias: 'BULLISH', status: 'Strong' },
@@ -38,9 +40,10 @@ export const CurrencyStrengthMeter: React.FC<CurrencyStrengthMeterProps> = ({ on
     { code: 'JPY', name: 'Japanese Yen', score: 2.4, change24h: -0.65, bias: 'BEARISH', status: 'Weak' },
   ]);
 
-  // Micro-fluctuations every 6s to simulate live liquidity flows
+  // Micro-fluctuations every 6s ONLY when the 24/5 FX market is open
   useEffect(() => {
     const timer = setInterval(() => {
+      if (!getMarketSession('FOREX').isOpen) return;
       setCurrencies((prev) =>
         prev.map((c) => {
           const delta = (Math.random() - 0.48) * 0.15;
@@ -86,8 +89,14 @@ export const CurrencyStrengthMeter: React.FC<CurrencyStrengthMeterProps> = ({ on
           <div>
             <h3 className="text-base font-bold text-white flex items-center gap-2">
               Currency Strength Meter & Forex Heatmap
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-bold">
-                LIVE INTERBANK
+              <span
+                className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold ${
+                  fxSession.isOpen
+                    ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                }`}
+              >
+                {fxSession.isOpen ? 'LIVE INTERBANK' : 'MARKET CLOSED · FROZEN'}
               </span>
             </h3>
             <p className="text-xs text-slate-400">

@@ -74,6 +74,7 @@ import {
 import { BOT_CATALOG, BotDefinition, BotCategory } from '../../utils/eaCatalog.ts';
 import { useFinance } from '../../context/FinanceContext.tsx';
 import { useTradingViewQuotes, resolveTradingViewPrice } from '../../utils/tradingViewSync.ts';
+import { getAssetMarketSession } from '../../utils/marketHours.ts';
 
 // =========================================================================
 // COMPREHENSIVE CURRENCIES & TRADING INSTRUMENTS CATALOG
@@ -516,6 +517,11 @@ export const BotStudioView: React.FC = () => {
   // =========================================================================
   useEffect(() => {
     const interval = setInterval(() => {
+      const session = getAssetMarketSession(activeAsset.symbol, activeAsset.category);
+      if (!session.isOpen) {
+        // Adhere strictly to Forex & TradFi exchange rules: freeze closed markets over weekend
+        return;
+      }
       const prevPrice = livePriceRef.current;
       const isUp = Math.random() > 0.48;
       const volatilityFactor = activeAsset.category === 'DERIV_24_7'
@@ -1305,13 +1311,28 @@ export const BotStudioView: React.FC = () => {
                   {activeAsset.symbol.slice(0, 3)}
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <h2 className="text-lg sm:text-xl font-bold text-white">
                       {selectedBot.name}
                     </h2>
                     <span className="text-xs font-mono font-bold text-teal-300 px-2 py-0.5 rounded bg-teal-500/20 border border-teal-500/30">
                       ON {activeAsset.symbol}
                     </span>
+                    {(() => {
+                      const assetSession = getAssetMarketSession(activeAsset.symbol, activeAsset.category);
+                      return assetSession.isOpen ? (
+                        <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                          {assetSession.statusBadge}
+                        </span>
+                      ) : (
+                        <span
+                          className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                          title={assetSession.nextSessionText}
+                        >
+                          MARKET CLOSED · {assetSession.nextSessionText}
+                        </span>
+                      );
+                    })()}
                   </div>
                   <p className="text-xs text-slate-300 mt-0.5">
                     Signal is strictly binary and <strong className="text-white">frozen dormant</strong> until TP or SL is triggered on <strong className="text-[#0df2c9]">{activeAsset.name}</strong>.

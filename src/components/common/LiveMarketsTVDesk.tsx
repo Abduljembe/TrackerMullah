@@ -32,6 +32,7 @@ import {
   Shrink,
 } from 'lucide-react';
 import { useTradingViewQuotes, lookupTradingViewQuote } from '../../utils/tradingViewSync.ts';
+import { getAssetMarketSession } from '../../utils/marketHours.ts';
 
 interface TVChannel {
   id: string;
@@ -207,12 +208,12 @@ const LIVE_TICKERS: TickerItem[] = [
   { symbol: 'NSE20', name: 'Nairobi 20 Share', price: '1,745.20', change: '+0.65%', isPositive: true, category: 'INDICES' },
 
   // --- EQUITIES ---
-  { symbol: 'SCOM', name: 'Safaricom PLC (NSE)', price: '17.65', change: '+3.82%', isPositive: true, category: 'STOCKS' },
-  { symbol: 'EQTY', name: 'Equity Group (NSE)', price: '44.80', change: '+2.75%', isPositive: true, category: 'STOCKS' },
-  { symbol: 'KCB', name: 'KCB Group (NSE)', price: '34.25', change: '+3.16%', isPositive: true, category: 'STOCKS' },
-  { symbol: 'EABL', name: 'E.A Breweries (NSE)', price: '142.50', change: '+1.42%', isPositive: true, category: 'STOCKS' },
-  { symbol: 'AAPL', name: 'Apple Inc.', price: '$357.95', change: '+1.25%', isPositive: true, category: 'STOCKS' },
-  { symbol: 'NVDA', name: 'Nvidia Corp', price: '$160.43', change: '+3.42%', isPositive: true, category: 'STOCKS' },
+  { symbol: 'SCOM', name: 'Safaricom PLC (NSE)', price: '35.00', change: '+0.00%', isPositive: true, category: 'STOCKS' },
+  { symbol: 'EQTY', name: 'Equity Group (NSE)', price: '100.00', change: '+0.00%', isPositive: true, category: 'STOCKS' },
+  { symbol: 'KCB', name: 'KCB Group (NSE)', price: '89.00', change: '+0.00%', isPositive: true, category: 'STOCKS' },
+  { symbol: 'EABL', name: 'E.A Breweries (NSE)', price: '273.00', change: '+0.00%', isPositive: true, category: 'STOCKS' },
+  { symbol: 'AAPL', name: 'Apple Inc.', price: '$356.27', change: '+0.00%', isPositive: true, category: 'STOCKS' },
+  { symbol: 'NVDA', name: 'Nvidia Corp', price: '$162.85', change: '+0.00%', isPositive: true, category: 'STOCKS' },
 ];
 
 interface LiveMarketsTVDeskProps {
@@ -757,27 +758,35 @@ export const LiveMarketsTVDesk: React.FC<LiveMarketsTVDeskProps> = ({ onSelectTi
 
         {/* Marquee Ticker Track */}
         <div className="flex items-center gap-3 overflow-x-auto py-1 scrollbar-thin font-mono text-xs select-none">
-          {filteredTickers.map((item, idx) => (
-            <button
-              key={idx}
-              onClick={() => onSelectTicker?.(item.symbol)}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#081224] hover:bg-[#0c1c38] border border-[#142644] hover:border-teal-500/50 shrink-0 cursor-pointer transition-all group"
-              title={`Click to inspect ${item.symbol} chart & signals`}
-            >
-              <span className="font-bold text-white group-hover:text-teal-300 transition-colors">
-                {item.symbol}
-              </span>
-              <span className="text-slate-300 font-semibold">{item.price}</span>
-              <span
-                className={`flex items-center gap-0.5 text-[11px] font-extrabold ${
-                  item.isPositive ? 'text-emerald-400' : 'text-rose-400'
-                }`}
+          {filteredTickers.map((item, idx) => {
+            const symSession = getAssetMarketSession(item.symbol, item.category);
+            return (
+              <button
+                key={idx}
+                onClick={() => onSelectTicker?.(item.symbol)}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#081224] hover:bg-[#0c1c38] border border-[#142644] hover:border-teal-500/50 shrink-0 cursor-pointer transition-all group"
+                title={`Click to inspect ${item.symbol} chart & signals`}
               >
-                {item.isPositive ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
-                <span>{item.change}</span>
-              </span>
-            </button>
-          ))}
+                <span className="font-bold text-white group-hover:text-teal-300 transition-colors">
+                  {item.symbol}
+                </span>
+                {!symSession.isOpen && (
+                  <span className="text-[8px] font-mono text-amber-400 bg-amber-500/10 px-1 rounded">
+                    CLOSED
+                  </span>
+                )}
+                <span className="text-slate-300 font-semibold">{item.price}</span>
+                <span
+                  className={`flex items-center gap-0.5 text-[11px] font-extrabold ${
+                    item.isPositive ? 'text-emerald-400' : 'text-rose-400'
+                  }`}
+                >
+                  {item.isPositive ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
+                  <span>{item.change}</span>
+                </span>
+              </button>
+            );
+          })}
         </div>
       </div>
 

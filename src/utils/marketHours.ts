@@ -238,3 +238,101 @@ export function getMarketSession(market: 'NSE' | 'US' | 'FOREX' | 'METALS' | 'IN
     tradingHours: 'Mon–Fri 09:30 – 16:00 ET',
   };
 }
+
+export function is24x7Symbol(symbol: string, categoryHint?: string): boolean {
+  const hint = (categoryHint || '').toUpperCase();
+  if (hint === 'CRYPTO' || hint === 'DERIV_24_7') return true;
+
+  const clean = symbol.toUpperCase().replace(/[/_\s-]/g, '');
+  if (
+    clean.startsWith('BTC') ||
+    clean.startsWith('ETH') ||
+    clean.startsWith('SOL') ||
+    clean.startsWith('XRP') ||
+    clean.startsWith('LTC') ||
+    clean.startsWith('DOGE') ||
+    clean.startsWith('ADA') ||
+    clean.startsWith('BNB') ||
+    clean.endsWith('USDT')
+  ) {
+    return true;
+  }
+
+  const upper = symbol.toUpperCase().trim();
+  if (
+    upper.startsWith('R_') ||
+    /^R(10|25|50|75|100)$/.test(clean) ||
+    clean.includes('1HZ') ||
+    clean.startsWith('VOL') ||
+    clean === 'V75' ||
+    clean.includes('BOOM') ||
+    clean.includes('CRASH') ||
+    clean === 'STP' ||
+    clean.startsWith('STEP') ||
+    /^RB(100|200)$/.test(clean) ||
+    /^JD(10|25|50|75|100)$/.test(clean)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+export interface AssetMarketSessionInfo extends MarketSessionInfo {
+  is24x7: boolean;
+}
+
+const NSE_TICKERS = new Set(['SCOM', 'EQTY', 'KCB', 'EABL', 'SCBK', 'BAT', 'NASI', 'NSE20']);
+const US_STOCK_TICKERS = new Set(['AAPL', 'NVDA', 'MSFT', 'TSLA', 'SPY', 'AMZN', 'GOOGL', 'META', 'QQQ']);
+const METAL_KEYS = ['XAU', 'XAG', 'XPT', 'XPD', 'GOLD', 'SILVER', 'PLATINUM', 'PALLADIUM', 'COPPER', 'WTI', 'BRENT', 'OIL', 'ALU'];
+const INDEX_KEYS = ['US500', 'SPX', 'NAS100', 'USTEC', 'USTECH', 'NDX', 'US30', 'WALLST', 'DJI', 'GER40', 'DAX', 'UK100', 'UKX', 'FTSE', 'FRA40', 'JPN225', 'JAP225', 'HK50', 'AUS200', 'EUSTX50', 'DXY', 'US10Y'];
+
+export function getAssetMarketSession(
+  symbol: string,
+  categoryHint?: string,
+  now = new Date()
+): AssetMarketSessionInfo {
+  if (is24x7Symbol(symbol, categoryHint)) {
+    const utcTimeStr = now.toLocaleTimeString('en-US', {
+      timeZone: 'UTC',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const isCrypto =
+      (categoryHint || '').toUpperCase() === 'CRYPTO' ||
+      /^(BTC|ETH|SOL|XRP|LTC|DOGE|ADA|BNB)/.test(symbol.toUpperCase());
+    return {
+      isOpen: true,
+      is24x7: true,
+      status: 'LIVE',
+      statusBadge: '24/7 LIVE',
+      exchangeName: isCrypto ? 'Global 24/7 Spot Crypto' : 'Deriv 24/7 Synthetic Engine',
+      marketCode: 'FOREX',
+      timezone: 'UTC',
+      exchangeTime: `${utcTimeStr} UTC`,
+      details: isCrypto ? '24/7 Continuous Crypto Trading' : '24/7 Continuous Synthetic Market',
+      nextSessionText: 'Open 24/7 including weekends',
+      tradingHours: '24/7 Non-Stop',
+    };
+  }
+
+  const clean = symbol.toUpperCase().replace(/[/_\s-]/g, '');
+  const hint = (categoryHint || '').toUpperCase();
+
+  if (hint === 'NSE' || NSE_TICKERS.has(clean)) {
+    return { ...getMarketSession('NSE', now), is24x7: false };
+  }
+  if (hint === 'US' || US_STOCK_TICKERS.has(clean)) {
+    return { ...getMarketSession('US', now), is24x7: false };
+  }
+  if (hint === 'METALS' || hint === 'COMMODITIES' || METAL_KEYS.some((k) => clean.includes(k))) {
+    return { ...getMarketSession('METALS', now), is24x7: false };
+  }
+  if (hint === 'INDICES' || INDEX_KEYS.some((k) => clean.includes(k))) {
+    return { ...getMarketSession('INDICES', now), is24x7: false };
+  }
+
+  return { ...getMarketSession('FOREX', now), is24x7: false };
+}
+

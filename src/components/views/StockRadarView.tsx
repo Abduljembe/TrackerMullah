@@ -75,8 +75,8 @@ import { AdrVolatilityExhaustionDesk } from '../common/AdrVolatilityExhaustionDe
 import { CotInstitutionalMatrix } from '../common/CotInstitutionalMatrix.tsx';
 import { MtfConfluenceMatrixDesk } from '../common/MtfConfluenceMatrixDesk.tsx';
 import { CamarillaPivotMatrix } from '../common/CamarillaPivotMatrix.tsx';
-import { generateCandles, computePeriodStats, Timeframe, Candle } from '../../utils/stockCandles.ts';
-import { getMarketSession, MarketSessionInfo } from '../../utils/marketHours.ts';
+import { generateCandles, enrichCandlesWithIndicators, computePeriodStats, Timeframe, Candle } from '../../utils/stockCandles.ts';
+import { getMarketSession, getAssetMarketSession, MarketSessionInfo } from '../../utils/marketHours.ts';
 import { lookupTradingViewQuote, resolveTradingViewPrice, useTradingViewQuotes } from '../../utils/tradingViewSync.ts';
 
 export interface TradingSignal {
@@ -1334,127 +1334,127 @@ const FEATURED_ASSETS: StockProfile[] = [
     name: 'Safaricom PLC',
     market: 'NSE',
     currency: 'KES',
-    currentPrice: 17.65,
-    changePercent: 3.82,
-    changeValue: 0.65,
-    peRatio: 11.4,
-    dividendYield: 7.2,
-    marketCap: 'KES 707 Billion',
+    currentPrice: 35.00,
+    changePercent: 0.0,
+    changeValue: 0.0,
+    peRatio: 15.8,
+    dividendYield: 3.6,
+    marketCap: 'KES 1.40 Trillion',
     category: 'Telecommunications & M-PESA',
     defaultSignal: {
       action: 'STRONG BUY',
       score: 87,
-      setup: 'Value Rebound & Digital Earnings',
+      setup: 'M-PESA Ecosystem & Ethiopia Expansion',
     },
-    historicalPoints: [13.2, 13.8, 14.5, 15.1, 14.8, 15.6, 16.2, 15.9, 16.7, 17.1, 17.0, 17.65],
+    historicalPoints: [17.65, 19.2, 21.5, 23.8, 25.0, 27.4, 29.1, 30.8, 32.0, 33.4, 34.2, 35.0],
   },
   {
     ticker: 'EQTY',
     name: 'Equity Group Holdings',
     market: 'NSE',
     currency: 'KES',
-    currentPrice: 44.80,
-    changePercent: 2.75,
-    changeValue: 1.20,
-    peRatio: 4.8,
-    dividendYield: 9.3,
-    marketCap: 'KES 169 Billion',
+    currentPrice: 100.00,
+    changePercent: 0.0,
+    changeValue: 0.0,
+    peRatio: 6.9,
+    dividendYield: 4.3,
+    marketCap: 'KES 377 Billion',
     category: 'Banking & Financial Services',
     defaultSignal: {
       action: 'BUY',
-      score: 83,
-      setup: 'High Yield Dividend Accumulation',
+      score: 84,
+      setup: 'Regional Pan-African Banking Growth',
     },
-    historicalPoints: [36.5, 37.8, 38.2, 39.0, 40.5, 41.2, 40.8, 42.1, 43.0, 42.5, 43.6, 44.8],
+    historicalPoints: [44.8, 50.0, 56.5, 62.0, 68.5, 74.0, 79.5, 84.0, 89.0, 93.5, 97.0, 100.0],
   },
   {
     ticker: 'KCB',
     name: 'KCB Group PLC',
     market: 'NSE',
     currency: 'KES',
-    currentPrice: 34.25,
-    changePercent: 3.16,
-    changeValue: 1.05,
-    peRatio: 3.9,
-    dividendYield: 8.8,
-    marketCap: 'KES 110 Billion',
+    currentPrice: 89.00,
+    changePercent: 0.0,
+    changeValue: 0.0,
+    peRatio: 5.1,
+    dividendYield: 4.5,
+    marketCap: 'KES 286 Billion',
     category: 'Banking & Financial Services',
     defaultSignal: {
       action: 'BUY',
       score: 82,
-      setup: 'Regional Expansion Recovery',
+      setup: 'Balance Sheet Expansion & Dividend Recovery',
     },
-    historicalPoints: [22.4, 23.5, 25.1, 27.0, 28.5, 29.8, 30.2, 31.5, 32.8, 32.0, 33.2, 34.25],
+    historicalPoints: [34.25, 39.0, 44.5, 49.0, 55.0, 61.5, 67.0, 72.5, 78.0, 82.0, 86.0, 89.0],
   },
   {
     ticker: 'EABL',
     name: 'East African Breweries Ltd',
     market: 'NSE',
     currency: 'KES',
-    currentPrice: 142.50,
-    changePercent: 1.42,
-    changeValue: 2.00,
-    peRatio: 13.2,
-    dividendYield: 5.8,
-    marketCap: 'KES 112 Billion',
+    currentPrice: 273.00,
+    changePercent: 0.0,
+    changeValue: 0.0,
+    peRatio: 16.4,
+    dividendYield: 3.1,
+    marketCap: 'KES 216 Billion',
     category: 'Consumer Goods & Beverages',
     defaultSignal: {
-      action: 'HOLD',
-      score: 72,
-      setup: 'Margin Compression Consolidation',
+      action: 'BUY',
+      score: 79,
+      setup: 'East Africa Beverage Volume Recovery',
     },
-    historicalPoints: [120, 124, 126, 130, 132, 138, 135, 140, 144, 139, 140.5, 142.5],
+    historicalPoints: [142.5, 155, 168, 182, 195, 208, 222, 235, 248, 258, 266, 273.0],
   },
   {
     ticker: 'SCBK',
     name: 'Standard Chartered Kenya',
     market: 'NSE',
     currency: 'KES',
-    currentPrice: 198.50,
-    changePercent: 0.85,
-    changeValue: 1.65,
-    peRatio: 6.8,
-    dividendYield: 10.5,
-    marketCap: 'KES 75 Billion',
+    currentPrice: 310.00,
+    changePercent: 0.0,
+    changeValue: 0.0,
+    peRatio: 7.4,
+    dividendYield: 9.8,
+    marketCap: 'KES 117 Billion',
     category: 'High Dividend Banking',
     defaultSignal: {
       action: 'STRONG BUY',
       score: 89,
-      setup: 'Double-Digit Dividend Yield Anchor',
+      setup: 'Institutional Dividend Yield Anchor',
     },
-    historicalPoints: [160, 164, 168, 172, 175, 180, 184, 188, 192, 190, 195, 198.5],
+    historicalPoints: [198.5, 210, 222, 234, 245, 258, 269, 278, 289, 296, 304, 310.0],
   },
   {
     ticker: 'BAT',
     name: 'BAT Kenya PLC',
     market: 'NSE',
     currency: 'KES',
-    currentPrice: 420.00,
-    changePercent: -0.47,
-    changeValue: -2.00,
-    peRatio: 7.2,
-    dividendYield: 11.2,
-    marketCap: 'KES 42 Billion',
+    currentPrice: 550.00,
+    changePercent: 0.0,
+    changeValue: 0.0,
+    peRatio: 9.6,
+    dividendYield: 9.1,
+    marketCap: 'KES 55 Billion',
     category: 'High Dividend Defensive',
     defaultSignal: {
       action: 'HOLD',
-      score: 74,
-      setup: 'Yield Support Range',
+      score: 75,
+      setup: 'Cash-Flow Dividend Support',
     },
-    historicalPoints: [410, 415, 408, 422, 425, 430, 428, 424, 426, 422, 425, 420],
+    historicalPoints: [420, 435, 448, 460, 475, 488, 502, 514, 526, 535, 542, 550.0],
   },
 
   // ==========================================
-  // --- US & GLOBAL EQUITIES (4) ---
+  // --- US & GLOBAL EQUITIES (8) ---
   // ==========================================
   {
     ticker: 'AAPL',
     name: 'Apple Inc.',
     market: 'US',
     currency: 'USD',
-    currentPrice: 357.95,
-    changePercent: 1.25,
-    changeValue: 4.42,
+    currentPrice: 356.27,
+    changePercent: 0.0,
+    changeValue: 0.0,
     peRatio: 33.8,
     dividendYield: 0.5,
     marketCap: '$3.5 Trillion',
@@ -1464,54 +1464,130 @@ const FEATURED_ASSETS: StockProfile[] = [
       score: 85,
       setup: 'Ecosystem & Apple Intelligence Cycle',
     },
-    historicalPoints: [305, 312, 319, 325, 332, 340, 345, 349, 352, 351, 354, 357.95],
+    historicalPoints: [305, 312, 319, 325, 332, 340, 345, 349, 352, 351, 354, 356.27],
   },
   {
     ticker: 'NVDA',
     name: 'Nvidia Corporation',
     market: 'US',
     currency: 'USD',
-    currentPrice: 160.43,
-    changePercent: 3.42,
-    changeValue: 5.30,
+    currentPrice: 162.85,
+    changePercent: 0.0,
+    changeValue: 0.0,
     peRatio: 46.5,
     dividendYield: 0.1,
-    marketCap: '$3.4 Trillion',
+    marketCap: '$3.9 Trillion',
     category: 'AI Accelerators & Chips',
     defaultSignal: {
       action: 'STRONG BUY',
       score: 93,
       setup: 'Data Center AI Infrastructure Wave',
     },
-    historicalPoints: [110, 118, 124, 130, 136, 142, 145, 149, 153, 151, 156, 160.43],
+    historicalPoints: [110, 118, 124, 130, 136, 142, 145, 149, 153, 155, 159, 162.85],
   },
   {
     ticker: 'MSFT',
     name: 'Microsoft Corp',
     market: 'US',
     currency: 'USD',
-    currentPrice: 521.08,
-    changePercent: 1.65,
-    changeValue: 8.45,
+    currentPrice: 523.88,
+    changePercent: 0.0,
+    changeValue: 0.0,
     peRatio: 34.2,
     dividendYield: 0.7,
-    marketCap: '$3.17 Trillion',
+    marketCap: '$3.8 Trillion',
     category: 'Cloud & Enterprise AI',
     defaultSignal: {
       action: 'BUY',
       score: 86,
       setup: 'Azure Enterprise Monetization',
     },
-    historicalPoints: [470, 482, 491, 500, 508, 512, 505, 514, 518, 512, 516, 521.08],
+    historicalPoints: [470, 482, 491, 500, 508, 512, 505, 514, 518, 516, 520, 523.88],
+  },
+  {
+    ticker: 'TSLA',
+    name: 'Tesla Inc.',
+    market: 'US',
+    currency: 'USD',
+    currentPrice: 387.97,
+    changePercent: 0.0,
+    changeValue: 0.0,
+    peRatio: 85.0,
+    dividendYield: 0.0,
+    marketCap: '$1.2 Trillion',
+    category: 'Autonomous EV & Energy',
+    defaultSignal: {
+      action: 'BUY',
+      score: 81,
+      setup: 'Autonomy & Grid Storage Expansion',
+    },
+    historicalPoints: [290, 305, 318, 330, 342, 355, 360, 368, 375, 378, 382, 387.97],
+  },
+  {
+    ticker: 'AMZN',
+    name: 'Amazon.com Inc.',
+    market: 'US',
+    currency: 'USD',
+    currentPrice: 210.50,
+    changePercent: 0.0,
+    changeValue: 0.0,
+    peRatio: 38.4,
+    dividendYield: 0.0,
+    marketCap: '$2.2 Trillion',
+    category: 'AWS Cloud & E-Commerce',
+    defaultSignal: {
+      action: 'BUY',
+      score: 86,
+      setup: 'AWS Margin & Retail Fulfillment Efficiency',
+    },
+    historicalPoints: [175, 180, 184, 188, 192, 196, 198, 201, 204, 206, 208, 210.50],
+  },
+  {
+    ticker: 'GOOGL',
+    name: 'Alphabet Inc.',
+    market: 'US',
+    currency: 'USD',
+    currentPrice: 185.20,
+    changePercent: 0.0,
+    changeValue: 0.0,
+    peRatio: 23.1,
+    dividendYield: 0.4,
+    marketCap: '$2.3 Trillion',
+    category: 'Search, Cloud & AI Models',
+    defaultSignal: {
+      action: 'BUY',
+      score: 85,
+      setup: 'Cloud Backlog & Ad Revenue Compounding',
+    },
+    historicalPoints: [158, 162, 165, 169, 171, 174, 176, 178, 180, 182, 184, 185.20],
+  },
+  {
+    ticker: 'META',
+    name: 'Meta Platforms Inc.',
+    market: 'US',
+    currency: 'USD',
+    currentPrice: 615.40,
+    changePercent: 0.0,
+    changeValue: 0.0,
+    peRatio: 27.2,
+    dividendYield: 0.3,
+    marketCap: '$1.5 Trillion',
+    category: 'Digital Advertising & AI',
+    defaultSignal: {
+      action: 'STRONG BUY',
+      score: 88,
+      setup: 'AI Ad Targeting & Family of Apps Scale',
+    },
+    historicalPoints: [520, 535, 548, 560, 570, 580, 588, 594, 602, 608, 611, 615.40],
   },
   {
     ticker: 'SPY',
     name: 'SPDR S&P 500 ETF Trust',
     market: 'US',
     currency: 'USD',
-    currentPrice: 749.82,
-    changePercent: 0.88,
-    changeValue: 6.55,
+    currentPrice: 754.37,
+    changePercent: 0.0,
+    changeValue: 0.0,
     peRatio: 26.5,
     dividendYield: 1.3,
     marketCap: '$600 Billion',
@@ -1521,7 +1597,7 @@ const FEATURED_ASSETS: StockProfile[] = [
       score: 84,
       setup: 'Macro Trend Continuation',
     },
-    historicalPoints: [650, 665, 680, 690, 705, 715, 720, 730, 738, 734, 742, 749.82],
+    historicalPoints: [650, 665, 680, 690, 705, 715, 720, 730, 738, 742, 748, 754.37],
   },
 ];
 
@@ -1577,8 +1653,8 @@ export const StockRadarView: React.FC = () => {
   const forexSession = useMemo(() => getMarketSession('FOREX', currentTime), [currentTime]);
 
   const activeStockSession = useMemo(() => {
-    return getMarketSession(selectedStock.market, currentTime);
-  }, [selectedStock.market, currentTime]);
+    return getAssetMarketSession(selectedStock.ticker, selectedStock.market, currentTime);
+  }, [selectedStock.ticker, selectedStock.market, currentTime]);
 
   // AI Analysis State
   const [isAiLoading, setIsAiLoading] = useState(false);
@@ -2020,8 +2096,9 @@ Summary: ${sig.summary}`;
     setTimeout(() => setCopiedSignal(false), 2500);
   };
 
-  // Initialize or reset base candles when ticker, timeframe, or base points change
+  // Initialize base candles and hydrate with real Yahoo Finance OHLCV bars when available
   useEffect(() => {
+    let active = true;
     const baseCandles = generateCandles(
       selectedStock.ticker,
       selectedStock.currentPrice,
@@ -2030,64 +2107,83 @@ Summary: ${sig.summary}`;
       selectedStock.historicalPoints
     );
     setLiveCandles(baseCandles);
+
+    fetch(
+      `/api/stocks/history?ticker=${encodeURIComponent(selectedStock.ticker)}&timeframe=${encodeURIComponent(timeframe)}`
+    )
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!active || !data?.success || !Array.isArray(data.candles) || data.candles.length < 5) return;
+        const enriched = enrichCandlesWithIndicators(data.candles);
+        if (enriched.length > 0) {
+          setLiveCandles(enriched);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+    };
   }, [selectedStock.ticker, selectedStock.currentPrice, selectedStock.changeValue, timeframe, selectedStock.historicalPoints]);
 
   const currentTvQuote = lookupTradingViewQuote(liveTvQuotes, selectedStock.ticker);
   const lastTvPriceRef = useRef<{ ticker: string; price: number } | null>(null);
 
-  // When real-time TradingView quote updates, flash price change, keep last candle synced, and check price alerts
+  // Sync last candle cleanly to TradingView closing/live price; only flash/alert live ticks when session is OPEN
   useEffect(() => {
-    if (!currentTvQuote || !(currentTvQuote.price > 0) || !isLiveStreaming) return;
+    if (!currentTvQuote || !(currentTvQuote.price > 0)) return;
     const tvPrice = currentTvQuote.price;
     const prev = lastTvPriceRef.current;
 
     if (prev && prev.ticker === selectedStock.ticker && prev.price !== tvPrice) {
-      setLivePriceFlash(tvPrice > prev.price ? 'up' : 'down');
-      const flashTimer = setTimeout(() => setLivePriceFlash(null), 550);
       lastTvPriceRef.current = { ticker: selectedStock.ticker, price: tvPrice };
+      if (activeStockSession.isOpen && isLiveStreaming) {
+        setLivePriceFlash(tvPrice > prev.price ? 'up' : 'down');
+        const flashTimer = setTimeout(() => setLivePriceFlash(null), 550);
 
-      setLiveCandles((prevCandles) => {
-        if (!prevCandles || prevCandles.length === 0) return prevCandles;
-        const copy = [...prevCandles];
-        const lastIdx = copy.length - 1;
-        const last = copy[lastIdx];
-        copy[lastIdx] = {
-          ...last,
-          close: tvPrice,
-          high: Math.max(last.high, tvPrice),
-          low: Math.min(last.low, tvPrice),
-        };
-        return copy;
-      });
-
-      // Check active price alerts for this ticker using exact live TradingView price
-      try {
-        const alertsJson = localStorage.getItem('njia_price_alerts');
-        if (alertsJson) {
-          const list: PriceAlert[] = JSON.parse(alertsJson);
-          let alertHit = false;
-          const updatedList = list.map((a) => {
-            if (a.isActive && !a.isTriggered && a.ticker === selectedStock.ticker) {
-              const hit =
-                (a.condition === 'ABOVE' && tvPrice >= a.targetPrice) ||
-                (a.condition === 'BELOW' && tvPrice <= a.targetPrice);
-              if (hit) {
-                playAlertChime();
-                setTriggeredAlertBanner(a);
-                setTimeout(() => setTriggeredAlertBanner(null), 8000);
-                alertHit = true;
-                return { ...a, isTriggered: true, triggeredAt: new Date().toLocaleTimeString() };
+        // Check active price alerts for this ticker using exact live TradingView price
+        try {
+          const alertsJson = localStorage.getItem('njia_price_alerts');
+          if (alertsJson) {
+            const list: PriceAlert[] = JSON.parse(alertsJson);
+            let alertHit = false;
+            const updatedList = list.map((a) => {
+              if (a.isActive && !a.isTriggered && a.ticker === selectedStock.ticker) {
+                const hit =
+                  (a.condition === 'ABOVE' && tvPrice >= a.targetPrice) ||
+                  (a.condition === 'BELOW' && tvPrice <= a.targetPrice);
+                if (hit) {
+                  playAlertChime();
+                  setTriggeredAlertBanner(a);
+                  setTimeout(() => setTriggeredAlertBanner(null), 8000);
+                  alertHit = true;
+                  return { ...a, isTriggered: true, triggeredAt: new Date().toLocaleTimeString() };
+                }
               }
+              return a;
+            });
+            if (alertHit) {
+              localStorage.setItem('njia_price_alerts', JSON.stringify(updatedList));
             }
-            return a;
-          });
-          if (alertHit) {
-            localStorage.setItem('njia_price_alerts', JSON.stringify(updatedList));
           }
-        }
-      } catch {}
+        } catch {}
 
-      return () => clearTimeout(flashTimer);
+        setLiveCandles((prevCandles) => {
+          if (!prevCandles || prevCandles.length === 0) return prevCandles;
+          const copy = [...prevCandles];
+          const lastIdx = copy.length - 1;
+          const last = copy[lastIdx];
+          copy[lastIdx] = {
+            ...last,
+            close: tvPrice,
+            high: Math.max(last.high, tvPrice),
+            low: Math.min(last.low, tvPrice),
+          };
+          return copy;
+        });
+
+        return () => clearTimeout(flashTimer);
+      }
     } else {
       lastTvPriceRef.current = { ticker: selectedStock.ticker, price: tvPrice };
       setLiveCandles((prevCandles) => {
@@ -2104,47 +2200,7 @@ Summary: ${sig.summary}`;
         return copy;
       });
     }
-  }, [currentTvQuote?.price, selectedStock.ticker, isLiveStreaming]);
-
-  // Simulated tick engine ONLY for local NSE assets that do not have a TradingView live feed
-  useEffect(() => {
-    if (!isLiveStreaming || (currentTvQuote && currentTvQuote.price > 0)) return;
-
-    const tickInterval = setInterval(() => {
-      setLiveCandles((prevCandles) => {
-        if (!prevCandles || prevCandles.length === 0) return prevCandles;
-
-        const lastIdx = prevCandles.length - 1;
-        const last = prevCandles[lastIdx];
-        const maxDelta = last.close * 0.0005;
-        const delta = (Math.random() - 0.49) * maxDelta;
-        const roundPrice = (p: number) => {
-          if (p >= 10) return Math.round(p * 100) / 100;
-          if (p >= 5) return Math.round(p * 1000) / 1000;
-          return Math.round(p * 10000) / 10000;
-        };
-
-        const newClose = roundPrice(Math.max(0.0001, last.close + delta));
-        const newHigh = roundPrice(Math.max(last.high, newClose));
-        const newLow = roundPrice(Math.min(last.low, newClose));
-
-        setLivePriceFlash(delta >= 0 ? 'up' : 'down');
-        setTimeout(() => setLivePriceFlash(null), 550);
-
-        const copy = [...prevCandles];
-        copy[lastIdx] = {
-          ...last,
-          close: newClose,
-          high: newHigh,
-          low: newLow,
-          volume: last.volume + Math.floor(Math.random() * 45 + 5),
-        };
-        return copy;
-      });
-    }, 1800);
-
-    return () => clearInterval(tickInterval);
-  }, [isLiveStreaming, currentTvQuote?.price, selectedStock.market, selectedStock.ticker]);
+  }, [currentTvQuote?.price, selectedStock.ticker, isLiveStreaming, activeStockSession.isOpen]);
 
   const activeCandles = liveCandles.length > 0 ? liveCandles : generateCandles(
     selectedStock.ticker,
@@ -2801,12 +2857,7 @@ Summary: ${sig.summary}`;
             const chipPrice = tvQ && tvQ.price > 0 ? tvQ.price : stock.currentPrice;
             const chipChangePct = tvQ ? tvQ.changePercent : stock.changePercent;
             const isUp = chipChangePct >= 0;
-            const isStockLive =
-              stock.market === 'FOREX' || stock.market === 'METALS' || stock.market === 'INDICES'
-                ? forexSession.isOpen
-                : stock.market === 'NSE'
-                ? nseSession.isOpen
-                : usSession.isOpen;
+            const isStockLive = getAssetMarketSession(stock.ticker, stock.market, currentTime).isOpen;
 
             const isSignalBullish =
               stock.defaultSignal.action === 'STRONG BUY' || stock.defaultSignal.action === 'BUY';
@@ -3404,12 +3455,18 @@ Summary: ${sig.summary}`;
                   </span>
                   <span
                     className={`text-[9px] font-mono font-bold px-1.5 py-0.2 rounded ${
-                      isLiveStreaming
+                      activeStockSession.isOpen && isLiveStreaming
                         ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse'
+                        : !activeStockSession.isOpen
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                         : 'bg-slate-800 text-slate-400'
                     }`}
                   >
-                    {isLiveStreaming ? 'LIVE TICK STREAM' : 'STATIC'}
+                    {activeStockSession.isOpen && isLiveStreaming
+                      ? 'LIVE TICK STREAM'
+                      : !activeStockSession.isOpen
+                      ? 'MARKET CLOSED · FROZEN'
+                      : 'STATIC'}
                   </span>
                 </div>
                 <div className="flex items-baseline gap-3 mt-1">
@@ -3507,14 +3564,15 @@ Summary: ${sig.summary}`;
               </div>
               <div className="p-2.5 rounded-xl bg-[#070b13] border border-[#142036]">
                 <div className="text-[10px] text-cyan-400 uppercase tracking-wider">
-                  {selectedStock.isForex ? 'Pip Spread' : 'Timeframe Vol'}
+                  {selectedStock.isForex ? 'Pip Spread' : currentTvQuote?.volume ? 'Session Vol' : 'Timeframe Vol'}
                 </div>
                 <div className="text-xs font-bold font-mono text-cyan-300 mt-0.5 truncate">
                   {selectedStock.isForex
                     ? selectedStock.pipSpread || '0.8 pips'
-                    : periodStats.totalVolume >= 1000000
-                    ? `${(periodStats.totalVolume / 1000000).toFixed(1)}M`
-                    : periodStats.totalVolume.toLocaleString()}
+                    : (() => {
+                        const vol = currentTvQuote?.volume && currentTvQuote.volume > 0 ? currentTvQuote.volume : periodStats.totalVolume;
+                        return vol >= 1000000 ? `${(vol / 1000000).toFixed(2)}M` : vol.toLocaleString();
+                      })()}
                 </div>
               </div>
               <div className="p-2.5 rounded-xl bg-[#070b13] border border-[#142036]">
@@ -3522,7 +3580,9 @@ Summary: ${sig.summary}`;
                   {selectedStock.isForex ? 'Daily ATR' : 'P/E Ratio'}
                 </div>
                 <div className="text-xs font-bold font-mono text-white mt-0.5">
-                  {selectedStock.isForex ? activeSignal.indicators.atr : `${selectedStock.peRatio}x`}
+                  {selectedStock.isForex
+                    ? activeSignal.indicators.atr
+                    : `${(currentTvQuote?.peRatio && currentTvQuote.peRatio > 0 ? currentTvQuote.peRatio : selectedStock.peRatio).toFixed(1)}x`}
                 </div>
               </div>
               <div className="p-2.5 rounded-xl bg-[#070b13] border border-[#142036]">
@@ -3530,13 +3590,24 @@ Summary: ${sig.summary}`;
                   {selectedStock.isForex ? 'Yield / Carry' : 'Div Yield'}
                 </div>
                 <div className="text-xs font-bold font-mono text-emerald-300 mt-0.5">
-                  {selectedStock.dividendYield}%
+                  {(typeof currentTvQuote?.dividendYield === 'number' ? currentTvQuote.dividendYield : selectedStock.dividendYield).toFixed(2)}%
                 </div>
               </div>
               <div className="p-2.5 rounded-xl bg-[#070b13] border border-[#142036]">
-                <div className="text-[10px] text-slate-400 uppercase tracking-wider">Market Liquidity</div>
+                <div className="text-[10px] text-slate-400 uppercase tracking-wider">
+                  {selectedStock.isForex ? 'Market Liquidity' : 'Market Cap'}
+                </div>
                 <div className="text-xs font-bold font-mono text-white mt-0.5 truncate">
-                  {selectedStock.marketCap}
+                  {(() => {
+                    const mc = currentTvQuote?.marketCap;
+                    if (!selectedStock.isForex && typeof mc === 'number' && mc > 0) {
+                      const prefix = selectedStock.currency === 'KES' ? 'KES ' : '$';
+                      if (mc >= 1e12) return `${prefix}${(mc / 1e12).toFixed(2)}T`;
+                      if (mc >= 1e9) return `${prefix}${(mc / 1e9).toFixed(1)}B`;
+                      return `${prefix}${(mc / 1e6).toFixed(0)}M`;
+                    }
+                    return selectedStock.marketCap;
+                  })()}
                 </div>
               </div>
             </div>
