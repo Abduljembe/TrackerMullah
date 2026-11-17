@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -78,6 +78,7 @@ import { CamarillaPivotMatrix } from '../common/CamarillaPivotMatrix.tsx';
 import { generateCandles, enrichCandlesWithIndicators, computePeriodStats, Timeframe, Candle } from '../../utils/stockCandles.ts';
 import { getMarketSession, getAssetMarketSession, MarketSessionInfo } from '../../utils/marketHours.ts';
 import { lookupTradingViewQuote, resolveTradingViewPrice, useTradingViewQuotes } from '../../utils/tradingViewSync.ts';
+import { computeTimeframeSignalLevels, getTimeframeProfile, resolveQuoteForTimeframe, sanitizeRiskRewardString, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
 
 export interface TradingSignal {
   action: 'STRONG BUY' | 'BUY' | 'NEUTRAL' | 'HOLD' | 'SELL' | 'STRONG SELL';
@@ -1727,10 +1728,47 @@ export const StockRadarView: React.FC = () => {
   const [forexViewMode, setForexViewMode] = useState<'grid' | 'table'>('grid');
   const [forexSentimentFilter, setForexSentimentFilter] = useState<'ALL' | 'BULLISH' | 'BEARISH'>('ALL');
 
+  // Live timeframe-aligned signal evaluator for any asset (replaces static hardcoded defaultSignal)
+  const getLiveAssetSignal = useCallback(
+    (asset: StockProfile, candlesOverride?: Candle[]) => {
+      const tvQ = lookupTradingViewQuote(liveTvQuotes, asset.ticker);
+      const spot = tvQ && tvQ.price > 0 ? tvQ.price : asset.currentPrice;
+      const computed = computeTimeframeSignalLevels({
+        symbol: asset.ticker.replace('/', ''),
+        spotPrice: spot,
+        timeframe: timeframe || '15m',
+        quote: tvQ,
+        candles: candlesOverride,
+        market: asset.market,
+      });
+      return {
+        action: computed.action,
+        direction: computed.direction,
+        score: computed.confidenceScore,
+        setup: computed.setupLabel,
+        computed,
+        spot,
+        tvQ,
+      };
+    },
+    [liveTvQuotes, timeframe]
+  );
+
   // Dedicated full roster of all 34 Forex pairs
   const allForexPairs = useMemo(() => {
     return FEATURED_ASSETS.filter((s) => s.market === 'FOREX');
   }, []);
+
+  const forexSentimentCounts = useMemo(() => {
+    let bullish = 0;
+    let bearish = 0;
+    for (const pair of allForexPairs) {
+      const sig = getLiveAssetSignal(pair);
+      if (sig.direction === 'BUY') bullish++;
+      else bearish++;
+    }
+    return { bullish, bearish };
+  }, [allForexPairs, getLiveAssetSignal]);
 
   const filteredForexPairs = useMemo(() => {
     return allForexPairs.filter((pair) => {
@@ -1752,9 +1790,10 @@ export const StockRadarView: React.FC = () => {
         if (!reg.includes(pair.ticker)) return false;
       }
 
-      // Sentiment filter
-      const isBull = pair.defaultSignal.action === 'STRONG BUY' || pair.defaultSignal.action === 'BUY';
-      const isBear = pair.defaultSignal.action === 'STRONG SELL' || pair.defaultSignal.action === 'SELL';
+      // Live TradingView-aligned sentiment filter
+      const liveSig = getLiveAssetSignal(pair);
+      const isBull = liveSig.direction === 'BUY';
+      const isBear = liveSig.direction === 'SELL';
       if (forexSentimentFilter === 'BULLISH' && !isBull) return false;
       if (forexSentimentFilter === 'BEARISH' && !isBear) return false;
 
@@ -1769,7 +1808,7 @@ export const StockRadarView: React.FC = () => {
       }
       return true;
     });
-  }, [allForexPairs, forexSubCategory, forexSentimentFilter, searchQuery]);
+  }, [allForexPairs, forexSubCategory, forexSentimentFilter, searchQuery, getLiveAssetSignal]);
 
   const handleExecuteSignalToPaper = (trade: {
     direction: 'LONG' | 'SHORT';
@@ -1818,6 +1857,8 @@ export const StockRadarView: React.FC = () => {
   const fetchStockAnalysis = async (stock: StockProfile, targetTf?: string) => {
     setIsAiLoading(true);
     const activeTf = targetTf || timeframe || '1H';
+    const tfProfile = getTimeframeProfile(activeTf);
+    const tvQuote = lookupTradingViewQuote(liveTvQuotes, stock.ticker);
     const liveSpotPrice = resolveTradingViewPrice(liveTvQuotes, stock.ticker, stock.currentPrice);
     try {
       const res = await fetch('/api/stocks/analyze', {
@@ -1829,7 +1870,7 @@ export const StockRadarView: React.FC = () => {
           currency: stock.currency,
           market: stock.market,
           currentPrice: liveSpotPrice,
-          timeframe: activeTf,
+          timeframe: tfProfile.label,
         }),
       });
 
@@ -1838,146 +1879,141 @@ export const StockRadarView: React.FC = () => {
       }
 
       const data = await res.json();
+      const liveComputed = computeTimeframeSignalLevels({
+        symbol: stock.ticker.replace('/', ''),
+        spotPrice: liveSpotPrice,
+        timeframe: tfProfile.label,
+        quote: tvQuote,
+        market: stock.market,
+      });
+      if (data?.signal) {
+        data.signal.timeframe = tfProfile.label;
+        data.signal.timeframeCategory = tfProfile.category;
+        data.signal.riskReward = sanitizeRiskRewardString(data.signal.riskReward);
+        const aiAct = (data.signal.action || '').toUpperCase();
+        const aiIsBuy = aiAct === 'STRONG BUY' || aiAct === 'BUY';
+        const aiIsSell = aiAct === 'STRONG SELL' || aiAct === 'SELL';
+        const liveIsBuy = liveComputed.direction === 'BUY';
+        if ((liveIsBuy && aiIsSell) || (!liveIsBuy && aiIsBuy) || (!aiIsBuy && !aiIsSell)) {
+          const dec = liveComputed.decimals;
+          const isFx = stock.market === 'FOREX' || stock.market === 'METALS' || stock.market === 'INDICES';
+          const curPrefix = !isFx ? `${stock.currency} ` : '';
+          const signStr = liveIsBuy ? '+' : '-';
+          const slSignStr = liveIsBuy ? '-' : '+';
+          data.signal.action = liveComputed.action;
+          data.signal.setupType = liveComputed.setupLabel;
+          data.signal.entryZone = `${curPrefix}${liveComputed.entryZone}`;
+          data.signal.takeProfit1 = `${curPrefix}${liveComputed.tp1.toFixed(dec)} (${signStr}${liveComputed.tp1UnitValue} ${liveComputed.unitLabel})`;
+          data.signal.takeProfit2 = `${curPrefix}${liveComputed.tp2.toFixed(dec)} (${signStr}${liveComputed.tp2UnitValue} ${liveComputed.unitLabel})`;
+          data.signal.stopLoss = `${curPrefix}${liveComputed.sl.toFixed(dec)} (${slSignStr}${liveComputed.slUnitValue} ${liveComputed.unitLabel})`;
+          data.signal.riskReward = liveComputed.riskReward;
+          data.signal.confidenceScore = liveComputed.confidenceScore;
+          data.recommendation = liveComputed.action === 'STRONG BUY' ? 'Strong Buy' : liveComputed.action === 'BUY' ? 'Buy' : 'Trim';
+        }
+      }
       setAiReport(data);
     } catch {
-      // Deterministic analytical profile with rich signal scaled to timeframe
+      // Deterministic analytical profile with rich signal strictly scaled to timeframe & max 1:5.0 R:R
       const isFx = stock.market === 'FOREX' || stock.market === 'METALS' || stock.market === 'INDICES';
       const isKES = stock.ticker.includes('KES');
       const isGold = stock.ticker.includes('XAU');
+      const tfCategory = tfProfile.category;
 
-      const isScalp = ['1m', '3m', '5m', '15m'].includes(activeTf.toLowerCase());
-      const isIntraday = ['30m', '45m', '1h', '2h'].includes(activeTf.toLowerCase());
-      const isSwing = ['4h', '1d'].includes(activeTf.toLowerCase());
-      const tfCategory = isScalp ? 'Scalp' : isIntraday ? 'Intraday' : isSwing ? 'Swing' : 'Position';
+      const computed = computeTimeframeSignalLevels({
+        symbol: stock.ticker.replace('/', ''),
+        spotPrice: liveSpotPrice,
+        timeframe: tfProfile.label,
+        quote: tvQuote,
+        market: stock.market,
+      });
 
-      let mult = 1.0;
-      if (isScalp) mult = 0.35;
-      else if (isIntraday) mult = 0.7;
-      else if (isSwing) mult = 1.6;
-      else mult = 3.0;
+      const dec = computed.decimals;
+      const isBuy = computed.direction === 'BUY';
+      const signStr = isBuy ? '+' : '-';
+      const slSignStr = isBuy ? '-' : '+';
+      const curPrefix = !isFx ? `${stock.currency} ` : '';
 
-      let entryStr = '';
+      const entryStr = `${curPrefix}${computed.entryZone}`;
       let tp1Str = '';
       let tp2Str = '';
       let slStr = '';
-      let obStr = '';
-      let fvgStr = '';
-      let bslTarget = '';
-      let atrStr = '';
 
       if (isFx) {
-        if (isGold) {
-          const effectiveGoldPrice = liveSpotPrice;
-          const slPts = Math.round(12.8 * mult * 10) / 10;
-          const tp1Pts = Math.round(12.9 * mult * 10) / 10;
-          const tp2Pts = Math.round(29.7 * mult * 10) / 10;
-          const entrySpan = Math.round(2.5 * mult * 10) / 10;
-
-          entryStr = `${(effectiveGoldPrice - entrySpan * 0.4).toFixed(2)} - ${(effectiveGoldPrice + entrySpan * 0.6).toFixed(2)}`;
-          tp1Str = `${(effectiveGoldPrice + tp1Pts).toFixed(2)} (+${tp1Pts} pts / +${Math.round(tp1Pts * 10)} pips)`;
-          tp2Str = `${(effectiveGoldPrice + tp2Pts).toFixed(2)} (+${tp2Pts} pts / +${Math.round(tp2Pts * 10)} pips)`;
-          slStr = `${(effectiveGoldPrice - slPts).toFixed(2)} (-${slPts} pts / -${Math.round(slPts * 10)} pips)`;
-          obStr = `${(effectiveGoldPrice - entrySpan * 1.5).toFixed(2)} - ${(effectiveGoldPrice - entrySpan * 0.3).toFixed(2)}`;
-          fvgStr = `${(effectiveGoldPrice - entrySpan * 0.2).toFixed(2)} - ${(effectiveGoldPrice + entrySpan * 0.8).toFixed(2)}`;
-          bslTarget = `Buy-Side Liquidity resting above ${(effectiveGoldPrice + tp1Pts * 1.05).toFixed(2)}`;
-          atrStr = `$${(14 * mult).toFixed(1)} pts (${activeTf})`;
-        } else if (isKES) {
-          const slPips = Math.round(0.50 * mult * 100) / 100;
-          const tp1Pips = Math.round(1.20 * mult * 100) / 100;
-          const tp2Pips = Math.round(2.50 * mult * 100) / 100;
-
-          entryStr = `${(liveSpotPrice - 0.15 * mult).toFixed(2)} - ${(liveSpotPrice + 0.15 * mult).toFixed(2)}`;
-          tp1Str = `${(liveSpotPrice + tp1Pips).toFixed(2)} (+${Math.round(tp1Pips * 100)} pips)`;
-          tp2Str = `${(liveSpotPrice + tp2Pips).toFixed(2)} (+${Math.round(tp2Pips * 100)} pips)`;
-          slStr = `${(liveSpotPrice - slPips).toFixed(2)} (-${Math.round(slPips * 100)} pips)`;
-          obStr = `${(liveSpotPrice - 0.30 * mult).toFixed(2)} - ${(liveSpotPrice - 0.10 * mult).toFixed(2)}`;
-          fvgStr = `${(liveSpotPrice - 0.05 * mult).toFixed(2)} - ${(liveSpotPrice + 0.20 * mult).toFixed(2)}`;
-          bslTarget = `Buy-Side Liquidity resting above ${(liveSpotPrice + tp1Pips).toFixed(2)}`;
-          atrStr = `${(0.45 * mult).toFixed(2)} KES (${activeTf})`;
-        } else {
-          const slPips = Math.round(20 * mult);
-          const tp1Pips = Math.round(45 * mult);
-          const tp2Pips = Math.round(90 * mult);
-          const pipVal = 0.0001;
-
-          entryStr = `${(liveSpotPrice - 4 * mult * pipVal).toFixed(4)} - ${(liveSpotPrice + 4 * mult * pipVal).toFixed(4)}`;
-          tp1Str = `${(liveSpotPrice + tp1Pips * pipVal).toFixed(4)} (+${tp1Pips} pips)`;
-          tp2Str = `${(liveSpotPrice + tp2Pips * pipVal).toFixed(4)} (+${tp2Pips} pips)`;
-          slStr = `${(liveSpotPrice - slPips * pipVal).toFixed(4)} (-${slPips} pips)`;
-          obStr = `${(liveSpotPrice - 12 * mult * pipVal).toFixed(4)} - ${(liveSpotPrice - 3 * mult * pipVal).toFixed(4)}`;
-          fvgStr = `${(liveSpotPrice - 2 * mult * pipVal).toFixed(4)} - ${(liveSpotPrice + 8 * mult * pipVal).toFixed(4)}`;
-          bslTarget = `Buy-Side Liquidity resting above ${(liveSpotPrice + (tp1Pips + 8) * pipVal).toFixed(4)}`;
-          atrStr = `${Math.round(35 * mult)} pips (${activeTf})`;
-        }
+        tp1Str = isGold
+          ? `${computed.tp1.toFixed(dec)} (${signStr}${computed.tp1UnitValue} pts / ${signStr}${Math.round(computed.tp1Distance * 10)} pips)`
+          : `${computed.tp1.toFixed(dec)} (${signStr}${computed.tp1UnitValue} ${computed.unitLabel})`;
+        tp2Str = isGold
+          ? `${computed.tp2.toFixed(dec)} (${signStr}${computed.tp2UnitValue} pts / ${signStr}${Math.round(computed.tp2Distance * 10)} pips)`
+          : `${computed.tp2.toFixed(dec)} (${signStr}${computed.tp2UnitValue} ${computed.unitLabel})`;
+        slStr = isGold
+          ? `${computed.sl.toFixed(dec)} (${slSignStr}${computed.slUnitValue} pts / ${slSignStr}${Math.round(computed.slDistance * 10)} pips)`
+          : `${computed.sl.toFixed(dec)} (${slSignStr}${computed.slUnitValue} ${computed.unitLabel})`;
       } else {
-        entryStr = `${stock.currency} ${(liveSpotPrice * 0.98).toFixed(2)} - ${(liveSpotPrice * 1.01).toFixed(2)}`;
-        tp1Str = `${stock.currency} ${(liveSpotPrice * 1.15).toFixed(2)} (+15%)`;
-        tp2Str = `${stock.currency} ${(liveSpotPrice * 1.28).toFixed(2)} (+28%)`;
-        slStr = `${stock.currency} ${(liveSpotPrice * 0.92).toFixed(2)} (-8%)`;
-        obStr = `Key Support Range`;
-        fvgStr = `Fair Value Area`;
-        bslTarget = `Resistance Highs`;
-        atrStr = `Moderate ATR (${activeTf})`;
+        const slPct = ((computed.slDistance / Math.max(liveSpotPrice, 0.01)) * 100).toFixed(1);
+        const tp1Pct = ((computed.tp1Distance / Math.max(liveSpotPrice, 0.01)) * 100).toFixed(1);
+        const tp2Pct = ((computed.tp2Distance / Math.max(liveSpotPrice, 0.01)) * 100).toFixed(1);
+        tp1Str = `${curPrefix}${computed.tp1.toFixed(2)} (${signStr}${tp1Pct}%)`;
+        tp2Str = `${curPrefix}${computed.tp2.toFixed(2)} (${signStr}${tp2Pct}%)`;
+        slStr = `${curPrefix}${computed.sl.toFixed(2)} (${slSignStr}${slPct}%)`;
       }
 
-      const confScore = isScalp ? 88 : isIntraday ? 85 : 82;
-      const setupName = isScalp
-        ? 'Liquidity Sweep & FVG Retest (Scalp)'
-        : isIntraday
-        ? 'Order Block Retest & Intraday Expansion'
-        : 'Macro Trend Continuation & Structural BOS';
+      const span = Math.max(computed.slDistance * 0.3, Math.pow(10, -dec) * 3);
+      const obStr = isBuy
+        ? `${curPrefix}${(liveSpotPrice - span * 1.8).toFixed(dec)} - ${curPrefix}${(liveSpotPrice - span * 0.4).toFixed(dec)}`
+        : `${curPrefix}${(liveSpotPrice + span * 0.4).toFixed(dec)} - ${curPrefix}${(liveSpotPrice + span * 1.8).toFixed(dec)}`;
+      const fvgStr = entryStr;
+      const bslTarget = `${isBuy ? 'Buy-Side' : 'Sell-Side'} Liquidity resting ${isBuy ? 'above' : 'below'} ${curPrefix}${computed.tp1.toFixed(dec)}`;
+      const atrStr = `${curPrefix}${(computed.slDistance * 1.15).toFixed(dec)} (${tfProfile.label})`;
 
       setAiReport({
         ticker: stock.ticker,
         companyName: stock.name,
         isForex: isFx,
-        recommendation: stock.defaultSignal.action === 'STRONG BUY' ? 'Strong Buy' : stock.defaultSignal.action === 'BUY' ? 'Buy' : 'Hold',
-        targetPrice: Math.round(liveSpotPrice * (isFx ? 1.025 : 1.18) * 100) / 100,
-        projectedUpside: isFx ? '+1.25%' : '+18.2%',
+        recommendation: computed.action === 'STRONG BUY' ? 'Strong Buy' : computed.action === 'BUY' ? 'Buy' : computed.action === 'STRONG SELL' || computed.action === 'SELL' ? 'Trim' : 'Watchlist',
+        targetPrice: computed.tp2,
+        projectedUpside: `${isBuy ? '+' : '-'}${((computed.tp2Distance / Math.max(liveSpotPrice, 0.0001)) * 100).toFixed(2)}%`,
         riskRating: stock.market === 'NSE' ? 'Moderate' : 'Low',
         signal: {
-          action: stock.defaultSignal.action,
-          setupType: setupName,
-          timeframe: activeTf,
+          action: computed.action,
+          setupType: computed.setupLabel,
+          timeframe: tfProfile.label,
           timeframeCategory: tfCategory,
-          confirmationScore: isScalp ? '4/5 Confluences: Sweep + FVG + RSI + EMA' : '5/5 Institutional Grade',
+          confirmationScore: `${tfCategory === 'Scalp' ? '4/5' : '5/5'} Confluences (${tfProfile.label})`,
           entryZone: entryStr,
           takeProfit1: tp1Str,
           takeProfit2: tp2Str,
           stopLoss: slStr,
-          riskReward: '1:2.4',
-          confidenceScore: confScore,
-          summary: `${activeTf} timeframe reveals high-probability ${setupName} with institutional volume absorption and favorable risk-to-reward.`,
+          riskReward: computed.riskReward,
+          confidenceScore: computed.confidenceScore,
+          summary: `${tfProfile.label} (${tfCategory}) timeframe reveals high-probability ${computed.setupLabel} with ${computed.riskReward} risk-to-reward.`,
           indicators: {
-            rsi: isScalp ? '64.2 (Bullish Rejection)' : '58.5 (Bullish continuation)',
-            macd: 'Bullish Crossover above signal line',
-            movingAverages: `Trading above 20 & 50 EMA on ${activeTf}`,
-            pivotPoint: isGold ? (liveSpotPrice - 5).toFixed(2) : isKES ? liveSpotPrice.toFixed(2) : (liveSpotPrice * 0.9985).toFixed(liveSpotPrice < 10 ? 4 : 2),
+            rsi: tvQuote?.rsi ? `${tvQuote.rsi.toFixed(1)} (${tvQuote.rsi > 60 ? 'Bullish Expansion' : tvQuote.rsi < 40 ? 'Oversold' : 'Neutral'})` : (isBuy ? '62.4 (Bullish Momentum)' : '38.6 (Bearish Momentum)'),
+            macd: isBuy ? 'Bullish Crossover above signal line' : 'Bearish Crossover below signal line',
+            movingAverages: `Aligned ${isBuy ? 'above' : 'below'} 20 & 50 EMA on ${tfProfile.label}`,
+            pivotPoint: isGold ? (liveSpotPrice - 5).toFixed(2) : isKES ? liveSpotPrice.toFixed(2) : (liveSpotPrice * 0.9985).toFixed(dec),
             atr: atrStr,
           },
           smc: {
             orderBlock: obStr,
             fairValueGap: fvgStr,
             liquidityTarget: bslTarget,
-            marketStructure: 'BOS (Break of Structure Bullish)',
+            marketStructure: isBuy ? `BOS (Break of Structure Bullish - ${tfProfile.label})` : `CHoCH (Bearish Breakdown - ${tfProfile.label})`,
           },
           tradeManagement: {
-            breakEvenRule: isGold
-              ? `Move SL to Break-Even at +$${(10 * mult).toFixed(1)} pts / TP1`
-              : `Move SL to Break-Even at +${Math.round(20 * mult)} pips / TP1`,
-            partialProfitRule: `Close 70% position at TP1; let 30% runner ride to TP2 trailing swing lows`,
-            invalidationRule: `Invalidate immediately if ${activeTf} candle closes below Stop Loss`,
+            breakEvenRule: `Move SL to Break-Even at +${Math.round(computed.tp1UnitValue * 0.6)} ${computed.unitLabel} / TP1`,
+            partialProfitRule: `Close 70% position at TP1; let 30% runner ride to TP2 (${computed.riskReward})`,
+            invalidationRule: `Invalidate immediately if ${tfProfile.label} candle closes ${isBuy ? 'below' : 'above'} ${curPrefix}${computed.sl.toFixed(dec)}`,
           },
           multiAspectAnalysis: {
-            marketStructure: `Price action on the ${activeTf} timeframe demonstrates clean structural accumulation with successive higher swing lows and bullish displacement.`,
-            smartMoneyConcepts: `Institutional footprints confirm liquidity pool engineering: an initial liquidity sweep into the demand discount zone was met with swift institutional buying absorption.`,
-            indicatorConfluence: `Indicator suite (${activeTf} RSI 14 at 64, MACD expanding positive, EMAs aligned upward) provides multi-oscillator confirmation for upside continuation.`,
-            macroForexFactory: `Forex Factory news feed monitors high-impact central bank commentary and key economic releases; current setup maintains active News Guard clearance.`
+            marketStructure: `Price action on the ${tfProfile.label} timeframe demonstrates clean ${tfCategory.toLowerCase()} structure targeting ${curPrefix}${computed.tp1.toFixed(dec)}.`,
+            smartMoneyConcepts: `Institutional footprints confirm ${isBuy ? 'SSL' : 'BSL'} liquidity engineering into ${isBuy ? 'demand' : 'supply'} at ${curPrefix}${liveSpotPrice.toFixed(dec)}.`,
+            indicatorConfluence: `Indicator suite on ${tfProfile.label} aligns with ${computed.direction} momentum (${computed.confidenceScore}% conviction).`,
+            macroForexFactory: `Forex Factory news guard clear; strict max 1:${MAX_RISK_REWARD} R:R ceiling enforced (${computed.riskReward}).`
           }
         },
         thesis: [
-          `Key technical support held with sustained institutional order flow.`,
-          `Positive risk-reward profile with verified 1:2.4 setup invalidation.`,
+          `${tfProfile.label} (${tfCategory}) technical structure held with sustained institutional order flow.`,
+          `Positive risk-reward profile (${computed.riskReward}, capped <= 1:${MAX_RISK_REWARD}.0) with clear invalidation.`,
           `Favorable macro alignment and healthy liquidity characteristics.`,
         ],
         risks: [
@@ -1989,28 +2025,17 @@ export const StockRadarView: React.FC = () => {
           dividendYield: `${stock.dividendYield}%`,
           roe: isFx ? 'N/A' : `${Math.round(stock.peRatio * 3.2)}%`,
           marketCap: stock.marketCap,
-          support: isFx
-            ? `${(liveSpotPrice * 0.995).toFixed(liveSpotPrice < 10 ? 4 : 2)}`
-            : `${stock.currency} ${(liveSpotPrice * 0.92).toFixed(2)}`,
-          resistance: isFx
-            ? `${(liveSpotPrice * 1.015).toFixed(liveSpotPrice < 10 ? 4 : 2)}`
-            : `${stock.currency} ${(liveSpotPrice * 1.12).toFixed(2)}`,
-          range52w: `${stock.currency} ${(liveSpotPrice * 0.8).toFixed(2)} - ${(liveSpotPrice * 1.15).toFixed(2)}`,
+          support: `${curPrefix}${computed.sl.toFixed(dec)}`,
+          resistance: `${curPrefix}${computed.tp1.toFixed(dec)}`,
+          range52w: `${stock.currency} ${(liveSpotPrice * 0.82).toFixed(2)} - ${(liveSpotPrice * 1.18).toFixed(2)}`,
         },
         news: [
           {
-            headline: `${stock.name} demonstrates resilient technical momentum across active trading hours`,
+            headline: `${stock.name} triggers ${tfProfile.label} ${computed.direction} signal at ${curPrefix}${liveSpotPrice.toFixed(dec)}`,
             source: stock.isForex ? 'Reuters FX & Money Markets' : 'Business Daily Africa',
             date: 'Today',
-            sentiment: 'Bullish',
-            summary: `Interbank volume indicators confirm supportive buying clusters with upward trend structure intact on ${activeTf}.`,
-          },
-          {
-            headline: `Market liquidity report confirms steady central bank and institutional flows`,
-            source: stock.isForex ? 'Bloomberg FX Wire' : 'East African Market Review',
-            date: 'Yesterday',
-            sentiment: 'Neutral',
-            summary: `Currency valuation indicators reflect balanced order books with moderate volatility.`,
+            sentiment: isBuy ? 'Bullish' : 'Bearish',
+            summary: `Volume & indicator alignment evaluated on ${tfProfile.label} timeframe (${computed.riskReward} R:R).`,
           },
         ],
       });
@@ -2021,6 +2046,7 @@ export const StockRadarView: React.FC = () => {
 
   // Load analysis on initial select or timeframe change
   useEffect(() => {
+    setAiReport(null);
     fetchStockAnalysis(selectedStock, timeframe);
     setAiAnswer(null);
   }, [selectedStock.ticker, timeframe]);
@@ -2044,9 +2070,9 @@ export const StockRadarView: React.FC = () => {
       setAiAnswer(data.answer || 'No response returned.');
     } catch {
       setAiAnswer(
-        `Based on current technical indicators for ${selectedStock.name} (${selectedStock.ticker}), the signal indicates ${
-          selectedStock.defaultSignal.action
-        } momentum. Ensure you implement tight risk management, position size according to stop loss levels, and monitor London/NY overlap session volatility.`
+        `Based on live ${timeframe} TradingView technical indicators for ${selectedStock.name} (${selectedStock.ticker}), the verified signal indicates ${
+          activeSignal.action
+        } momentum (${activeSignal.riskReward} R:R). Ensure you implement tight risk management, position size according to stop loss levels, and monitor London/NY overlap session volatility.`
       );
     } finally {
       setIsAsking(false);
@@ -2073,7 +2099,7 @@ export const StockRadarView: React.FC = () => {
 
   // 1-Click Copy Signal to Clipboard
   const handleCopySignal = () => {
-    const sig = aiReport?.signal;
+    const sig = activeSignal;
     if (!sig) return;
 
     const textToCopy = `🎯 [MullahTracker AI Signal]
@@ -2273,46 +2299,45 @@ Summary: ${sig.summary}`;
   };
 
   const activeSignal = useMemo(() => {
-    if (aiReport?.signal) return aiReport.signal;
-
     const p = currentDisplayPrice;
     const currentTv = currentTvQuote;
-    const recAll = currentTv?.recommendAll;
-    const rsiVal = currentTv?.rsi;
-    const adxVal = currentTv?.adx;
-    const atrVal = currentTv?.atr;
-    const macdVal = currentTv?.macd;
-    const macdSig = currentTv?.macdSignal;
+    const tfProfile = getTimeframeProfile(timeframe || '15m');
+    const tfQuote = resolveQuoteForTimeframe(currentTv, tfProfile.label);
+    const recAll = tfQuote.recommendAll;
+    const rsiVal = tfQuote.rsi;
+    const adxVal = tfQuote.adx;
+    const macdVal = tfQuote.macd;
+    const macdSig = tfQuote.macdSignal;
 
-    // Determine algorithmic direction from TradingView's composite multi-indicator consensus
-    let isBuy = selectedStock.defaultSignal.action.includes('BUY');
-    let action = selectedStock.defaultSignal.action;
-    let confidenceScore = selectedStock.defaultSignal.score;
+    const computed = computeTimeframeSignalLevels({
+      symbol: selectedStock.ticker.replace('/', ''),
+      spotPrice: p,
+      timeframe: tfProfile.label,
+      quote: currentTv,
+      candles: chartViewMode === 'radar' ? activeCandles : undefined,
+      market: selectedStock.market,
+    });
 
-    if (typeof recAll === 'number') {
-      if (recAll >= 0.20) {
-        action = 'STRONG BUY';
-        isBuy = true;
-        confidenceScore = Math.min(96, Math.max(88, Math.round(75 + recAll * 30)));
-      } else if (recAll >= 0.05) {
-        action = 'BUY';
-        isBuy = true;
-        confidenceScore = Math.min(88, Math.max(78, Math.round(72 + recAll * 25)));
-      } else if (recAll <= -0.20) {
-        action = 'STRONG SELL';
-        isBuy = false;
-        confidenceScore = Math.min(96, Math.max(88, Math.round(75 + Math.abs(recAll) * 30)));
-      } else if (recAll <= -0.05) {
-        action = 'SELL';
-        isBuy = false;
-        confidenceScore = Math.min(88, Math.max(78, Math.round(72 + Math.abs(recAll) * 25)));
+    if (aiReport?.signal) {
+      const aiAct = (aiReport.signal.action || '').toUpperCase();
+      const aiIsBuy = aiAct === 'STRONG BUY' || aiAct === 'BUY';
+      const aiIsSell = aiAct === 'STRONG SELL' || aiAct === 'SELL';
+      const liveIsBuy = computed.direction === 'BUY';
+      if ((liveIsBuy && aiIsBuy) || (!liveIsBuy && aiIsSell)) {
+        return {
+          ...aiReport.signal,
+          riskReward: sanitizeRiskRewardString(aiReport.signal.riskReward),
+        };
       }
     }
 
-    const setupType = selectedStock.defaultSignal.setup;
-    const tf = timeframe || '15m Scalp';
+    const isBuy = computed.direction === 'BUY';
+    const action = computed.action;
+    const confidenceScore = computed.confidenceScore;
+    const setupType = computed.setupLabel;
+    const tf = tfProfile.label;
+    const dec = computed.decimals;
 
-    // Helper for precision formatting
     const formatPrice = (val: number): string => {
       if (selectedStock.market === 'FOREX') {
         if (selectedStock.ticker.includes('JPY')) return val.toFixed(3);
@@ -2331,225 +2356,83 @@ Summary: ${sig.summary}`;
         if (selectedStock.ticker === 'DXY') return val.toFixed(3);
         return val.toFixed(2);
       }
-      if (selectedStock.market === 'US') {
-        return val.toFixed(2);
-      }
       return val.toFixed(2);
     };
 
-    let entrySpread = 0.0005;
-    let slDelta = 0.0025;
-    let tp1Delta = 0.0055;
-    let tp2Delta = 0.0120;
-    let slPipsText = '25 pips';
-    let tp1PipsText = '55 pips';
-    let tp2PipsText = '120 pips';
-    let atrText = '45 pips';
-    let marketImbalance = 'Fair Value Gap';
+    const slDelta = computed.slDistance;
+    const tp1Delta = computed.tp1Distance;
+    const tp2Delta = computed.tp2Distance;
+
+    let slPipsText = `${computed.slUnitValue} ${computed.unitLabel}`;
+    let tp1PipsText = `${computed.tp1UnitValue} ${computed.unitLabel}`;
+    let tp2PipsText = `${computed.tp2UnitValue} ${computed.unitLabel}`;
+    let atrText = `${formatPrice(slDelta * 1.15)} (${tf})`;
+    let marketImbalance = `${tfProfile.category} Fair Value Gap (${tf})`;
 
     if (selectedStock.ticker.includes('XAU')) {
-      // Gold Spot
-      entrySpread = 1.35;
-      slDelta = 12.80;
-      tp1Delta = 12.90;
-      tp2Delta = 29.70;
-      slPipsText = '12.8 pts (128 pips)';
-      tp1PipsText = '12.9 pts (129 pips)';
-      tp2PipsText = '29.7 pts (297 pips)';
-      atrText = '$14.2 pts (15m)';
-      marketImbalance = `$${Math.round(p)} Institutional Demand Imbalance`;
-    } else if (selectedStock.ticker === 'XAG/USD') {
-      // Silver Spot (~$49.14)
-      entrySpread = 0.06;
-      slDelta = 0.38;
-      tp1Delta = 0.75;
-      tp2Delta = 1.65;
-      slPipsText = '38¢ (38 pips)';
-      tp1PipsText = '75¢ (75 pips)';
-      tp2PipsText = '$1.65 (165 pips)';
-      atrText = '$0.54 pts';
-      marketImbalance = 'Solar & Industrial Physical Order Block';
-    } else if (selectedStock.market === 'METALS') {
-      entrySpread = p * 0.002;
-      slDelta = p * 0.012;
-      tp1Delta = p * 0.024;
-      tp2Delta = p * 0.052;
-      slPipsText = `${formatPrice(slDelta)} pts`;
-      tp1PipsText = `${formatPrice(tp1Delta)} pts`;
-      tp2PipsText = `${formatPrice(tp2Delta)} pts`;
-      atrText = `${formatPrice(p * 0.015)} pts`;
-      marketImbalance = 'Precious Metals Liquidity Pocket';
-    } else if (selectedStock.market === 'FOREX') {
-      if (selectedStock.ticker.includes('JPY')) {
-        // Yen crosses (1 pip = 0.01)
-        entrySpread = 0.07;
-        slDelta = 0.35;
-        tp1Delta = 0.72;
-        tp2Delta = 1.55;
-        slPipsText = '35 pips';
-        tp1PipsText = '72 pips';
-        tp2PipsText = '155 pips';
-        atrText = '62 pips';
-        marketImbalance = 'Tokyo Session Order Block Imbalance';
-      } else if (selectedStock.ticker.includes('KES')) {
-        // Kenyan Shilling crosses
-        entrySpread = 0.20;
-        slDelta = 0.65;
-        tp1Delta = 1.40;
-        tp2Delta = 3.10;
-        slPipsText = '0.65 KES';
-        tp1PipsText = '1.40 KES';
-        tp2PipsText = '3.10 KES';
-        atrText = '1.20 KES';
-        marketImbalance = 'Central Bank Interbank FX Window';
-      } else if (selectedStock.ticker.includes('ZAR')) {
-        // Rand crosses
-        entrySpread = 0.035;
-        slDelta = 0.14;
-        tp1Delta = 0.28;
-        tp2Delta = 0.60;
-        slPipsText = '140 pips';
-        tp1PipsText = '280 pips';
-        tp2PipsText = '600 pips';
-        atrText = '0.19 ZAR';
-        marketImbalance = 'Mining Flow Imbalance';
-      } else if (selectedStock.ticker.includes('UGX') || selectedStock.ticker.includes('TZS')) {
-        entrySpread = 4.0;
-        slDelta = 16.0;
-        tp1Delta = 34.0;
-        tp2Delta = 75.0;
-        slPipsText = '16 pts';
-        tp1PipsText = '34 pts';
-        tp2PipsText = '75 pts';
-        atrText = '25 pts';
-        marketImbalance = 'EAC Cross-Border Trade Flow';
-      } else {
-        // Standard Major/Minor Forex (1 pip = 0.0001)
-        entrySpread = 0.0005;
-        slDelta = 0.0025;
-        tp1Delta = 0.0055;
-        tp2Delta = 0.0120;
-        slPipsText = '25 pips';
-        tp1PipsText = '55 pips';
-        tp2PipsText = '120 pips';
-        atrText = '48 pips';
-        marketImbalance = 'London / New York Session Imbalance';
-      }
-    } else if (selectedStock.market === 'INDICES') {
-      if (selectedStock.ticker === 'US500') {
-        entrySpread = 3.0;
-        slDelta = 18.5;
-        tp1Delta = 38.0;
-        tp2Delta = 84.0;
-        slPipsText = '18.5 pts';
-        tp1PipsText = '38.0 pts';
-        tp2PipsText = '84.0 pts';
-        atrText = '29.5 pts';
-        marketImbalance = 'Institutional Index Buy-Program Zone';
-      } else if (selectedStock.ticker === 'NAS100') {
-        entrySpread = 9.0;
-        slDelta = 68.0;
-        tp1Delta = 145.0;
-        tp2Delta = 320.0;
-        slPipsText = '68.0 pts';
-        tp1PipsText = '145.0 pts';
-        tp2PipsText = '320.0 pts';
-        atrText = '118.0 pts';
-        marketImbalance = 'Mega-Cap Tech Liquidity Pocket';
-      } else if (selectedStock.ticker === 'US30') {
-        entrySpread = 18.0;
-        slDelta = 135.0;
-        tp1Delta = 280.0;
-        tp2Delta = 610.0;
-        slPipsText = '135.0 pts';
-        tp1PipsText = '280.0 pts';
-        tp2PipsText = '610.0 pts';
-        atrText = '215.0 pts';
-        marketImbalance = 'Blue-Chip Wall Street Block Flow';
-      } else if (selectedStock.ticker === 'DXY') {
-        entrySpread = 0.05;
-        slDelta = 0.32;
-        tp1Delta = 0.65;
-        tp2Delta = 1.45;
-        slPipsText = '32 pips';
-        tp1PipsText = '65 pips';
-        tp2PipsText = '145 pips';
-        atrText = '0.45 pts';
-        marketImbalance = 'Treasury Yield Macro Divergence';
-      } else {
-        entrySpread = p * 0.0015;
-        slDelta = p * 0.0035;
-        tp1Delta = p * 0.0075;
-        tp2Delta = p * 0.0165;
-        slPipsText = `${formatPrice(slDelta)} pts`;
-        tp1PipsText = `${formatPrice(tp1Delta)} pts`;
-        tp2PipsText = `${formatPrice(tp2Delta)} pts`;
-        atrText = `${formatPrice(p * 0.005)} pts`;
-        marketImbalance = 'Global Benchmark Index Futures Block';
-      }
+      slPipsText = `${slDelta.toFixed(1)} pts (${Math.round(slDelta * 10)} pips)`;
+      tp1PipsText = `${tp1Delta.toFixed(1)} pts (${Math.round(tp1Delta * 10)} pips)`;
+      tp2PipsText = `${tp2Delta.toFixed(1)} pts (${Math.round(tp2Delta * 10)} pips)`;
+      atrText = `$${(slDelta * 1.15).toFixed(1)} pts (${tf})`;
+      marketImbalance = `$${Math.round(p)} Institutional Demand Imbalance (${tf})`;
     } else if (selectedStock.market === 'US') {
-      entrySpread = p * 0.003;
-      slDelta = p * 0.022;
-      tp1Delta = p * 0.048;
-      tp2Delta = p * 0.105;
-      slPipsText = `$${formatPrice(slDelta)} (-2.2%)`;
-      tp1PipsText = `$${formatPrice(tp1Delta)} (+4.8%)`;
-      tp2PipsText = `$${formatPrice(tp2Delta)} (+10.5%)`;
-      atrText = `$${formatPrice(p * 0.025)}`;
-      marketImbalance = 'Institutional Equity Dark Pool Imbalance';
-    } else {
-      // NSE Stocks
-      entrySpread = p * 0.004;
-      slDelta = p * 0.030;
-      tp1Delta = p * 0.065;
-      tp2Delta = p * 0.140;
-      slPipsText = `KES ${formatPrice(slDelta)} (-3.0%)`;
-      tp1PipsText = `KES ${formatPrice(tp1Delta)} (+6.5%)`;
-      tp2PipsText = `KES ${formatPrice(tp2Delta)} (+14.0%)`;
-      atrText = `KES ${formatPrice(p * 0.035)}`;
-      marketImbalance = 'Nairobi Exchange Direct Order Book Queue';
+      const slPct = ((slDelta / Math.max(p, 0.01)) * 100).toFixed(1);
+      const tp1Pct = ((tp1Delta / Math.max(p, 0.01)) * 100).toFixed(1);
+      const tp2Pct = ((tp2Delta / Math.max(p, 0.01)) * 100).toFixed(1);
+      slPipsText = `$${formatPrice(slDelta)} (-${slPct}%)`;
+      tp1PipsText = `$${formatPrice(tp1Delta)} (+${tp1Pct}%)`;
+      tp2PipsText = `$${formatPrice(tp2Delta)} (+${tp2Pct}%)`;
+      atrText = `$${formatPrice(slDelta * 1.15)} (${tf})`;
+      marketImbalance = `Institutional Equity Imbalance (${tf})`;
+    } else if (selectedStock.market === 'NSE') {
+      const slPct = ((slDelta / Math.max(p, 0.01)) * 100).toFixed(1);
+      const tp1Pct = ((tp1Delta / Math.max(p, 0.01)) * 100).toFixed(1);
+      const tp2Pct = ((tp2Delta / Math.max(p, 0.01)) * 100).toFixed(1);
+      slPipsText = `KES ${formatPrice(slDelta)} (-${slPct}%)`;
+      tp1PipsText = `KES ${formatPrice(tp1Delta)} (+${tp1Pct}%)`;
+      tp2PipsText = `KES ${formatPrice(tp2Delta)} (+${tp2Pct}%)`;
+      atrText = `KES ${formatPrice(slDelta * 1.15)} (${tf})`;
+      marketImbalance = `Nairobi Exchange Order Book Queue (${tf})`;
     }
 
-    const entryMin = p - entrySpread * 0.45;
-    const entryMax = p + entrySpread * 0.55;
-
-    const stopLossVal = isBuy ? p - slDelta : p + slDelta;
-    const tp1Val = isBuy ? p + tp1Delta : p - tp1Delta;
-    const tp2Val = isBuy ? p + tp2Delta : p - tp2Delta;
+    const stopLossVal = computed.sl;
+    const tp1Val = computed.tp1;
+    const tp2Val = computed.tp2;
     const pivotVal = isBuy ? p - slDelta * 0.3 : p + slDelta * 0.3;
 
     const obMin = isBuy ? p - slDelta * 0.75 : p + slDelta * 0.25;
     const obMax = isBuy ? p - slDelta * 0.25 : p + slDelta * 0.75;
-    const fvgMin = isBuy ? entryMin : entryMin;
-    const fvgMax = isBuy ? entryMax : entryMax;
-    const liqTargetVal = isBuy ? p + tp1Delta * 1.15 : p - tp1Delta * 1.15;
+    const fvgParts = computed.entryZone.split(' - ');
+    const fvgMin = parseFloat(fvgParts[0]) || p - slDelta * 0.1;
+    const fvgMax = parseFloat(fvgParts[1]) || p + slDelta * 0.1;
+    const liqTargetVal = isBuy ? p + tp1Delta * 1.08 : p - tp1Delta * 1.08;
     const beTriggerVal = isBuy ? p + tp1Delta * 0.65 : p - tp1Delta * 0.65;
 
     return {
       action,
       setupType,
       timeframe: tf,
-      timeframeCategory: tf.includes('m') ? 'Scalp' : tf.includes('H') ? 'Intraday' : 'Swing',
+      timeframeCategory: tfProfile.category,
       confirmationScore: typeof adxVal === 'number'
         ? (adxVal < 20
-            ? `⚠️ Low Trend ADX: ${adxVal.toFixed(1)} (Consolidation Filter Active)`
-            : `4/4 Verified Confluences: ADX ${adxVal.toFixed(1)} Trend + TV Rating (${recAll && recAll >= 0 ? '+' : ''}${recAll?.toFixed(2)}) + ATR Stops`)
-        : '4/5 Confluences: Sweep + FVG + RSI + EMA',
-      entryZone: `${formatPrice(entryMin)} - ${formatPrice(entryMax)}`,
+            ? `Low Trend ADX: ${adxVal.toFixed(1)} (${tf} Consolidation Filter Active)`
+            : `4/4 Verified Confluences (${tf}): ADX ${adxVal.toFixed(1)} + TV Rating (${recAll && recAll >= 0 ? '+' : ''}${recAll?.toFixed(2)}) + Max 1:${MAX_RISK_REWARD} R:R`)
+        : `4/5 Confluences (${tf}): Sweep + FVG + RSI + EMA`,
+      entryZone: `${formatPrice(fvgMin)} - ${formatPrice(fvgMax)}`,
       takeProfit1: `${formatPrice(tp1Val)} (+${tp1PipsText})`,
       takeProfit2: `${formatPrice(tp2Val)} (+${tp2PipsText})`,
       stopLoss: `${formatPrice(stopLossVal)} (-${slPipsText})`,
-      riskReward: '1:2.4',
-      confidenceScore: confidenceScore,
-      summary: `${tf} timeframe confirms liquidity sweep with displacement into ${marketImbalance} at ${formatPrice(p)}.`,
+      riskReward: computed.riskReward,
+      confidenceScore,
+      summary: `${tf} (${tfProfile.category}) timeframe confirms ${setupType} with ${computed.riskReward} R:R (capped <= 1:${MAX_RISK_REWARD}.0) at ${formatPrice(p)}.`,
       indicators: {
         rsi: typeof rsiVal === 'number'
           ? `${rsiVal.toFixed(1)} (${rsiVal > 60 ? 'Bullish Expansion' : rsiVal < 40 ? 'Oversold Discount' : 'Neutral Equilibrium'})`
           : (isBuy ? '63.5 (Bullish Expansion)' : '37.8 (Bearish Momentum)'),
         macd: typeof macdVal === 'number' && typeof macdSig === 'number'
           ? (macdVal >= macdSig
-              ? `Bullish Momentum (MACD: ${macdVal.toFixed(4)} > Signal)`
-              : `Bearish Divergence (MACD: ${macdVal.toFixed(4)} < Signal)`)
+              ? `Bullish Momentum (MACD: ${macdVal.toFixed(dec === 5 ? 4 : 2)} > Signal)`
+              : `Bearish Divergence (MACD: ${macdVal.toFixed(dec === 5 ? 4 : 2)} < Signal)`)
           : (isBuy ? 'Bullish Crossover above signal line' : 'Bearish Divergence under signal line'),
         movingAverages: typeof recAll === 'number'
           ? `TradingView MA Bias: ${recAll >= 0 ? '+' : ''}${recAll.toFixed(2)} (${isBuy ? 'Aligned with Uptrend' : 'Aligned with Downtrend'})`
@@ -2561,15 +2444,15 @@ Summary: ${sig.summary}`;
         orderBlock: `${formatPrice(obMin)} - ${formatPrice(obMax)} (${isBuy ? 'Bullish Demand' : 'Bearish Supply'})`,
         fairValueGap: `${formatPrice(fvgMin)} - ${formatPrice(fvgMax)} (${isBuy ? 'Bullish FVG' : 'Bearish FVG'})`,
         liquidityTarget: `${isBuy ? 'Buy-Side Liquidity (BSL) resting above' : 'Sell-Side Liquidity (SSL) resting below'} ${formatPrice(liqTargetVal)}`,
-        marketStructure: isBuy ? 'BOS (Break of Structure Bullish)' : 'CHoCH (Change of Character Bearish)',
+        marketStructure: isBuy ? `BOS (Break of Structure Bullish - ${tf})` : `CHoCH (Bearish Breakdown - ${tf})`,
       },
       tradeManagement: {
         breakEvenRule: `Move SL to Break-Even at ${formatPrice(beTriggerVal)}`,
-        partialProfitRule: 'Close 70% volume at TP1; trail remaining 30% runner behind swing structure',
+        partialProfitRule: `Close 70% volume at TP1; trail remaining 30% runner to TP2 (${computed.riskReward})`,
         invalidationRule: `Close setup immediately if a ${tf} candle closes ${isBuy ? 'below' : 'above'} ${formatPrice(stopLossVal)}`,
       },
     };
-  }, [aiReport, selectedStock, currentDisplayPrice, timeframe]);
+  }, [aiReport, selectedStock, currentDisplayPrice, currentTvQuote, timeframe, chartViewMode, activeCandles]);
 
   return (
     <div className="space-y-6">
@@ -2859,8 +2742,8 @@ Summary: ${sig.summary}`;
             const isUp = chipChangePct >= 0;
             const isStockLive = getAssetMarketSession(stock.ticker, stock.market, currentTime).isOpen;
 
-            const isSignalBullish =
-              stock.defaultSignal.action === 'STRONG BUY' || stock.defaultSignal.action === 'BUY';
+            const liveSig = getLiveAssetSignal(stock);
+            const isSignalBullish = liveSig.direction === 'BUY';
 
             return (
               <button
@@ -2909,7 +2792,7 @@ Summary: ${sig.summary}`;
                           : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
                       }`}
                     >
-                      {stock.defaultSignal.action} {stock.defaultSignal.score}%
+                      {liveSig.action} {liveSig.score}%
                     </span>
                   </div>
                   <div className="text-[10px] text-slate-400 truncate max-w-[125px]">{stock.name}</div>
@@ -3013,7 +2896,7 @@ Summary: ${sig.summary}`;
                         : 'text-slate-400 hover:text-white'
                     }`}
                   >
-                    🟢 Bullish ({allForexPairs.filter((p) => p.defaultSignal.action === 'STRONG BUY' || p.defaultSignal.action === 'BUY').length})
+                    🟢 Bullish ({forexSentimentCounts.bullish})
                   </button>
                   <button
                     type="button"
@@ -3024,7 +2907,7 @@ Summary: ${sig.summary}`;
                         : 'text-slate-400 hover:text-white'
                     }`}
                   >
-                    🔴 Bearish ({allForexPairs.filter((p) => p.defaultSignal.action === 'STRONG SELL' || p.defaultSignal.action === 'SELL').length})
+                    🔴 Bearish ({forexSentimentCounts.bearish})
                   </button>
                 </div>
 
@@ -3091,12 +2974,12 @@ Summary: ${sig.summary}`;
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 pt-2 max-h-[520px] overflow-y-auto pr-1">
                 {filteredForexPairs.map((pair) => {
                   const isSelected = selectedStock.ticker === pair.ticker;
-                  const tvQ = lookupTradingViewQuote(liveTvQuotes, pair.ticker);
-                  const pairPrice = tvQ && tvQ.price > 0 ? tvQ.price : pair.currentPrice;
+                  const liveSig = getLiveAssetSignal(pair);
+                  const tvQ = liveSig.tvQ;
+                  const pairPrice = liveSig.spot;
                   const pairChangePct = tvQ ? tvQ.changePercent : pair.changePercent;
                   const isUp = pairChangePct >= 0;
-                  const isBullish =
-                    pair.defaultSignal.action === 'STRONG BUY' || pair.defaultSignal.action === 'BUY';
+                  const isBullish = liveSig.direction === 'BUY';
 
                   return (
                     <div
@@ -3129,7 +3012,7 @@ Summary: ${sig.summary}`;
                                 : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
                             }`}
                           >
-                            {pair.defaultSignal.action} {pair.defaultSignal.score}%
+                            {liveSig.action} {liveSig.score}%
                           </span>
                         </div>
 
@@ -3150,7 +3033,7 @@ Summary: ${sig.summary}`;
 
                         {/* Setup Preview */}
                         <div className="p-2 rounded-lg bg-[#0c1424] border border-[#17253d] text-[10px] text-slate-300">
-                          <span className="text-purple-400 font-semibold">Setup:</span> {pair.defaultSignal.setup}
+                          <span className="text-purple-400 font-semibold">Setup:</span> {liveSig.setup}
                         </div>
                       </div>
 
@@ -3181,8 +3064,8 @@ Summary: ${sig.summary}`;
                             handleExecuteSignalToPaper({
                               direction: isBullish ? 'LONG' : 'SHORT',
                               lots: 0.1,
-                              sl: String(isBullish ? (pairPrice * 0.996).toFixed(4) : (pairPrice * 1.004).toFixed(4)),
-                              tp: String(isBullish ? (pairPrice * 1.008).toFixed(4) : (pairPrice * 0.992).toFixed(4)),
+                              sl: liveSig.computed.sl.toFixed(liveSig.computed.decimals),
+                              tp: liveSig.computed.tp1.toFixed(liveSig.computed.decimals),
                             });
                           }}
                           className="py-1.5 px-2.5 rounded-lg text-[11px] font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors cursor-pointer"
@@ -3216,12 +3099,12 @@ Summary: ${sig.summary}`;
                   <tbody className="divide-y divide-[#15233c] bg-[#090f1d]">
                     {filteredForexPairs.map((pair) => {
                       const isSelected = selectedStock.ticker === pair.ticker;
-                      const tvQ = lookupTradingViewQuote(liveTvQuotes, pair.ticker);
-                      const pairPrice = tvQ && tvQ.price > 0 ? tvQ.price : pair.currentPrice;
+                      const liveSig = getLiveAssetSignal(pair);
+                      const tvQ = liveSig.tvQ;
+                      const pairPrice = liveSig.spot;
                       const pairChangePct = tvQ ? tvQ.changePercent : pair.changePercent;
                       const isUp = pairChangePct >= 0;
-                      const isBull =
-                        pair.defaultSignal.action === 'STRONG BUY' || pair.defaultSignal.action === 'BUY';
+                      const isBull = liveSig.direction === 'BUY';
 
                       return (
                         <tr
@@ -3260,11 +3143,11 @@ Summary: ${sig.summary}`;
                                   : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
                               }`}
                             >
-                              {pair.defaultSignal.action} {pair.defaultSignal.score}%
+                              {liveSig.action} {liveSig.score}%
                             </span>
                           </td>
                           <td className="py-2.5 px-3 text-slate-300 text-[11px] truncate max-w-[200px]">
-                            {pair.defaultSignal.setup}
+                            {liveSig.setup}
                           </td>
                           <td className="py-2.5 px-3 text-center">
                             <button

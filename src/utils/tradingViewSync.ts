@@ -1,5 +1,17 @@
 import { useState, useEffect } from 'react';
 
+export interface TimeframeTechnicals {
+  recommendAll?: number;
+  recommendMa?: number;
+  recommendOther?: number;
+  rsi?: number;
+  macd?: number;
+  macdSignal?: number;
+  ema20?: number;
+  ema50?: number;
+  changePercent?: number;
+}
+
 export interface LiveTvQuote {
   symbol: string;
   price: number;
@@ -26,6 +38,7 @@ export interface LiveTvQuote {
   dividendYield?: number;
   high52w?: number;
   low52w?: number;
+  timeframeSignals?: Record<string, TimeframeTechnicals>;
 }
 
 /**

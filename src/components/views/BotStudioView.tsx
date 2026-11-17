@@ -73,8 +73,9 @@ import {
 } from 'lucide-react';
 import { BOT_CATALOG, BotDefinition, BotCategory } from '../../utils/eaCatalog.ts';
 import { useFinance } from '../../context/FinanceContext.tsx';
-import { useTradingViewQuotes, resolveTradingViewPrice } from '../../utils/tradingViewSync.ts';
+import { useTradingViewQuotes, resolveTradingViewPrice, lookupTradingViewQuote } from '../../utils/tradingViewSync.ts';
 import { getAssetMarketSession } from '../../utils/marketHours.ts';
+import { computeTimeframeSignalLevels, evaluateDirectionalConfluence, getTimeframeProfile, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
 
 // =========================================================================
 // COMPREHENSIVE CURRENCIES & TRADING INSTRUMENTS CATALOG
@@ -350,57 +351,84 @@ export const BotStudioView: React.FC = () => {
   const livePriceRef = useRef<number>(activeAsset.basePrice);
   const [lastTickDir, setLastTickDir] = useState<'UP' | 'DOWN'>('UP');
 
-  // Multi-Timeframe Trend Confirmation Matrix (M5, M15, H1, H4)
+  // Multi-Timeframe Trend Confirmation Matrix (M5, M15, H1, H4) powered by live TradingView indicators
   const mtfMatrix = useMemo(() => {
-    const isForex = activeAsset.category === 'FOREX' || activeAsset.category === 'EAST_AFRICA';
-    const isSynthetics = activeAsset.category === 'DERIV_24_7';
-    return [
-      { tf: 'M5', label: 'Scalp Delta', bias: 'BULLISH', strength: 92, indicator: 'EMA 9/21 Ribbon' },
-      { tf: 'M15', label: 'Primary Setup', bias: 'BULLISH', strength: 96, indicator: 'Order Block FVG' },
-      { tf: 'H1', label: 'Session Trend', bias: 'BULLISH', strength: 89, indicator: 'SuperTrend Cloud' },
-      { tf: 'H4', label: 'Institutional Anchor', bias: isSynthetics ? 'BULLISH' : 'BULLISH', strength: 95, indicator: 'MACD Divergence' },
+    const tvQuote = lookupTradingViewQuote(liveTvQuotes, activeAsset.symbol);
+    const forcedDir = selectedBot.id.includes('boom')
+      ? 'BUY'
+      : selectedBot.id.includes('crash')
+      ? 'SELL'
+      : undefined;
+    const tfConfigs = [
+      { tf: 'M5', label: 'Scalp Delta', indicator: 'EMA 9/21 Ribbon' },
+      { tf: 'M15', label: 'Primary Setup', indicator: 'Order Block FVG' },
+      { tf: 'H1', label: 'Session Trend', indicator: 'SuperTrend Cloud' },
+      { tf: 'H4', label: 'Institutional Anchor', indicator: 'MACD Divergence' },
     ];
-  }, [activeAsset]);
+    return tfConfigs.map((cfg) => {
+      const res = evaluateDirectionalConfluence(tvQuote, livePrice, cfg.tf, forcedDir);
+      return {
+        tf: cfg.tf,
+        label: cfg.label,
+        bias: res.direction === 'BUY' ? 'BULLISH' : 'BEARISH',
+        strength: res.confidenceScore,
+        indicator: cfg.indicator,
+      };
+    });
+  }, [activeAsset.symbol, liveTvQuotes, livePrice, selectedBot.id]);
 
   // =========================================================================
-  // DORMANT SIGNAL FACTORY
+  // DORMANT SIGNAL FACTORY (Timeframe-Scaled, Max 1:5.0 R:R Cap)
   // =========================================================================
   const createDormantSignal = useCallback((
     bot: BotDefinition,
     asset: TradeableAsset,
     spot: number,
-    forceType?: 'BUY' | 'SELL'
+    forceType?: 'BUY' | 'SELL',
+    tfOverride?: string
   ): DormantLockedSignal => {
-    let type: 'BUY' | 'SELL' = forceType || (
+    const tf = tfOverride || selectedTimeframe || 'M5';
+    const preferredDir: 'BUY' | 'SELL' | undefined = forceType || (
       bot.id.includes('boom') ? 'BUY' :
       bot.id.includes('crash') ? 'SELL' :
-      bot.id.includes('london') ? 'BUY' :
-      bot.id.includes('smc') ? 'BUY' :
-      'BUY'
+      undefined
     );
 
-    const atrFactor = asset.category === 'DERIV_24_7'
-      ? 0.0025
-      : asset.category === 'CRYPTO'
-      ? 0.0035
-      : 0.0018;
-    const atr = spot * atrFactor;
+    const mappedMarket =
+      asset.category === 'METALS' ? 'METALS' :
+      asset.category === 'DERIV_24_7' ? 'SYNTHETICS' :
+      asset.category === 'CRYPTO' ? 'CRYPTO' :
+      asset.category === 'INDICES' ? 'INDICES' :
+      'FOREX';
+
+    const tvQuote = lookupTradingViewQuote(liveTvQuotesRef.current, asset.symbol);
+    const computed = computeTimeframeSignalLevels({
+      symbol: asset.symbol,
+      spotPrice: spot,
+      timeframe: tf,
+      quote: tvQuote,
+      market: mappedMarket,
+      preferredDirection: preferredDir,
+    });
+
+    const type: 'BUY' | 'SELL' = computed.direction;
     const entry = Number(spot.toFixed(asset.digits));
-    const isGoldScalper = bot.id === 'gold-scalper-m1-pro';
-    const slMult = isGoldScalper ? 1.5 : 1.5;
-    const tpMult = isGoldScalper ? 2.0 : 3.8;
-    const slDist = Math.max(atr * slMult, Number((1 / Math.pow(10, asset.digits) * 20)));
-    const tpDist = Math.max(atr * tpMult, Number((1 / Math.pow(10, asset.digits) * 50)));
+    const slDist = Math.max(computed.slDistance, Number((1 / Math.pow(10, asset.digits) * 8).toFixed(asset.digits)));
+    const maxTpDist = slDist * MAX_RISK_REWARD;
+    const tpDist = Math.min(computed.tp2Distance, maxTpDist);
 
     const sl = Number((type === 'BUY' ? entry - slDist : entry + slDist).toFixed(asset.digits));
     const tp = Number((type === 'BUY' ? entry + tpDist : entry - tpDist).toFixed(asset.digits));
+    const actualRR = slDist > 0 ? Math.min(MAX_RISK_REWARD, Math.max(1.2, Number((tpDist / slDist).toFixed(1)))) : 2.0;
+    const rrRatioStr = `1:${actualRR.toFixed(1)}`;
+    const tfProfile = getTimeframeProfile(tf);
 
-    const reasonText = isGoldScalper
-      ? `${bot.name} confirmed M1 EMA 9/21 cross confirmed by RSI ${type === 'BUY' ? '>= 52.0' : '<= 48.0'}. Dynamic ATR SL & 0.5% basket closing armed.`
-      : `${bot.name} confirmed high-probability 4-timeframe algorithmic ${type} entry on ${asset.symbol}. Levels locked dormant.`;
+    const reasonText = bot.id === 'gold-scalper-m1-pro'
+      ? `${bot.name} (${tfProfile.label} ${tfProfile.category}) confirmed EMA 9/21 cross & RSI ${type === 'BUY' ? '>= 52.0' : '<= 48.0'}. Timeframe ATR SL & ${rrRatioStr} R:R armed.`
+      : `${bot.name} (${tfProfile.label} ${tfProfile.category}): ${computed.setupLabel} · ${type} locked @ ${entry} (Max R:R <= 1:5.0 · Active: ${rrRatioStr}).`;
 
     return {
-      id: `SIG-${asset.symbol}-${type}-${Math.floor(Math.random() * 9000 + 1000)}`,
+      id: `SIG-${asset.symbol}-${tfProfile.normalized}-${type}-${Math.floor(Math.random() * 9000 + 1000)}`,
       botId: bot.id,
       botName: bot.name,
       symbol: asset.symbol,
@@ -409,53 +437,75 @@ export const BotStudioView: React.FC = () => {
       stopLoss: sl,
       originalSl: sl,
       takeProfit: tp,
-      tpPoints: Math.abs(tp - entry),
-      slPoints: Math.abs(entry - sl),
-      rrRatio: isGoldScalper ? '1:2.0' : '1:3.8',
-      confluenceScore: Math.floor(Math.random() * 6 + 92), // 92% - 98%
+      tpPoints: Number(Math.abs(tp - entry).toFixed(asset.digits)),
+      slPoints: Number(Math.abs(entry - sl).toFixed(asset.digits)),
+      rrRatio: rrRatioStr,
+      confluenceScore: computed.confidenceScore,
       status: 'DORMANT_ACTIVE',
       isBreakEvenArmed: false,
       generatedAt: new Date().toLocaleTimeString(),
       reason: reasonText,
     };
-  }, []);
+  }, [selectedTimeframe]);
 
   // The dormant locked signal state + Ref for atomic access
+  const manualDirectionOverrideRef = useRef<boolean>(false);
   const [dormantSignal, setDormantSignal] = useState<DormantLockedSignal>(() => {
-    return createDormantSignal(selectedBot, activeAsset, activeAsset.basePrice, 'BUY');
+    return createDormantSignal(selectedBot, activeAsset, activeAsset.basePrice, undefined, 'M1');
   });
   const dormantSignalRef = useRef<DormantLockedSignal>(dormantSignal);
   dormantSignalRef.current = dormantSignal;
 
-  // When user switches Bot or Currency, arm fresh dormant signal at live TradingView price
+  // When user switches Bot, Currency, or Timeframe, arm fresh dormant signal at live TradingView price
   useEffect(() => {
+    manualDirectionOverrideRef.current = false;
     const tvSpot = resolveTradingViewPrice(liveTvQuotesRef.current, activeAsset.symbol, activeAsset.basePrice);
     livePriceRef.current = tvSpot;
     setLivePrice(tvSpot);
     setSelectedLots(activeAsset.minLot > 0.05 ? activeAsset.minLot : 0.10);
-    const newSignal = createDormantSignal(selectedBot, activeAsset, tvSpot);
+    const newSignal = createDormantSignal(selectedBot, activeAsset, tvSpot, undefined, selectedTimeframe);
     dormantSignalRef.current = newSignal;
     setDormantSignal(newSignal);
     setAutoRearmCountdown(null);
-  }, [selectedBot, activeAsset, createDormantSignal]);
+  }, [selectedBot, activeAsset, selectedTimeframe, createDormantSignal]);
 
-  // Keep livePrice anchored to live TradingView quote when async feed updates
+  // Keep livePrice anchored to live TradingView quote & sync un-overridden dormant direction when feed loads/flips
   useEffect(() => {
     const tvSpot = resolveTradingViewPrice(liveTvQuotes, activeAsset.symbol, activeAsset.basePrice);
     if (tvSpot > 0 && Math.abs(livePriceRef.current - tvSpot) / tvSpot > 0.002) {
       livePriceRef.current = tvSpot;
       setLivePrice(tvSpot);
     }
-  }, [liveTvQuotes, activeAsset]);
+    const tvQuote = lookupTradingViewQuote(liveTvQuotes, activeAsset.symbol);
+    if (tvQuote && !manualDirectionOverrideRef.current && dormantSignalRef.current.status === 'DORMANT_ACTIVE') {
+      const forcedDir = selectedBot.id.includes('boom')
+        ? 'BUY'
+        : selectedBot.id.includes('crash')
+        ? 'SELL'
+        : undefined;
+      const evalRes = evaluateDirectionalConfluence(tvQuote, tvSpot, selectedTimeframe || 'M5', forcedDir);
+      if (evalRes.direction !== dormantSignalRef.current.type) {
+        const syncedSig = createDormantSignal(selectedBot, activeAsset, tvSpot, evalRes.direction, selectedTimeframe);
+        dormantSignalRef.current = syncedSig;
+        setDormantSignal(syncedSig);
+      }
+    }
+  }, [liveTvQuotes, activeAsset, selectedBot, selectedTimeframe, createDormantSignal]);
 
   // =========================================================================
-  // ROCK-SOLID RE-ARM HANDLER (Supports BUY, SELL, or keeping previous type)
+  // ROCK-SOLID RE-ARM HANDLER (Supports BUY, SELL, or keeping live TV direction)
   // =========================================================================
   const handleRearmAtSpot = useCallback((overrideType?: 'BUY' | 'SELL') => {
     const currentSpot = livePriceRef.current || livePrice || activeAsset.basePrice;
-    const direction = overrideType || dormantSignalRef.current.type || 'BUY';
+    if (overrideType) {
+      manualDirectionOverrideRef.current = true;
+    } else {
+      manualDirectionOverrideRef.current = false;
+    }
+    const direction = overrideType;
 
-    const newSig = createDormantSignal(selectedBot, activeAsset, currentSpot, direction);
+    const newSig = createDormantSignal(selectedBot, activeAsset, currentSpot, direction, selectedTimeframe);
+    const actualDirection = newSig.type;
     dormantSignalRef.current = newSig;
     setDormantSignal(newSig);
     setAutoRearmCountdown(null);
@@ -465,7 +515,7 @@ export const BotStudioView: React.FC = () => {
 
     // Visual pulse & notice
     setRearmPulseActive(true);
-    setRearmNotice(`⚡ SIGNAL RE-ARMED & LOCKED @ ${currentSpot.toFixed(activeAsset.digits)} (${direction})`);
+    setRearmNotice(`⚡ SIGNAL RE-ARMED & LOCKED @ ${currentSpot.toFixed(activeAsset.digits)} (${actualDirection})`);
     setTimeout(() => setRearmPulseActive(false), 1400);
     setTimeout(() => setRearmNotice(null), 4000);
 
@@ -475,7 +525,7 @@ export const BotStudioView: React.FC = () => {
         id: newSig.id,
         time: new Date().toLocaleTimeString(),
         symbol: activeAsset.symbol,
-        type: direction,
+        type: actualDirection,
         entry: newSig.entryPrice,
         tp: newSig.takeProfit,
         sl: newSig.stopLoss,
@@ -492,7 +542,7 @@ export const BotStudioView: React.FC = () => {
           ticket,
           symbol: activeAsset.symbol,
           botName: selectedBot.name,
-          type: direction,
+          type: actualDirection,
           lots: selectedLots,
           openPrice: currentSpot,
           currentPrice: currentSpot,
@@ -767,11 +817,14 @@ export const BotStudioView: React.FC = () => {
       let peak = balance;
       let maxDd = 0;
 
+      const parsedRR = parseFloat((dormantSignalRef.current?.rrRatio || '1:2.8').split(':')[1] || '2.8');
+      const cappedRR = Math.min(MAX_RISK_REWARD, Math.max(1.2, Number.isFinite(parsedRR) ? parsedRR : 2.8));
+
       for (let i = 0; i < 100; i++) {
         // High win-rate statistical distribution
         const isWin = Math.random() < (selectedBot.winRate / 100);
         const risk = balance * 0.015; // 1.5% fixed risk
-        const reward = risk * 3.8;    // 1:3.8 R:R
+        const reward = risk * cappedRR;    // Strict timeframe-calibrated R:R (<= 5.0)
 
         if (isWin) {
           wins++;
@@ -1340,9 +1393,28 @@ export const BotStudioView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Direction Selector, Re-arm Engine, Audio & Deploy Buttons */}
+              {/* Direction Selector, Timeframe Selector, Re-arm Engine, Audio & Deploy Buttons */}
               <div className="flex flex-wrap items-center gap-2">
                 
+                {/* Scan Timeframe Selector */}
+                <div className="flex items-center bg-[#060b14] p-1 rounded-xl border border-[#162742] text-[11px] font-mono">
+                  {(['1s', 'M1', 'M5', 'M15', 'H1', 'H4'] as const).map((tf) => (
+                    <button
+                      key={tf}
+                      type="button"
+                      onClick={() => setSelectedTimeframe(tf)}
+                      className={`px-2 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                        selectedTimeframe === tf
+                          ? 'bg-[#0df2c9] text-slate-950 shadow-sm font-black'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                      title={`Scan & calibrate SL/TP on ${tf} timeframe (Max 1:5.0 R:R)`}
+                    >
+                      {tf}
+                    </button>
+                  ))}
+                </div>
+
                 {/* Audio Mute/Unmute */}
                 <button
                   onClick={() => setIsMuted(!isMuted)}
@@ -1930,7 +2002,7 @@ export const BotStudioView: React.FC = () => {
                       TAKE PROFIT: {dormantSignal.takeProfit} (+{distToTp} pts)
                     </span>
                     <span className="text-[9px] text-emerald-300 font-bold bg-slate-950/80 px-1.5 py-0.5 rounded">
-                      1:3.8 R:R TARGET
+                      {dormantSignal.rrRatio} R:R TARGET ({selectedTimeframe})
                     </span>
                   </div>
 
@@ -1970,24 +2042,42 @@ export const BotStudioView: React.FC = () => {
                     </span>
                   </div>
 
-                  {/* Simulated Dynamic Candle Stream */}
+                  {/* Simulated Dynamic Candle Stream aligned to BUY/SELL trend */}
                   <div className="absolute inset-x-0 bottom-4 top-4 flex items-center justify-around px-4">
-                    {[
-                      { h: 42, l: 30, o: 35, c: 40, isUp: true },
-                      { h: 48, l: 36, o: 39, c: 46, isUp: true },
-                      { h: 46, l: 38, o: 45, c: 41, isUp: false },
-                      { h: 54, l: 40, o: 42, c: 51, isUp: true },
-                      { h: 58, l: 48, o: 50, c: 56, isUp: true },
-                      { h: 57, l: 47, o: 55, c: 49, isUp: false },
-                      { h: 63, l: 48, o: 50, c: 60, isUp: true },
-                      { h: 68, l: 56, o: 61, c: 65, isUp: true },
-                      { h: 66, l: 58, o: 64, c: 60, isUp: false },
-                      { h: 72, l: 59, o: 61, c: 70, isUp: true },
-                      { h: 76, l: 66, o: 69, c: 74, isUp: true },
-                      { h: 75, l: 67, o: 73, c: 71, isUp: false },
-                      { h: 82, l: 70, o: 72, c: 79, isUp: true },
-                      { h: 86, l: 75, o: 78, c: 84, isUp: true },
-                    ].map((c, idx) => (
+                    {(dormantSignal.type === 'BUY'
+                      ? [
+                          { h: 42, l: 30, o: 35, c: 40, isUp: true },
+                          { h: 48, l: 36, o: 39, c: 46, isUp: true },
+                          { h: 46, l: 38, o: 45, c: 41, isUp: false },
+                          { h: 54, l: 40, o: 42, c: 51, isUp: true },
+                          { h: 58, l: 48, o: 50, c: 56, isUp: true },
+                          { h: 57, l: 47, o: 55, c: 49, isUp: false },
+                          { h: 63, l: 48, o: 50, c: 60, isUp: true },
+                          { h: 68, l: 56, o: 61, c: 65, isUp: true },
+                          { h: 66, l: 58, o: 64, c: 60, isUp: false },
+                          { h: 72, l: 59, o: 61, c: 70, isUp: true },
+                          { h: 76, l: 66, o: 69, c: 74, isUp: true },
+                          { h: 75, l: 67, o: 73, c: 71, isUp: false },
+                          { h: 82, l: 70, o: 72, c: 79, isUp: true },
+                          { h: 86, l: 75, o: 78, c: 84, isUp: true },
+                        ]
+                      : [
+                          { h: 86, l: 75, o: 84, c: 78, isUp: false },
+                          { h: 82, l: 70, o: 79, c: 72, isUp: false },
+                          { h: 77, l: 68, o: 71, c: 75, isUp: true },
+                          { h: 75, l: 64, o: 74, c: 66, isUp: false },
+                          { h: 69, l: 59, o: 67, c: 61, isUp: false },
+                          { h: 66, l: 57, o: 60, c: 64, isUp: true },
+                          { h: 64, l: 52, o: 63, c: 54, isUp: false },
+                          { h: 58, l: 47, o: 56, c: 49, isUp: false },
+                          { h: 54, l: 45, o: 48, c: 52, isUp: true },
+                          { h: 52, l: 40, o: 51, c: 42, isUp: false },
+                          { h: 46, l: 36, o: 44, c: 38, isUp: false },
+                          { h: 43, l: 35, o: 37, c: 41, isUp: true },
+                          { h: 41, l: 30, o: 40, c: 32, isUp: false },
+                          { h: 35, l: 24, o: 33, c: 26, isUp: false },
+                        ]
+                    ).map((c, idx) => (
                       <div key={idx} className="flex flex-col items-center h-full justify-center w-2 relative">
                         {/* High-Low Wick */}
                         <div
@@ -2256,7 +2346,7 @@ export const BotStudioView: React.FC = () => {
                     <span>Monte Carlo Strategy Backtesting Lab (100 Trades)</span>
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Empirical verification of {selectedBot.name} on {activeAsset.symbol} with 1:3.8 R:R and Break-Even Armor.
+                    Empirical verification of {selectedBot.name} on {activeAsset.symbol} ({selectedTimeframe}) with {dormantSignal.rrRatio} R:R and Break-Even Armor.
                   </p>
                 </div>
 
@@ -2423,7 +2513,7 @@ if(res == 200) {
                 <div className="relative h-44 bg-[#081120] rounded-xl border border-teal-500/40 p-3 flex flex-col justify-between">
                   <div className="flex items-center justify-between text-[10px] text-slate-400">
                     <span className="text-emerald-400 font-bold">TAKE PROFIT TARGET (LOCKED): {dormantSignal.takeProfit}</span>
-                    <span className="text-emerald-400 font-bold">1:3.8 ASYMMETRIC R:R</span>
+                    <span className="text-emerald-400 font-bold">{dormantSignal.rrRatio} ASYMMETRIC R:R</span>
                   </div>
 
                   <div className="bg-teal-500/10 border border-teal-400/50 p-2.5 rounded-lg text-[11px] text-teal-200 flex items-center justify-between">

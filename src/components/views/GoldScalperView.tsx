@@ -50,6 +50,7 @@ import {
 import { useFinance } from '../../context/FinanceContext.tsx';
 import { useTradingViewQuotes, lookupTradingViewQuote } from '../../utils/tradingViewSync.ts';
 import { getMarketSession } from '../../utils/marketHours.ts';
+import { MAX_RISK_REWARD, getTimeframeProfile, resolveQuoteForTimeframe, evaluateDirectionalConfluence } from '../../utils/signalEngine.ts';
 
 // =========================================================================
 // TRADINGVIEW GOLD CHART ADVANCED EMBED
@@ -297,7 +298,7 @@ export const GoldScalperView: React.FC = () => {
     { time: '18:19', open: 3878.70, high: 3879.80, low: 3877.90, close: 3878.46 },
   ]);
 
-  // Anchor Gold Scalper spot price to live TradingView XAU/USD feed
+  // Anchor Gold Scalper spot price & indicators strictly to live TradingView XAU/USD feed
   const liveTvQuotes = useTradingViewQuotes(3200);
   useEffect(() => {
     const tvGold = lookupTradingViewQuote(liveTvQuotes, 'XAUUSD');
@@ -305,8 +306,29 @@ export const GoldScalperView: React.FC = () => {
       setGoldPrice(tvGold.price);
       setBidPrice(Number((tvGold.price - spreadPoints * 0.01).toFixed(2)));
       setAskPrice(Number((tvGold.price + spreadPoints * 0.01).toFixed(2)));
+
+      const tfMap: Record<string, string> = { '1': 'M1', '5': 'M5', '15': 'M15', '60': 'H1', '240': 'H4', 'D': 'D1' };
+      const activeTf = tfMap[tvInterval] || 'M1';
+      const tfSlice = resolveQuoteForTimeframe(tvGold, activeTf);
+      const evalRes = evaluateDirectionalConfluence(tvGold, tvGold.price, activeTf);
+
+      if (typeof tfSlice.rsi === 'number') {
+        setRsiVal(Number(tfSlice.rsi.toFixed(1)));
+      }
+      if (typeof tfSlice.ema20 === 'number' && typeof tfSlice.ema50 === 'number') {
+        setFastEmaVal(Number(tfSlice.ema20.toFixed(2)));
+        setSlowEmaVal(Number(tfSlice.ema50.toFixed(2)));
+      } else {
+        const offset = evalRes.direction === 'BUY' ? 1.15 : -1.15;
+        setFastEmaVal(Number((tvGold.price + offset * 0.6).toFixed(2)));
+        setSlowEmaVal(Number((tvGold.price - offset * 1.4).toFixed(2)));
+      }
+      if (typeof tvGold.atr === 'number' && tvGold.atr > 0) {
+        const tfProfile = getTimeframeProfile(activeTf);
+        setAtrVal(Number(Math.max(1.8, Math.min(24.0, tvGold.atr * tfProfile.volatilityScale * 0.45)).toFixed(2)));
+      }
     }
-  }, [liveTvQuotes, spreadPoints]);
+  }, [liveTvQuotes, spreadPoints, tvInterval]);
 
   // -------------------------------------------------------------------------
   // 4. OPEN POSITIONS & REAL MT5 TERMINAL SYNC
@@ -519,12 +541,18 @@ export const GoldScalperView: React.FC = () => {
     const isBullishCross = fastEmaVal > slowEmaVal && rsiVal >= strategyParams.buyRSI;
     const isBearishCross = fastEmaVal < slowEmaVal && rsiVal <= strategyParams.sellRSI;
 
+    // Map active chart interval to timeframe volatility multiplier & cap R:R <= 5.0
+    const tfMap: Record<string, string> = { '1': 'M1', '5': 'M5', '15': 'M15', '60': 'H1', '240': 'H4', 'D': 'D1' };
+    const tfProfile = getTimeframeProfile(tfMap[tvInterval] || 'M1');
+    const tfScale = Math.max(1.0, tfProfile.volatilityScale / 0.30);
+
     // Open new positions if condition met and slot available
     if ((isBullishCross || isBearishCross) && positions.length < strategyParams.maxPositionsPerSymbol) {
       const type: 'BUY' | 'SELL' = isBullishCross ? 'BUY' : 'SELL';
       const entryPrice = type === 'BUY' ? askPrice : bidPrice;
-      const stopDist = Number((atrVal * strategyParams.stopLossATR).toFixed(2));
-      const tpDist = Number((atrVal * strategyParams.takeProfitATR).toFixed(2));
+      const stopDist = Number((atrVal * strategyParams.stopLossATR * tfScale).toFixed(2));
+      const rawTpDist = Number((atrVal * strategyParams.takeProfitATR * tfScale).toFixed(2));
+      const tpDist = Number(Math.min(rawTpDist, stopDist * MAX_RISK_REWARD).toFixed(2));
       const sl = type === 'BUY' ? Number((entryPrice - stopDist).toFixed(2)) : Number((entryPrice + stopDist).toFixed(2));
       const tp = type === 'BUY' ? Number((entryPrice + tpDist).toFixed(2)) : Number((entryPrice - tpDist).toFixed(2));
 
@@ -582,8 +610,12 @@ export const GoldScalperView: React.FC = () => {
     setIsDispatchingOrder(true);
     const lot = lotOverride || tradeLot || 0.05;
     const entryPrice = action === 'BUY' ? askPrice : bidPrice;
-    const stopDist = Number((atrVal * tradeSlPoints).toFixed(2));
-    const tpDist = Number((atrVal * tradeTpPoints).toFixed(2));
+    const tfMap: Record<string, string> = { '1': 'M1', '5': 'M5', '15': 'M15', '60': 'H1', '240': 'H4', 'D': 'D1' };
+    const tfProfile = getTimeframeProfile(tfMap[tvInterval] || 'M1');
+    const tfScale = Math.max(1.0, tfProfile.volatilityScale / 0.30);
+    const stopDist = Number((atrVal * tradeSlPoints * tfScale).toFixed(2));
+    const rawTpDist = Number((atrVal * tradeTpPoints * tfScale).toFixed(2));
+    const tpDist = Number(Math.min(rawTpDist, stopDist * MAX_RISK_REWARD).toFixed(2));
     const sl = action === 'BUY' ? Number((entryPrice - stopDist).toFixed(2)) : Number((entryPrice + stopDist).toFixed(2));
     const tp = action === 'BUY' ? Number((entryPrice + tpDist).toFixed(2)) : Number((entryPrice - tpDist).toFixed(2));
     const newTicket = Math.floor(Math.random() * 8000000 + 1000000);
@@ -2332,8 +2364,19 @@ void CloseAllGoldPositions()
                 <span className="text-slate-200 font-mono font-bold">${atrVal.toFixed(2)}</span>
               </div>
               <div className="text-[11px] text-slate-400">
-                SL Distance: <strong className="text-rose-300 font-mono">${(atrVal * strategyParams.stopLossATR).toFixed(2)}</strong> (1.5x) ·
-                TP Distance: <strong className="text-emerald-300 font-mono">${(atrVal * strategyParams.takeProfitATR).toFixed(2)}</strong> (2.0x)
+                {(() => {
+                  const tfMap: Record<string, string> = { '1': 'M1', '5': 'M5', '15': 'M15', '60': 'H1', '240': 'H4', 'D': 'D1' };
+                  const tfP = getTimeframeProfile(tfMap[tvInterval] || 'M1');
+                  const tfScale = Math.max(1.0, tfP.volatilityScale / 0.30);
+                  const slD = atrVal * strategyParams.stopLossATR * tfScale;
+                  const tpD = Math.min(atrVal * strategyParams.takeProfitATR * tfScale, slD * MAX_RISK_REWARD);
+                  return (
+                    <>
+                      SL Distance ({tfP.label}): <strong className="text-rose-300 font-mono">${slD.toFixed(2)}</strong> ·
+                      TP Distance: <strong className="text-emerald-300 font-mono">${tpD.toFixed(2)}</strong> (1:{Math.min(MAX_RISK_REWARD, tpD / (slD || 1)).toFixed(1)} R:R)
+                    </>
+                  );
+                })()}
               </div>
             </div>
 
@@ -2400,7 +2443,13 @@ void CloseAllGoldPositions()
                   ${bidPrice.toFixed(2)}
                 </div>
                 <div className="text-[11px] text-slate-400 font-mono mt-0.5">
-                  SL: ${(bidPrice + (atrVal * tradeSlPoints)).toFixed(2)} · TP: ${(bidPrice - (atrVal * tradeTpPoints)).toFixed(2)}
+                  {(() => {
+                    const tfMap: Record<string, string> = { '1': 'M1', '5': 'M5', '15': 'M15', '60': 'H1', '240': 'H4', 'D': 'D1' };
+                    const tfScale = Math.max(1.0, getTimeframeProfile(tfMap[tvInterval] || 'M1').volatilityScale / 0.30);
+                    const slD = atrVal * tradeSlPoints * tfScale;
+                    const tpD = Math.min(atrVal * tradeTpPoints * tfScale, slD * MAX_RISK_REWARD);
+                    return `SL: $${(bidPrice + slD).toFixed(2)} · TP: $${(bidPrice - tpD).toFixed(2)}`;
+                  })()}
                 </div>
               </div>
             </button>
@@ -2451,7 +2500,11 @@ void CloseAllGoldPositions()
               <div>
                 <label className="block text-slate-400 text-[10px] uppercase font-semibold mb-1">Max Risk ($)</label>
                 <div className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b1120] border border-slate-800 text-rose-400 font-mono font-bold">
-                  -${(tradeLot * 100 * atrVal * tradeSlPoints).toFixed(2)}
+                  {(() => {
+                    const tfMap: Record<string, string> = { '1': 'M1', '5': 'M5', '15': 'M15', '60': 'H1', '240': 'H4', 'D': 'D1' };
+                    const tfScale = Math.max(1.0, getTimeframeProfile(tfMap[tvInterval] || 'M1').volatilityScale / 0.30);
+                    return `-$${(tradeLot * 100 * atrVal * tradeSlPoints * tfScale).toFixed(2)}`;
+                  })()}
                 </div>
               </div>
             </div>
@@ -2460,7 +2513,14 @@ void CloseAllGoldPositions()
             <div className="p-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 flex items-center justify-between text-[11px] font-mono">
               <span className="text-slate-400">Target Profit:</span>
               <span className="text-emerald-400 font-bold">
-                +${(tradeLot * 100 * atrVal * tradeTpPoints).toFixed(2)} (R:R 1:{(tradeTpPoints / tradeSlPoints).toFixed(1)})
+                {(() => {
+                  const tfMap: Record<string, string> = { '1': 'M1', '5': 'M5', '15': 'M15', '60': 'H1', '240': 'H4', 'D': 'D1' };
+                  const tfScale = Math.max(1.0, getTimeframeProfile(tfMap[tvInterval] || 'M1').volatilityScale / 0.30);
+                  const slD = atrVal * tradeSlPoints * tfScale;
+                  const tpD = Math.min(atrVal * tradeTpPoints * tfScale, slD * MAX_RISK_REWARD);
+                  const rr = Math.min(MAX_RISK_REWARD, tpD / (slD || 1));
+                  return `+$${(tradeLot * 100 * tpD).toFixed(2)} (R:R 1:${rr.toFixed(1)})`;
+                })()}
               </span>
             </div>
           </div>
@@ -2484,7 +2544,13 @@ void CloseAllGoldPositions()
                   ${askPrice.toFixed(2)}
                 </div>
                 <div className="text-[11px] text-slate-400 font-mono mt-0.5">
-                  SL: ${(askPrice - (atrVal * tradeSlPoints)).toFixed(2)} · TP: ${(askPrice + (atrVal * tradeTpPoints)).toFixed(2)}
+                  {(() => {
+                    const tfMap: Record<string, string> = { '1': 'M1', '5': 'M5', '15': 'M15', '60': 'H1', '240': 'H4', 'D': 'D1' };
+                    const tfScale = Math.max(1.0, getTimeframeProfile(tfMap[tvInterval] || 'M1').volatilityScale / 0.30);
+                    const slD = atrVal * tradeSlPoints * tfScale;
+                    const tpD = Math.min(atrVal * tradeTpPoints * tfScale, slD * MAX_RISK_REWARD);
+                    return `SL: $${(askPrice - slD).toFixed(2)} · TP: $${(askPrice + tpD).toFixed(2)}`;
+                  })()}
                 </div>
               </div>
             </button>

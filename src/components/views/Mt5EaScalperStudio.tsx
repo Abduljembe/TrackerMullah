@@ -87,6 +87,8 @@ import { LiveMarketTickerTape } from '../trading/LiveMarketTickerTape.tsx';
 import { BotArsenalHub } from '../trading/BotArsenalHub.tsx';
 import { BotDefinition, getBotById } from '../../utils/eaCatalog.ts';
 import { getAssetMarketSession } from '../../utils/marketHours.ts';
+import { computeTimeframeSignalLevels, resolveQuoteForTimeframe, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
+import { lookupTradingViewQuote, LiveTvQuote } from '../../utils/tradingViewSync.ts';
 
 export interface ScannedOpportunity {
   symbol: string;
@@ -910,6 +912,9 @@ export const Mt5EaScalperStudio: React.FC = () => {
   const [isAiScanning, setIsAiScanning] = useState<boolean>(false);
   const [scanStepText, setScanStepText] = useState<string>('');
   const [scanProgressPercent, setScanProgressPercent] = useState<number>(0);
+  const [scanTimeframe, setScanTimeframe] = useState<'M1' | 'M5' | 'M15' | 'M30' | 'H1' | 'H4' | 'D1'>('M5');
+  const scanTimeframeRef = useRef(scanTimeframe);
+  scanTimeframeRef.current = scanTimeframe;
   const [scannedOpportunities, setScannedOpportunities] = useState<ScannedOpportunity[]>(INITIAL_SCANNED_OPPORTUNITIES);
   const [selectedOppDetail, setSelectedOppDetail] = useState<ScannedOpportunity | null>(null);
   const [autoPilotScanner, setAutoPilotScanner] = useState<boolean>(false);
@@ -1197,11 +1202,11 @@ export const Mt5EaScalperStudio: React.FC = () => {
     setAiExecutionNotice(null);
 
     const steps = [
-      { text: 'Auditing Deriv 24/7 Synthetics, Cryptos & Global Assets (Vol 75, Crash, Boom, Step, BTC, Gold)...', pct: 25 },
-      { text: 'Scanning Institutional SMC: Asian/London Liquidity Sweeps, FVGs & Order Blocks...', pct: 50 },
-      { text: 'Calculating Technical Confluence: 20/50/200 EMAs, RSI 14 & ATR Volatility...', pct: 75 },
-      { text: 'Verifying Forex Factory News Guard & London/NY Overlap Killzone Liquidity...', pct: 90 },
-      { text: 'Synthesizing AI Confluence Scores & Isolating Top Asymmetric Setups...', pct: 100 },
+      { text: `Auditing Deriv 24/7 Synthetics, Cryptos & Global Assets strictly on ${scanTimeframe}...`, pct: 25 },
+      { text: `Scanning Institutional ${scanTimeframe} SMC: Liquidity Sweeps, FVGs & Order Blocks...`, pct: 50 },
+      { text: `Calculating ${scanTimeframe} Confluence & ATR Volatility (Strict Max 1:${MAX_RISK_REWARD} R:R)...`, pct: 75 },
+      { text: 'Verifying Forex Factory News Guard & Session Killzone Liquidity...', pct: 90 },
+      { text: `Synthesizing ${scanTimeframe} AI Signals & Isolating Top Setups...`, pct: 100 },
     ];
 
     for (let i = 0; i < steps.length; i++) {
@@ -1219,6 +1224,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
           minScore: 85,
           riskPercent: params.riskPercent,
           lots: activeTradingLot,
+          timeframe: scanTimeframe,
         }),
       });
       const data = await res.json();
@@ -1236,7 +1242,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
         setAiExecutionNotice({
           symbol: data.openedPosition.symbol,
           score: data.bestTrade?.score || 94,
-          grade: data.bestTrade?.grade || 'A+ PRIME SCALP',
+          grade: data.bestTrade?.grade || `A+ ${scanTimeframe} SETUP`,
           ticket: data.openedPosition.ticket,
           time: new Date().toLocaleTimeString(),
           type: data.openedPosition.type,
@@ -1249,7 +1255,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
           {
             id: `log-${Date.now()}`,
             time: new Date().toLocaleTimeString(),
-            text: `🎯 AI SNIPER AUTO-OPENED TOP SETUP: ${data.openedPosition.type} ${data.openedPosition.lots.toFixed(2)} Lots ${data.openedPosition.symbol} @ ${data.openedPosition.openPrice} (${data.bestTrade?.score}% Confluence - ${data.bestTrade?.grade}). SL: ${data.openedPosition.sl} | TP: ${data.openedPosition.tp}`,
+            text: `🎯 AI SNIPER (${scanTimeframe}) AUTO-OPENED: ${data.openedPosition.type} ${data.openedPosition.lots.toFixed(2)} Lots ${data.openedPosition.symbol} @ ${data.openedPosition.openPrice} (${data.bestTrade?.riskReward || '1:2.5'} R:R). SL: ${data.openedPosition.sl} | TP: ${data.openedPosition.tp}`,
             type: 'trade',
           },
           ...prev.slice(0, 40),
@@ -1260,7 +1266,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
           {
             id: `log-${Date.now()}`,
             time: new Date().toLocaleTimeString(),
-            text: `🔍 AI Market Scan Completed: ${data.totalScanned || 6} markets analyzed across all indicators & SMC. Top setup: ${data.bestTrade?.symbol || 'XAUUSD'} (${data.bestTrade?.score || 94}% Confluence). Regulated Lot: ${activeTradingLot.toFixed(2)} Lots.`,
+            text: `🔍 AI ${scanTimeframe} Market Scan Completed: ${data.totalScanned || 6} markets analyzed (Max 1:${MAX_RISK_REWARD} R:R). Top setup: ${data.bestTrade?.symbol || 'XAUUSD'} ${data.bestTrade?.type || 'BUY'} (${data.bestTrade?.riskReward || '1:2.8'}).`,
             type: 'info',
           },
           ...prev.slice(0, 40),
@@ -1273,6 +1279,52 @@ export const Mt5EaScalperStudio: React.FC = () => {
       setScanProgressPercent(0);
       setScanStepText('');
     }
+  };
+
+  // Switch scanner timeframe & immediately recalibrate opportunity levels & live TradingView direction cleanly
+  const handleSelectScanTimeframe = (newTf: 'M1' | 'M5' | 'M15' | 'M30' | 'H1' | 'H4' | 'D1') => {
+    setScanTimeframe(newTf);
+    setScannedOpportunities((prev) =>
+      prev.map((opp) => {
+        const q = lookupTradingViewQuote(anchorQuotesRef.current, opp.symbol);
+        const spot = q && q.price > 0 ? q.price : opp.basePrice;
+        const computed = computeTimeframeSignalLevels({
+          symbol: opp.symbol,
+          spotPrice: spot,
+          timeframe: newTf,
+          quote: q,
+          preferredDirection: opp.symbol === 'BOOM1000' ? 'BUY' : opp.symbol === 'CRASH1000' ? 'SELL' : undefined,
+        });
+        const tfSlice = resolveQuoteForTimeframe(q, newTf);
+        const pointMult = opp.symbol.includes('XAU') ? 100 : opp.category === 'FOREX' ? 10000 : 1;
+        const rsiStr = typeof tfSlice.rsi === 'number' ? tfSlice.rsi.toFixed(1) : (computed.direction === 'BUY' ? '58.4' : '41.6');
+        const tvRating = typeof tfSlice.recommendAll === 'number' ? tfSlice.recommendAll : computed.compositeScore;
+        return {
+          ...opp,
+          basePrice: spot,
+          timeframe: computed.timeframe,
+          type: computed.direction,
+          score: computed.confidenceScore,
+          grade: computed.confidenceScore >= 90 ? `A++ ${newTf} SNIPER` : computed.confidenceScore >= 82 ? `A+ ${newTf} SETUP` : `A ${newTf} SIGNAL`,
+          setup: computed.setupLabel,
+          entryZone: computed.entryZone,
+          sl: computed.sl,
+          tp1: computed.tp1,
+          tp2: computed.tp2,
+          riskReward: computed.riskReward,
+          tvScore: tvRating,
+          confluences: {
+            ...opp.confluences,
+            smc: `${computed.direction === 'BUY' ? 'SSL Sweep -> Bullish BOS' : 'BSL Sweep -> Bearish CHoCH'} (${newTf})`,
+            indicators: `RSI(${rsiStr}) + TV ${tvRating >= 0 ? '+' : ''}${tvRating.toFixed(2)} (${computed.direction})`,
+          },
+          projectedGain:
+            computed.unitLabel === 'pips'
+              ? `+${computed.tp1UnitValue} to +${computed.tp2UnitValue} pips`
+              : `+$${Math.round(computed.tp1Distance * pointMult * activeTradingLot)} - $${Math.round(computed.tp2Distance * pointMult * activeTradingLot)}`,
+        };
+      })
+    );
   };
 
   // 1-Click Snipe any specific scanned opportunity
@@ -1289,6 +1341,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
           price: opp.basePrice,
           sl: opp.sl,
           tp: opp.tp1,
+          timeframe: opp.timeframe || scanTimeframe,
         }),
       });
       const data = await res.json();
@@ -1574,7 +1627,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
   };
 
   // Store real-time anchor quotes from TradingView & Binance feeds
-  const anchorQuotesRef = useRef<Record<string, { symbol: string; price: number; changePercent: number; changeValue: number }>>({});
+  const anchorQuotesRef = useRef<Record<string, LiveTvQuote>>({});
   const lastActiveSymbolRef = useRef<string>(params.symbol);
   const livePriceRef = useRef<number>(livePrice);
   livePriceRef.current = livePrice;
@@ -1809,20 +1862,11 @@ export const Mt5EaScalperStudio: React.FC = () => {
         const data = await res.json();
         if (!data.quotes || !isMounted) return;
 
-        const quotes: Record<string, { symbol: string; price: number; changePercent: number; changeValue: number }> = data.quotes;
+        const quotes: Record<string, LiveTvQuote> = data.quotes;
         anchorQuotesRef.current = quotes;
 
         // Sync live price anchor tightly to TradingView feed (prefer OANDA/FX canonical quote)
-        const currentSym = params.symbol.replace('/', '').toUpperCase();
-        const activeQuote =
-          quotes[`OANDA:${currentSym}`] ||
-          quotes[`FX:${currentSym}`] ||
-          quotes[`FX_IDC:${currentSym}`] ||
-          quotes[`NASDAQ:${currentSym}`] ||
-          quotes[`SP:${currentSym}`] ||
-          quotes[`DJ:${currentSym}`] ||
-          quotes[params.symbol] ||
-          quotes[currentSym];
+        const activeQuote = lookupTradingViewQuote(quotes, params.symbol);
 
         if (activeQuote && activeQuote.price > 0) {
           const deltaPct = Math.abs(livePriceRef.current - activeQuote.price) / activeQuote.price;
@@ -1832,35 +1876,46 @@ export const Mt5EaScalperStudio: React.FC = () => {
           }
         }
 
-        // Update Scanned Opportunities with live TradingView tick prices
+        const activeTf = scanTimeframeRef.current;
+
+        // Update Scanned Opportunities dynamically with live TradingView direction, indicators & <= 1:5.0 R:R
         setScannedOpportunities((prevOpps) =>
           prevOpps.map((opp) => {
             const sym = opp.symbol.replace('/', '').toUpperCase();
-            const q =
-              quotes[sym] ||
-              quotes[`OANDA:${sym}`] ||
-              quotes[`FX:${sym}`] ||
-              quotes[`NASDAQ:${sym}`] ||
-              quotes[`SP:${sym}`] ||
-              quotes[`DJ:${sym}`];
+            const q = lookupTradingViewQuote(quotes, sym);
 
             if (q && q.price > 0) {
               const liveP = q.price;
-              const isGold = sym.includes('XAU');
-              const isIndex = sym.includes('NAS') || sym.includes('US30');
-              const isJpy = sym.includes('JPY');
-              const slOffset = isGold ? 13.5 : isIndex ? 70.0 : isJpy ? 0.35 : 0.0022;
-              const tp1Offset = isGold ? 16.0 : isIndex ? 145.0 : isJpy ? 0.7 : 0.0048;
-              const tp2Offset = isGold ? 35.0 : isIndex ? 320.0 : isJpy ? 1.4 : 0.0098;
-              const decimals = isGold || isJpy ? 2 : isIndex ? 1 : 5;
+              const tfToUse = opp.timeframe || activeTf;
+              const computed = computeTimeframeSignalLevels({
+                symbol: sym,
+                spotPrice: liveP,
+                timeframe: tfToUse,
+                quote: q,
+                preferredDirection: sym === 'BOOM1000' ? 'BUY' : sym === 'CRASH1000' ? 'SELL' : undefined,
+              });
+              const tfSlice = resolveQuoteForTimeframe(q, tfToUse);
+              const tvRating = typeof tfSlice.recommendAll === 'number' ? tfSlice.recommendAll : computed.compositeScore;
+              const rsiStr = typeof tfSlice.rsi === 'number' ? tfSlice.rsi.toFixed(1) : (computed.direction === 'BUY' ? '58.4' : '41.6');
 
               return {
                 ...opp,
                 basePrice: liveP,
-                entryZone: `${(liveP - (isGold ? 1.5 : isIndex ? 15 : 0.0005)).toFixed(decimals)} - ${(liveP + (isGold ? 1.2 : isIndex ? 15 : 0.0005)).toFixed(decimals)}`,
-                sl: Number((opp.type === 'BUY' ? liveP - slOffset : liveP + slOffset).toFixed(decimals)),
-                tp1: Number((opp.type === 'BUY' ? liveP + tp1Offset : liveP - tp1Offset).toFixed(decimals)),
-                tp2: Number((opp.type === 'BUY' ? liveP + tp2Offset : liveP - tp2Offset).toFixed(decimals)),
+                type: computed.direction,
+                score: computed.confidenceScore,
+                grade: computed.confidenceScore >= 90 ? `A++ ${tfToUse} SNIPER` : computed.confidenceScore >= 82 ? `A+ ${tfToUse} SETUP` : `A ${tfToUse} SIGNAL`,
+                setup: computed.setupLabel,
+                entryZone: computed.entryZone,
+                sl: computed.sl,
+                tp1: computed.tp1,
+                tp2: computed.tp2,
+                riskReward: computed.riskReward,
+                tvScore: tvRating,
+                confluences: {
+                  ...opp.confluences,
+                  smc: `${computed.direction === 'BUY' ? 'SSL Sweep -> Bullish BOS' : 'BSL Sweep -> Bearish CHoCH'} (${tfToUse})`,
+                  indicators: `RSI(${rsiStr}) + TV ${tvRating >= 0 ? '+' : ''}${tvRating.toFixed(2)} (${computed.direction})`,
+                },
               };
             }
             return opp;
@@ -3304,7 +3359,35 @@ export const Mt5EaScalperStudio: React.FC = () => {
               </div>
             </div>
 
-            {/* Main Action Controls Bar */}
+            {/* Scan Timeframe Selector + Main Action Controls Bar */}
+            <div className="p-3 rounded-xl bg-[#070f1d] border border-[#162844] flex flex-col sm:flex-row sm:items-center justify-between gap-3 relative z-10">
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-[#0df2c9]" />
+                <div>
+                  <div className="text-xs font-bold text-white">Scan Signal Timeframe</div>
+                  <div className="text-[10px] text-slate-400 font-mono">
+                    Calibrates SL, TP1, TP2 &amp; indicators to {scanTimeframe} (Max 1:{MAX_RISK_REWARD} R:R)
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-1 bg-[#050a14] p-1 rounded-xl border border-[#14233b]">
+                {(['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1'] as const).map((tf) => (
+                  <button
+                    key={tf}
+                    type="button"
+                    onClick={() => handleSelectScanTimeframe(tf)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold transition-all cursor-pointer ${
+                      scanTimeframe === tf
+                        ? 'bg-[#0df2c9] text-slate-950 shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {tf}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 relative z-10">
               <div className="flex flex-wrap items-center gap-3">
                 {/* Big Action: Scan & Auto-Open */}
@@ -3316,12 +3399,12 @@ export const Mt5EaScalperStudio: React.FC = () => {
                   {isAiScanning ? (
                     <>
                       <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
-                      <span>Scanning Markets with AI...</span>
+                      <span>Scanning {scanTimeframe} Markets with AI...</span>
                     </>
                   ) : (
                     <>
                       <Sparkles className="w-4 h-4 text-slate-950 animate-bounce" />
-                      <span>SCAN ALL TOOLS &amp; AUTO-OPEN BEST TRADE ({activeTradingLot.toFixed(2)} LOTS)</span>
+                      <span>SCAN {scanTimeframe} &amp; AUTO-OPEN BEST TRADE ({activeTradingLot.toFixed(2)} LOTS)</span>
                       <ArrowRight className="w-4 h-4 text-slate-950 transition-transform group-hover:translate-x-1" />
                     </>
                   )}
@@ -3334,7 +3417,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
                   className="flex items-center gap-2 px-4 py-3 rounded-xl bg-[#111e33] hover:bg-[#182a47] text-slate-200 border border-[#1e3459] text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
                 >
                   <Search className="w-3.5 h-3.5 text-teal-400" />
-                  <span>Scan Only (Preview Radar)</span>
+                  <span>Scan {scanTimeframe} Only (Preview)</span>
                 </button>
               </div>
 
