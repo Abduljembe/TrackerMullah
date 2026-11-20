@@ -76,6 +76,8 @@ import { useFinance } from '../../context/FinanceContext.tsx';
 import { useTradingViewQuotes, resolveTradingViewPrice, lookupTradingViewQuote } from '../../utils/tradingViewSync.ts';
 import { getAssetMarketSession } from '../../utils/marketHours.ts';
 import { computeTimeframeSignalLevels, evaluateDirectionalConfluence, getTimeframeProfile, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
+import { BotLiveChart } from '../trading/BotLiveChart.tsx';
+import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../utils/signalScorecard.ts';
 
 // =========================================================================
 // COMPREHENSIVE CURRENCIES & TRADING INSTRUMENTS CATALOG
@@ -471,6 +473,9 @@ export const BotStudioView: React.FC = () => {
 
   // Keep livePrice anchored to live TradingView quote & sync un-overridden dormant direction when feed loads/flips
   useEffect(() => {
+    if (liveTvQuotes && Object.keys(liveTvQuotes).length > 0) {
+      evaluateTrackedSignalsAgainstQuotes(liveTvQuotes);
+    }
     const tvSpot = resolveTradingViewPrice(liveTvQuotes, activeAsset.symbol, activeAsset.basePrice);
     if (tvSpot > 0 && Math.abs(livePriceRef.current - tvSpot) / tvSpot > 0.002) {
       livePriceRef.current = tvSpot;
@@ -533,6 +538,28 @@ export const BotStudioView: React.FC = () => {
       },
       ...prev.slice(0, 9),
     ]);
+
+    // Log locked signal to global Win-Rate Scorecard for automatic live TP/SL resolution
+    const halfWayTp = Number(
+      (
+        newSig.entryPrice +
+        (newSig.takeProfit - newSig.entryPrice) * 0.55
+      ).toFixed(activeAsset.digits)
+    );
+    recordTrackedSignal({
+      symbol: activeAsset.symbol,
+      market: activeAsset.category,
+      timeframe: selectedTimeframe,
+      source: 'BOT_STUDIO',
+      direction: actualDirection,
+      action: actualDirection === 'BUY' ? 'STRONG BUY' : 'STRONG SELL',
+      entryPrice: newSig.entryPrice,
+      sl: newSig.stopLoss,
+      tp1: halfWayTp,
+      tp2: newSig.takeProfit,
+      riskReward: newSig.rrRatio,
+      confidenceScore: newSig.confluenceScore,
+    });
 
     // If Auto-Pilot is active, auto-dispatch order immediately!
     if (autoPilotActive) {
@@ -1967,163 +1994,19 @@ export const BotStudioView: React.FC = () => {
                   </div>
                 </div>
 
-                {/* SVG Visual Candle Canvas */}
-                <div className="relative h-60 w-full bg-[#040812] rounded-2xl border border-[#132036] overflow-hidden p-2 select-none">
-                  {/* Grid Lines */}
-                  <div className="absolute inset-0 grid grid-rows-4 grid-cols-6 pointer-events-none opacity-20">
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-r border-teal-500/30" />
-                    <div className="border-b border-teal-500/30" />
-                  </div>
-
-                  {/* Horizontal TP Level Line */}
-                  <div
-                    style={{
-                      top: `${Math.min(92, Math.max(8, dormantSignal.type === 'BUY' ? 15 : 82))}%`,
-                    }}
-                    className="absolute left-0 right-0 border-b-2 border-dashed border-emerald-400 z-10 flex items-center justify-between px-3 pointer-events-none"
-                  >
-                    <span className="text-[10px] font-bold bg-emerald-500/90 text-slate-950 px-2 py-0.5 rounded shadow">
-                      TAKE PROFIT: {dormantSignal.takeProfit} (+{distToTp} pts)
-                    </span>
-                    <span className="text-[9px] text-emerald-300 font-bold bg-slate-950/80 px-1.5 py-0.5 rounded">
-                      {dormantSignal.rrRatio} R:R TARGET ({selectedTimeframe})
-                    </span>
-                  </div>
-
-                  {/* Horizontal Entry Level Line */}
-                  <div
-                    style={{
-                      top: '50%',
-                    }}
-                    className="absolute left-0 right-0 border-b border-sky-400/80 z-10 flex items-center justify-between px-3 pointer-events-none"
-                  >
-                    <span className="text-[10px] font-bold bg-sky-500/90 text-slate-950 px-2 py-0.5 rounded shadow">
-                      LOCKED ENTRY: {dormantSignal.entryPrice}
-                    </span>
-                    <span className="text-[9px] text-sky-200 font-bold bg-slate-950/80 px-1.5 py-0.5 rounded">
-                      FROZEN LEVEL
-                    </span>
-                  </div>
-
-                  {/* Horizontal SL / Break-Even Level Line */}
-                  <div
-                    style={{
-                      top: `${Math.min(92, Math.max(8, dormantSignal.type === 'BUY' ? (dormantSignal.isBreakEvenArmed ? 48 : 82) : (dormantSignal.isBreakEvenArmed ? 52 : 15)))}%`,
-                    }}
-                    className={`absolute left-0 right-0 border-b-2 border-dashed z-10 flex items-center justify-between px-3 pointer-events-none ${
-                      dormantSignal.isBreakEvenArmed ? 'border-cyan-400' : 'border-rose-500'
-                    }`}
-                  >
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded shadow ${
-                      dormantSignal.isBreakEvenArmed ? 'bg-cyan-400 text-slate-950' : 'bg-rose-500 text-white'
-                    }`}>
-                      {dormantSignal.isBreakEvenArmed ? `🛡️ BREAK-EVEN: ${dormantSignal.stopLoss}` : `STOP LOSS: ${dormantSignal.stopLoss} (-${distToSl} pts)`}
-                    </span>
-                    <span className={`text-[9px] font-bold bg-slate-950/80 px-1.5 py-0.5 rounded ${
-                      dormantSignal.isBreakEvenArmed ? 'text-cyan-300' : 'text-rose-300'
-                    }`}>
-                      {dormantSignal.isBreakEvenArmed ? 'RISK-FREE LOCK' : 'MAX INVALIDATION'}
-                    </span>
-                  </div>
-
-                  {/* Simulated Dynamic Candle Stream aligned to BUY/SELL trend */}
-                  <div className="absolute inset-x-0 bottom-4 top-4 flex items-center justify-around px-4">
-                    {(dormantSignal.type === 'BUY'
-                      ? [
-                          { h: 42, l: 30, o: 35, c: 40, isUp: true },
-                          { h: 48, l: 36, o: 39, c: 46, isUp: true },
-                          { h: 46, l: 38, o: 45, c: 41, isUp: false },
-                          { h: 54, l: 40, o: 42, c: 51, isUp: true },
-                          { h: 58, l: 48, o: 50, c: 56, isUp: true },
-                          { h: 57, l: 47, o: 55, c: 49, isUp: false },
-                          { h: 63, l: 48, o: 50, c: 60, isUp: true },
-                          { h: 68, l: 56, o: 61, c: 65, isUp: true },
-                          { h: 66, l: 58, o: 64, c: 60, isUp: false },
-                          { h: 72, l: 59, o: 61, c: 70, isUp: true },
-                          { h: 76, l: 66, o: 69, c: 74, isUp: true },
-                          { h: 75, l: 67, o: 73, c: 71, isUp: false },
-                          { h: 82, l: 70, o: 72, c: 79, isUp: true },
-                          { h: 86, l: 75, o: 78, c: 84, isUp: true },
-                        ]
-                      : [
-                          { h: 86, l: 75, o: 84, c: 78, isUp: false },
-                          { h: 82, l: 70, o: 79, c: 72, isUp: false },
-                          { h: 77, l: 68, o: 71, c: 75, isUp: true },
-                          { h: 75, l: 64, o: 74, c: 66, isUp: false },
-                          { h: 69, l: 59, o: 67, c: 61, isUp: false },
-                          { h: 66, l: 57, o: 60, c: 64, isUp: true },
-                          { h: 64, l: 52, o: 63, c: 54, isUp: false },
-                          { h: 58, l: 47, o: 56, c: 49, isUp: false },
-                          { h: 54, l: 45, o: 48, c: 52, isUp: true },
-                          { h: 52, l: 40, o: 51, c: 42, isUp: false },
-                          { h: 46, l: 36, o: 44, c: 38, isUp: false },
-                          { h: 43, l: 35, o: 37, c: 41, isUp: true },
-                          { h: 41, l: 30, o: 40, c: 32, isUp: false },
-                          { h: 35, l: 24, o: 33, c: 26, isUp: false },
-                        ]
-                    ).map((c, idx) => (
-                      <div key={idx} className="flex flex-col items-center h-full justify-center w-2 relative">
-                        {/* High-Low Wick */}
-                        <div
-                          style={{ height: `${c.h - c.l}%` }}
-                          className={`w-[1px] absolute ${c.isUp ? 'bg-emerald-400' : 'bg-rose-400'}`}
-                        />
-                        {/* Candle Body */}
-                        <div
-                          style={{ height: `${Math.max(4, Math.abs(c.c - c.o))}%` }}
-                          className={`w-2.5 rounded-[1px] relative z-0 ${
-                            c.isUp
-                              ? 'bg-gradient-to-t from-emerald-600 to-emerald-400 border border-emerald-300'
-                              : 'bg-gradient-to-t from-rose-600 to-rose-400 border border-rose-300'
-                          }`}
-                        />
-                      </div>
-                    ))}
-
-                    {/* Active Live Head Candle */}
-                    <div className="flex flex-col items-center h-full justify-center w-3 relative">
-                      <div
-                        style={{ height: '35%' }}
-                        className={`w-[1.5px] absolute ${lastTickDir === 'UP' ? 'bg-[#0df2c9]' : 'bg-rose-400'}`}
-                      />
-                      <div
-                        style={{ height: '22%' }}
-                        className={`w-3.5 rounded-[1px] relative z-10 shadow-lg ${
-                          lastTickDir === 'UP'
-                            ? 'bg-gradient-to-t from-teal-500 to-[#0df2c9] border border-white shadow-teal-500/50'
-                            : 'bg-gradient-to-t from-red-600 to-rose-400 border border-white shadow-rose-500/50'
-                        }`}
-                      />
-
-                      {/* Pulsing Live Price Ping */}
-                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-cyan-400/30 animate-ping pointer-events-none" />
-                    </div>
-                  </div>
-
-                  {/* Bottom Right Live Cursor Badge */}
-                  <div className="absolute bottom-2 right-2 bg-[#091222]/90 border border-teal-500/40 px-2.5 py-1 rounded-lg text-xs font-mono text-white flex items-center gap-2">
-                    <span className="text-[10px] text-slate-400">SPOT:</span>
-                    <span className={`font-bold ${lastTickDir === 'UP' ? 'text-[#0df2c9]' : 'text-rose-400'}`}>
-                      {livePrice.toLocaleString(undefined, { minimumFractionDigits: activeAsset.digits })}
-                    </span>
-                  </div>
-                </div>
+                {/* Real Interactive Lightweight-Charts OHLCV Canvas */}
+                <BotLiveChart
+                  symbol={activeAsset.symbol}
+                  category={activeAsset.category}
+                  timeframe={selectedTimeframe}
+                  digits={activeAsset.digits}
+                  livePrice={livePrice}
+                  entryPrice={dormantSignal.entryPrice}
+                  takeProfit={dormantSignal.takeProfit}
+                  stopLoss={dormantSignal.stopLoss}
+                  isBreakEvenArmed={dormantSignal.isBreakEvenArmed}
+                  rrRatio={dormantSignal.rrRatio}
+                />
               </div>
 
               {/* IN-STUDIO DIRECT ORDER EXECUTION PAD */}

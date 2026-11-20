@@ -89,6 +89,7 @@ import { BotDefinition, getBotById } from '../../utils/eaCatalog.ts';
 import { getAssetMarketSession } from '../../utils/marketHours.ts';
 import { computeTimeframeSignalLevels, resolveQuoteForTimeframe, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
 import { lookupTradingViewQuote, LiveTvQuote } from '../../utils/tradingViewSync.ts';
+import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../utils/signalScorecard.ts';
 
 export interface ScannedOpportunity {
   symbol: string;
@@ -1230,6 +1231,23 @@ export const Mt5EaScalperStudio: React.FC = () => {
       const data = await res.json();
       if (data.opportunities && Array.isArray(data.opportunities)) {
         setScannedOpportunities(data.opportunities);
+        const topPick = data.bestTrade || data.opportunities[0];
+        if (topPick && topPick.basePrice > 0) {
+          recordTrackedSignal({
+            symbol: topPick.symbol,
+            market: topPick.category || 'FOREX',
+            timeframe: topPick.timeframe || scanTimeframe,
+            source: 'EA_SCANNER',
+            direction: topPick.type === 'SELL' ? 'SELL' : 'BUY',
+            action: topPick.type === 'SELL' ? 'STRONG SELL' : 'STRONG BUY',
+            entryPrice: topPick.basePrice,
+            sl: topPick.sl,
+            tp1: topPick.tp1,
+            tp2: topPick.tp2,
+            riskReward: topPick.riskReward || '1:2.5',
+            confidenceScore: topPick.score || 88,
+          });
+        }
       }
       setLastScanTimestamp(new Date().toLocaleTimeString());
 
@@ -1864,6 +1882,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
 
         const quotes: Record<string, LiveTvQuote> = data.quotes;
         anchorQuotesRef.current = quotes;
+        evaluateTrackedSignalsAgainstQuotes(quotes);
 
         // Sync live price anchor tightly to TradingView feed (prefer OANDA/FX canonical quote)
         const activeQuote = lookupTradingViewQuote(quotes, params.symbol);

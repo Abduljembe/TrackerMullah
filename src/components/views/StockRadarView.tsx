@@ -79,6 +79,8 @@ import { generateCandles, enrichCandlesWithIndicators, computePeriodStats, Timef
 import { getMarketSession, getAssetMarketSession, MarketSessionInfo } from '../../utils/marketHours.ts';
 import { lookupTradingViewQuote, resolveTradingViewPrice, useTradingViewQuotes } from '../../utils/tradingViewSync.ts';
 import { computeTimeframeSignalLevels, getTimeframeProfile, resolveQuoteForTimeframe, sanitizeRiskRewardString, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
+import { SignalScorecardDesk } from '../common/SignalScorecardDesk.tsx';
+import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../utils/signalScorecard.ts';
 
 export interface TradingSignal {
   action: 'STRONG BUY' | 'BUY' | 'NEUTRAL' | 'HOLD' | 'SELL' | 'STRONG SELL';
@@ -1690,6 +1692,7 @@ export const StockRadarView: React.FC = () => {
   }, [selectedStock.market, selectedStock.ticker]);
   const [bottomTab, setBottomTab] = useState<
     | 'paper'
+    | 'scorecard'
     | 'orderflow'
     | 'livetv'
     | 'journal'
@@ -1710,6 +1713,13 @@ export const StockRadarView: React.FC = () => {
     | 'cot'
     | 'camarilla'
   >('paper');
+
+  // Auto-resolve tracked signals globally against incoming live TradingView quotes
+  useEffect(() => {
+    if (liveTvQuotes && Object.keys(liveTvQuotes).length > 0) {
+      evaluateTrackedSignalsAgainstQuotes(liveTvQuotes);
+    }
+  }, [liveTvQuotes]);
 
   // Price Alerts Modal & Notification State
   const [isAlertsModalOpen, setIsAlertsModalOpen] = useState(false);
@@ -1912,6 +1922,30 @@ export const StockRadarView: React.FC = () => {
         }
       }
       setAiReport(data);
+
+      // Log verified scanned signal to Signal Win-Rate Scorecard
+      const sigObj = data?.signal || {};
+      const parseNum = (str: unknown, fallback: number) => {
+        if (typeof str !== 'string') return fallback;
+        const m = str.replace(/,/g, '').match(/-?\d+(\.\d+)?/);
+        const val = m ? parseFloat(m[0]) : NaN;
+        return Number.isFinite(val) && val > 0 ? val : fallback;
+      };
+      const actUpper = String(sigObj.action || liveComputed.action).toUpperCase();
+      recordTrackedSignal({
+        symbol: stock.ticker,
+        market: stock.market,
+        timeframe: tfProfile.label,
+        source: 'RADAR',
+        direction: actUpper.includes('SELL') ? 'SELL' : 'BUY',
+        action: actUpper,
+        entryPrice: liveSpotPrice,
+        sl: parseNum(sigObj.stopLoss, liveComputed.sl),
+        tp1: parseNum(sigObj.takeProfit1, liveComputed.tp1),
+        tp2: parseNum(sigObj.takeProfit2, liveComputed.tp2),
+        riskReward: sigObj.riskReward || liveComputed.riskReward,
+        confidenceScore: sigObj.confidenceScore || liveComputed.confidenceScore,
+      });
     } catch {
       // Deterministic analytical profile with rich signal strictly scaled to timeframe & max 1:5.0 R:R
       const isFx = stock.market === 'FOREX' || stock.market === 'METALS' || stock.market === 'INDICES';
@@ -2038,6 +2072,21 @@ export const StockRadarView: React.FC = () => {
             summary: `Volume & indicator alignment evaluated on ${tfProfile.label} timeframe (${computed.riskReward} R:R).`,
           },
         ],
+      });
+
+      recordTrackedSignal({
+        symbol: stock.ticker,
+        market: stock.market,
+        timeframe: tfProfile.label,
+        source: 'RADAR',
+        direction: computed.direction,
+        action: computed.action,
+        entryPrice: liveSpotPrice,
+        sl: computed.sl,
+        tp1: computed.tp1,
+        tp2: computed.tp2,
+        riskReward: computed.riskReward,
+        confidenceScore: computed.confidenceScore,
       });
     } finally {
       setIsAiLoading(false);
@@ -3539,6 +3588,18 @@ Summary: ${sig.summary}`;
                 </button>
 
                 <button
+                  onClick={() => setBottomTab('scorecard')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    bottomTab === 'scorecard'
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Signal Win-Rate Scorecard</span>
+                </button>
+
+                <button
                   onClick={() => setBottomTab('journal')}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
                     bottomTab === 'journal'
@@ -3791,6 +3852,47 @@ Summary: ${sig.summary}`;
                 }}
               />
             )}
+
+            {/* Tab: Live Signal Win-Rate Scorecard & Auto-Resolution */}
+            {bottomTab === 'scorecard' && (() => {
+              const parsePriceVal = (s: unknown, fallback: number) => {
+                if (typeof s !== 'string') return fallback;
+                const m = s.replace(/,/g, '').match(/-?\d+(\.\d+)?/);
+                const v = m ? parseFloat(m[0]) : NaN;
+                return Number.isFinite(v) && v > 0 ? v : fallback;
+              };
+              const sigLvl = computeTimeframeSignalLevels({
+                symbol: selectedStock.ticker.replace('/', ''),
+                spotPrice: currentDisplayPrice,
+                timeframe: activeSignal.timeframe || timeframe || '15m',
+                quote: currentTvQuote,
+                market: selectedStock.market,
+              });
+              return (
+                <SignalScorecardDesk
+                  liveTvQuotes={liveTvQuotes}
+                  currentTicker={selectedStock.ticker}
+                  currentMarket={selectedStock.market}
+                  currentPrice={currentDisplayPrice}
+                  activeSignalSnapshot={{
+                    action: activeSignal.action,
+                    timeframe: activeSignal.timeframe || timeframe || '15m',
+                    entryPrice: currentDisplayPrice,
+                    sl: parsePriceVal(activeSignal.stopLoss, sigLvl.sl),
+                    tp1: parsePriceVal(activeSignal.takeProfit1, sigLvl.tp1),
+                    tp2: parsePriceVal(activeSignal.takeProfit2, sigLvl.tp2),
+                    riskReward: activeSignal.riskReward,
+                    confidenceScore: activeSignal.confidenceScore,
+                  }}
+                  onSelectSymbol={(sym) => {
+                    const match = FEATURED_ASSETS.find(
+                      (a) => a.ticker === sym || a.ticker.replace('/', '') === sym.replace('/', '')
+                    );
+                    if (match) setSelectedStock(match);
+                  }}
+                />
+              );
+            })()}
 
             {/* Tab 2: Performance Journal & Equity Curve */}
             {bottomTab === 'journal' && (

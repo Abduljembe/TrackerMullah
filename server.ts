@@ -2820,7 +2820,10 @@ app.get('/api/stocks/history', async (req, res) => {
       'USD/KES': 'USDKES=X',
     };
 
-    const yahooSym = yahooMap[clean] || (clean.includes('/') ? `${clean.replace('/', '')}=X` : '');
+    const isSixLetterFx = /^[A-Z]{6}$/.test(clean) && !clean.startsWith('1HZ');
+    const yahooSym =
+      yahooMap[clean] ||
+      (clean.includes('/') ? `${clean.replace('/', '')}=X` : isSixLetterFx ? `${clean}=X` : '');
     if (!yahooSym) {
       return res.json({ success: false, candles: [], reason: 'no_yahoo_symbol' });
     }
@@ -2855,7 +2858,7 @@ app.get('/api/stocks/history', async (req, res) => {
     const closes: number[] = quote.close || [];
     const volumes: number[] = quote.volume || [];
 
-    const candles = [];
+    const rawCandles = [];
     for (let i = 0; i < timestamps.length; i++) {
       const o = opens[i];
       const h = highs[i];
@@ -2873,23 +2876,43 @@ app.get('/api/stocks/history', async (req, res) => {
         ? `${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} ${timeLabel}`
         : d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
 
-      candles.push({
+      rawCandles.push({
         time: t,
         timeLabel,
         fullDate,
-        open: Number(o.toFixed(o < 10 ? 4 : 2)),
-        high: Number(h.toFixed(h < 10 ? 4 : 2)),
-        low: Number(l.toFixed(l < 10 ? 4 : 2)),
-        close: Number(c.toFixed(c < 10 ? 4 : 2)),
+        open: Number(o.toFixed(o < 10 ? 5 : 2)),
+        high: Number(h.toFixed(h < 10 ? 5 : 2)),
+        low: Number(l.toFixed(l < 10 ? 5 : 2)),
+        close: Number(c.toFixed(c < 10 ? 5 : 2)),
         volume: Math.round(typeof volumes[i] === 'number' ? volumes[i] : 0),
       });
+    }
+
+    let candles = rawCandles;
+    if (tf === '4H' && rawCandles.length >= 4) {
+      const grouped = [];
+      for (let i = 0; i < rawCandles.length; i += 4) {
+        const slice = rawCandles.slice(i, i + 4);
+        if (slice.length === 0) continue;
+        grouped.push({
+          time: slice[0].time,
+          timeLabel: slice[0].timeLabel,
+          fullDate: slice[0].fullDate,
+          open: slice[0].open,
+          high: Math.max(...slice.map((b) => b.high)),
+          low: Math.min(...slice.map((b) => b.low)),
+          close: slice[slice.length - 1].close,
+          volume: slice.reduce((acc, b) => acc + b.volume, 0),
+        });
+      }
+      candles = grouped;
     }
 
     return res.json({
       success: candles.length > 0,
       ticker: rawTicker,
       yahooSymbol: yahooSym,
-      interval,
+      interval: tf === '4H' ? '4h' : interval,
       candles,
     });
   } catch {

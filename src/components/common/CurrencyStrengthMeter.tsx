@@ -1,15 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
-  TrendingUp,
-  TrendingDown,
-  Layers,
-  Zap,
   ArrowRight,
   Flame,
   Globe,
-  RotateCcw,
 } from 'lucide-react';
 import { getMarketSession } from '../../utils/marketHours.ts';
+import { useTradingViewQuotes, lookupTradingViewQuote } from '../../utils/tradingViewSync.ts';
+import { computeTimeframeSignalLevels, resolveQuoteForTimeframe } from '../../utils/signalEngine.ts';
 
 interface CurrencyScore {
   code: string;
@@ -24,59 +21,153 @@ interface CurrencyStrengthMeterProps {
   onSelectPair?: (pairTicker: string) => void;
 }
 
+const STRENGTH_CROSSES: Array<{ ticker: string; base: string; quote: string }> = [
+  { ticker: 'EUR/USD', base: 'EUR', quote: 'USD' },
+  { ticker: 'GBP/USD', base: 'GBP', quote: 'USD' },
+  { ticker: 'USD/JPY', base: 'USD', quote: 'JPY' },
+  { ticker: 'USD/CHF', base: 'USD', quote: 'CHF' },
+  { ticker: 'AUD/USD', base: 'AUD', quote: 'USD' },
+  { ticker: 'USD/CAD', base: 'USD', quote: 'CAD' },
+  { ticker: 'NZD/USD', base: 'NZD', quote: 'USD' },
+  { ticker: 'EUR/GBP', base: 'EUR', quote: 'GBP' },
+  { ticker: 'EUR/JPY', base: 'EUR', quote: 'JPY' },
+  { ticker: 'GBP/JPY', base: 'GBP', quote: 'JPY' },
+  { ticker: 'AUD/JPY', base: 'AUD', quote: 'JPY' },
+  { ticker: 'CAD/JPY', base: 'CAD', quote: 'JPY' },
+  { ticker: 'CHF/JPY', base: 'CHF', quote: 'JPY' },
+  { ticker: 'EUR/CHF', base: 'EUR', quote: 'CHF' },
+  { ticker: 'EUR/AUD', base: 'EUR', quote: 'AUD' },
+  { ticker: 'GBP/AUD', base: 'GBP', quote: 'AUD' },
+  { ticker: 'AUD/CAD', base: 'AUD', quote: 'CAD' },
+  { ticker: 'AUD/NZD', base: 'AUD', quote: 'NZD' },
+  { ticker: 'USD/KES', base: 'USD', quote: 'KES' },
+  { ticker: 'GBP/KES', base: 'GBP', quote: 'KES' },
+  { ticker: 'EUR/KES', base: 'EUR', quote: 'KES' },
+  { ticker: 'XAU/USD', base: 'XAU', quote: 'USD' },
+  { ticker: 'XAU/EUR', base: 'XAU', quote: 'EUR' },
+];
+
+const CURRENCY_META: Array<{ code: string; name: string }> = [
+  { code: 'XAU', name: 'Gold Bullion' },
+  { code: 'USD', name: 'US Dollar' },
+  { code: 'EUR', name: 'Euro' },
+  { code: 'GBP', name: 'British Pound' },
+  { code: 'JPY', name: 'Japanese Yen' },
+  { code: 'CHF', name: 'Swiss Franc' },
+  { code: 'AUD', name: 'Australian Dollar' },
+  { code: 'CAD', name: 'Canadian Dollar' },
+  { code: 'NZD', name: 'New Zealand Dollar' },
+  { code: 'KES', name: 'Kenyan Shilling' },
+];
+
+const HEATMAP_UNIVERSE = [
+  { pair: 'XAU/USD', category: 'Precious Metals', market: 'METALS' as const, fallbackPrice: 3865.0 },
+  { pair: 'USD/KES', category: 'East Africa FX', market: 'FOREX' as const, fallbackPrice: 129.85 },
+  { pair: 'EUR/USD', category: 'Major FX', market: 'FOREX' as const, fallbackPrice: 1.1005 },
+  { pair: 'GBP/USD', category: 'Major FX', market: 'FOREX' as const, fallbackPrice: 1.321 },
+  { pair: 'USD/JPY', category: 'Asian Session', market: 'FOREX' as const, fallbackPrice: 159.5 },
+  { pair: 'GBP/KES', category: 'Diaspora FX', market: 'FOREX' as const, fallbackPrice: 171.6 },
+  { pair: 'EUR/KES', category: 'Regional FX', market: 'FOREX' as const, fallbackPrice: 143.1 },
+  { pair: 'AUD/USD', category: 'Commodity FX', market: 'FOREX' as const, fallbackPrice: 0.654 },
+  { pair: 'USD/CAD', category: 'North American FX', market: 'FOREX' as const, fallbackPrice: 1.389 },
+];
+
 export const CurrencyStrengthMeter: React.FC<CurrencyStrengthMeterProps> = ({ onSelectPair }) => {
   const fxSession = getMarketSession('FOREX');
-  // Live dynamic currency scores across all global reserve currencies + Gold + KES
-  const [currencies, setCurrencies] = useState<CurrencyScore[]>([
-    { code: 'XAU', name: 'Gold Bullion', score: 9.4, change24h: 0.71, bias: 'BULLISH', status: 'Strong' },
-    { code: 'USD', name: 'US Dollar', score: 8.6, change24h: 0.42, bias: 'BULLISH', status: 'Strong' },
-    { code: 'KES', name: 'Kenyan Shilling', score: 7.8, change24h: 0.28, bias: 'BULLISH', status: 'Strong' },
-    { code: 'GBP', name: 'British Pound', score: 6.4, change24h: 0.15, bias: 'NEUTRAL', status: 'Moderate' },
-    { code: 'CAD', name: 'Canadian Dollar', score: 5.7, change24h: -0.05, bias: 'NEUTRAL', status: 'Moderate' },
-    { code: 'CHF', name: 'Swiss Franc', score: 5.2, change24h: -0.12, bias: 'NEUTRAL', status: 'Moderate' },
-    { code: 'AUD', name: 'Australian Dollar', score: 4.8, change24h: -0.22, bias: 'NEUTRAL', status: 'Moderate' },
-    { code: 'NZD', name: 'New Zealand Dollar', score: 4.1, change24h: -0.31, bias: 'BEARISH', status: 'Weak' },
-    { code: 'EUR', name: 'Euro', score: 3.5, change24h: -0.38, bias: 'BEARISH', status: 'Weak' },
-    { code: 'JPY', name: 'Japanese Yen', score: 2.4, change24h: -0.65, bias: 'BEARISH', status: 'Weak' },
-  ]);
+  const [selectedTf, setSelectedTf] = useState<'15m' | '1H' | '4H' | '1D'>('1H');
+  const liveTvQuotes = useTradingViewQuotes(3000);
 
-  // Micro-fluctuations every 6s ONLY when the 24/5 FX market is open
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (!getMarketSession('FOREX').isOpen) return;
-      setCurrencies((prev) =>
-        prev.map((c) => {
-          const delta = (Math.random() - 0.48) * 0.15;
-          const newScore = Math.max(1.0, Math.min(9.9, Math.round((c.score + delta) * 10) / 10));
-          const bias: 'BULLISH' | 'NEUTRAL' | 'BEARISH' =
-            newScore >= 7.0 ? 'BULLISH' : newScore >= 4.5 ? 'NEUTRAL' : 'BEARISH';
-          const status: 'Strong' | 'Moderate' | 'Weak' =
-            newScore >= 7.0 ? 'Strong' : newScore >= 4.5 ? 'Moderate' : 'Weak';
-          return {
-            ...c,
-            score: newScore,
-            status,
-            bias,
-          };
-        }).sort((a, b) => b.score - a.score)
-      );
-    }, 6000);
+  const currencies: CurrencyScore[] = useMemo(() => {
+    const accum = new Map<string, { scoreSum: number; pctSum: number; count: number }>();
+    for (const meta of CURRENCY_META) {
+      accum.set(meta.code, { scoreSum: 0, pctSum: 0, count: 0 });
+    }
 
-    return () => clearInterval(timer);
-  }, []);
+    for (const cross of STRENGTH_CROSSES) {
+      const q = lookupTradingViewQuote(liveTvQuotes, cross.ticker);
+      if (!q) continue;
+      const slice = resolveQuoteForTimeframe(q, selectedTf);
+      const pct = typeof slice.changePercent === 'number' ? slice.changePercent : (q.changePercent ?? 0);
+      const rec = typeof slice.recommendAll === 'number' ? slice.recommendAll : (q.recommendAll ?? 0);
+      // Combine real timeframe price % change with TradingView oscillator/MA rating (-1..+1)
+      const compositeDelta = pct * 1.45 + rec * 1.15;
 
-  // Cross-Pair Heatmap Matrix data
-  const heatmapPairs = [
-    { pair: 'XAU/USD', change: '+0.85%', bias: 'STRONG BUY', category: 'Precious Metals' },
-    { pair: 'USD/KES', change: '-0.31%', bias: 'STRONG BUY', category: 'East Africa FX' },
-    { pair: 'EUR/USD', change: '+0.32%', bias: 'BUY', category: 'Major FX' },
-    { pair: 'GBP/USD', change: '+0.37%', bias: 'BUY', category: 'Major FX' },
-    { pair: 'USD/JPY', change: '+0.43%', bias: 'STRONG BUY', category: 'Asian Session' },
-    { pair: 'GBP/KES', change: '+0.21%', bias: 'BUY', category: 'Diaspora FX' },
-    { pair: 'EUR/KES', change: '+0.18%', bias: 'NEUTRAL', category: 'Regional FX' },
-    { pair: 'AUD/USD', change: '-0.27%', bias: 'SELL', category: 'Commodity FX' },
-    { pair: 'USD/CAD', change: '+0.16%', bias: 'BUY', category: 'North American FX' },
-  ];
+      const baseAcc = accum.get(cross.base);
+      const quoteAcc = accum.get(cross.quote);
+      if (baseAcc) {
+        baseAcc.scoreSum += compositeDelta;
+        baseAcc.pctSum += pct;
+        baseAcc.count += 1;
+      }
+      if (quoteAcc) {
+        quoteAcc.scoreSum -= compositeDelta;
+        quoteAcc.pctSum -= pct;
+        quoteAcc.count += 1;
+      }
+    }
+
+    return CURRENCY_META.map((meta) => {
+      const acc = accum.get(meta.code)!;
+      const avgDelta = acc.count > 0 ? acc.scoreSum / acc.count : 0;
+      const avgPct = acc.count > 0 ? acc.pctSum / acc.count : 0;
+      const score = Math.max(0.8, Math.min(9.9, Number((5.0 + avgDelta * 2.15).toFixed(1))));
+      const bias: 'BULLISH' | 'NEUTRAL' | 'BEARISH' =
+        score >= 6.4 ? 'BULLISH' : score >= 4.2 ? 'NEUTRAL' : 'BEARISH';
+      const status: 'Strong' | 'Moderate' | 'Weak' =
+        score >= 6.4 ? 'Strong' : score >= 4.2 ? 'Moderate' : 'Weak';
+
+      return {
+        code: meta.code,
+        name: meta.name,
+        score,
+        change24h: Number(avgPct.toFixed(2)),
+        bias,
+        status,
+      };
+    }).sort((a, b) => b.score - a.score);
+  }, [liveTvQuotes, selectedTf]);
+
+  const heatmapPairs = useMemo(() => {
+    return HEATMAP_UNIVERSE.map((item) => {
+      const q = lookupTradingViewQuote(liveTvQuotes, item.pair);
+      const spot = q && q.price > 0 ? q.price : item.fallbackPrice;
+      const slice = resolveQuoteForTimeframe(q, selectedTf);
+      const pct = typeof slice.changePercent === 'number' ? slice.changePercent : (q?.changePercent ?? 0);
+      const computed = computeTimeframeSignalLevels({
+        symbol: item.pair.replace('/', ''),
+        spotPrice: spot,
+        timeframe: selectedTf,
+        quote: q,
+        market: item.market,
+      });
+      return {
+        pair: item.pair,
+        category: item.category,
+        changeNum: pct,
+        change: `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`,
+        bias: computed.action,
+        spot,
+      };
+    });
+  }, [liveTvQuotes, selectedTf]);
+
+  // Identify strongest vs weakest live divergence setup
+  const topDivergenceLabel = useMemo(() => {
+    if (currencies.length < 2) return 'Scanning Live Crosses...';
+    const strongest = currencies[0];
+    const weakest = currencies[currencies.length - 1];
+    // Find a direct pair matching strongest & weakest if available
+    const direct = STRENGTH_CROSSES.find(
+      (c) =>
+        (c.base === strongest.code && c.quote === weakest.code) ||
+        (c.base === weakest.code && c.quote === strongest.code)
+    );
+    if (direct) {
+      const dir = direct.base === strongest.code ? 'Long' : 'Short';
+      return `Top Divergence (${selectedTf}): ${strongest.code} vs ${weakest.code} (${direct.ticker} ${dir})`;
+    }
+    return `Top Divergence (${selectedTf}): ${strongest.code} (${strongest.score}) vs ${weakest.code} (${weakest.score})`;
+  }, [currencies, selectedTf]);
 
   return (
     <div className="rounded-2xl bg-[#090e1a] border border-[#162540] overflow-hidden p-5 space-y-6">
@@ -87,7 +178,7 @@ export const CurrencyStrengthMeter: React.FC<CurrencyStrengthMeterProps> = ({ on
             <Globe className="w-5 h-5" />
           </div>
           <div>
-            <h3 className="text-base font-bold text-white flex items-center gap-2">
+            <h3 className="text-base font-bold text-white flex flex-wrap items-center gap-2">
               Currency Strength Meter & Forex Heatmap
               <span
                 className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold ${
@@ -96,34 +187,54 @@ export const CurrencyStrengthMeter: React.FC<CurrencyStrengthMeterProps> = ({ on
                     : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                 }`}
               >
-                {fxSession.isOpen ? 'LIVE INTERBANK' : 'MARKET CLOSED · FROZEN'}
+                {fxSession.isOpen ? 'LIVE TRADINGVIEW CROSSES' : 'MARKET CLOSED · FROZEN'}
               </span>
             </h3>
             <p className="text-xs text-slate-400">
-              Institutional relative currency momentum across London, New York & Nairobi trading sessions
+              Calculated live across 23 TradingView FX & Metals crosses ({selectedTf} horizon)
             </p>
           </div>
         </div>
 
-        {/* Synergy Highlight Pill */}
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 self-start sm:self-auto">
-          <Flame className="w-4 h-4 text-emerald-400" />
-          <span className="text-xs font-mono font-bold text-emerald-300">
-            Top Setup: USD Strong vs JPY Weak (USD/JPY Long)
-          </span>
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+          {/* Timeframe Selector */}
+          <div className="flex items-center gap-1 p-1 bg-[#070b13] border border-[#162540] rounded-xl text-[11px] font-mono">
+            {(['15m', '1H', '4H', '1D'] as const).map((tf) => (
+              <button
+                key={tf}
+                type="button"
+                onClick={() => setSelectedTf(tf)}
+                className={`px-2 py-1 rounded-lg font-bold transition-colors cursor-pointer ${
+                  selectedTf === tf
+                    ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                {tf}
+              </button>
+            ))}
+          </div>
+
+          {/* Synergy Highlight Pill */}
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
+            <Flame className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span className="text-xs font-mono font-bold text-emerald-300">
+              {topDivergenceLabel}
+            </span>
+          </div>
         </div>
       </div>
 
       {/* Currency Strength Bars Grid */}
       <div>
         <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-3">
-          Relative Strength Rankings (Score 0 to 10)
+          Relative Strength Rankings ({selectedTf} Score 0 to 10)
         </h4>
 
         <div className="grid grid-cols-2 sm:grid-cols-5 lg:grid-cols-10 gap-2.5">
           {currencies.map((c) => {
-            const isStrong = c.score >= 7.0;
-            const isWeak = c.score < 4.5;
+            const isStrong = c.score >= 6.4;
+            const isWeak = c.score < 4.2;
 
             return (
               <div
@@ -172,7 +283,7 @@ export const CurrencyStrengthMeter: React.FC<CurrencyStrengthMeterProps> = ({ on
                       c.change24h >= 0 ? 'text-emerald-400' : 'text-rose-400'
                     }`}
                   >
-                    {c.change24h >= 0 ? '+' : ''}{c.change24h}%
+                    {c.change24h >= 0 ? '+' : ''}{c.change24h.toFixed(2)}%
                   </span>
                 </div>
               </div>
@@ -184,13 +295,14 @@ export const CurrencyStrengthMeter: React.FC<CurrencyStrengthMeterProps> = ({ on
       {/* Cross-Currency Heatmap Matrix */}
       <div>
         <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-3 flex items-center justify-between">
-          <span>Active Cross Heatmap Matrix</span>
+          <span>Active Cross Heatmap Matrix ({selectedTf})</span>
           <span className="text-[10px] text-slate-500 font-normal">Click any pair to load chart & signals</span>
         </h4>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-3 gap-2.5">
           {heatmapPairs.map((p) => {
-            const isPos = p.change.startsWith('+');
+            const isPos = p.changeNum >= 0;
+            const isBuy = p.bias.includes('BUY');
             return (
               <button
                 key={p.pair}
@@ -205,7 +317,7 @@ export const CurrencyStrengthMeter: React.FC<CurrencyStrengthMeterProps> = ({ on
                     <span className="text-[9px] font-mono text-slate-500">[{p.category}]</span>
                   </div>
                   <span className="text-[10px] text-slate-400 mt-0.5 block">
-                    Signal: <strong className={p.bias.includes('BUY') ? 'text-emerald-400' : 'text-rose-400'}>{p.bias}</strong>
+                    Signal: <strong className={isBuy ? 'text-emerald-400' : 'text-rose-400'}>{p.bias}</strong>
                   </span>
                 </div>
 
