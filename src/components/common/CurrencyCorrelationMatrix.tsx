@@ -10,7 +10,9 @@ import {
   ArrowRightLeft,
   DollarSign,
   Info,
+  RefreshCw,
 } from 'lucide-react';
+import { loadOpenPaperPositions, PAPER_POSITIONS_EVENT } from '../../utils/portfolioGuard.ts';
 
 const PAIRS = [
   'EUR/USD',
@@ -257,6 +259,39 @@ const CORRELATION_DATA: Record<string, Record<string, number>> = {
   },
 };
 
+function computePearsonCorrelation(returnsA: number[], returnsB: number[]): number | null {
+  const n = Math.min(returnsA.length, returnsB.length);
+  if (n < 5) return null;
+  const a = returnsA.slice(-n);
+  const b = returnsB.slice(-n);
+  const meanA = a.reduce((s, v) => s + v, 0) / n;
+  const meanB = b.reduce((s, v) => s + v, 0) / n;
+  let num = 0;
+  let denA = 0;
+  let denB = 0;
+  for (let i = 0; i < n; i++) {
+    const da = a[i] - meanA;
+    const db = b[i] - meanB;
+    num += da * db;
+    denA += da * da;
+    denB += db * db;
+  }
+  const den = Math.sqrt(denA * denB);
+  if (den <= 0) return null;
+  return Number(Math.max(-1, Math.min(1, num / den)).toFixed(2));
+}
+
+function mapPaperToMatrixPositions() {
+  const live = loadOpenPaperPositions();
+  if (live.length === 0) return null;
+  return live.map((p, idx) => ({
+    id: p.id || `paper-${idx}`,
+    pair: p.ticker.includes('/') ? p.ticker : PAIRS.includes(p.ticker) ? p.ticker : `${p.ticker}/USD`,
+    direction: (p.direction === 'LONG' || p.direction === 'BUY' ? 'BUY' : 'SELL') as 'BUY' | 'SELL',
+    lots: Number(p.lots) || 0.1,
+  }));
+}
+
 interface CurrencyCorrelationMatrixProps {
   currentTicker?: string;
   onSelectPair?: (pair: string) => void;
@@ -268,16 +303,99 @@ export const CurrencyCorrelationMatrix: React.FC<CurrencyCorrelationMatrixProps>
 }) => {
   const [selectedPair, setSelectedPair] = useState<string>(currentTicker);
   const [showExplanation, setShowExplanation] = useState<boolean>(false);
+  const [liveMatrix, setLiveMatrix] = useState<Record<string, Record<string, number>>>(CORRELATION_DATA);
+  const [isLoadingPearson, setIsLoadingPearson] = useState<boolean>(false);
+  const [isLivePearson, setIsLivePearson] = useState<boolean>(false);
+  const [liveReturnCount, setLiveReturnCount] = useState<number>(0);
 
-  // Simulated open positions for net exposure calculator
-  const [openPositions, setOpenPositions] = useState<Array<{ id: string; pair: string; direction: 'BUY' | 'SELL'; lots: number }>>([
-    { id: '1', pair: 'EUR/USD', direction: 'BUY', lots: 0.5 },
-    { id: '2', pair: 'GBP/USD', direction: 'BUY', lots: 0.3 },
-  ]);
+  // Live open paper positions synced automatically, with sandbox fallback if desk has 0 open trades
+  const [openPositions, setOpenPositions] = useState<Array<{ id: string; pair: string; direction: 'BUY' | 'SELL'; lots: number }>>(() => {
+    return (
+      mapPaperToMatrixPositions() || [
+        { id: '1', pair: 'EUR/USD', direction: 'BUY', lots: 0.5 },
+        { id: '2', pair: 'GBP/USD', direction: 'BUY', lots: 0.3 },
+      ]
+    );
+  });
 
   const [newPair, setNewPair] = useState('XAU/USD');
   const [newDir, setNewDir] = useState<'BUY' | 'SELL'>('BUY');
   const [newLots, setNewLots] = useState(0.2);
+
+  // Listen to real Paper Trading Desk position updates
+  React.useEffect(() => {
+    const syncPaper = () => {
+      const mapped = mapPaperToMatrixPositions();
+      if (mapped) setOpenPositions(mapped);
+    };
+    window.addEventListener(PAPER_POSITIONS_EVENT, syncPaper);
+    window.addEventListener('storage', syncPaper);
+    return () => {
+      window.removeEventListener(PAPER_POSITIONS_EVENT, syncPaper);
+      window.removeEventListener('storage', syncPaper);
+    };
+  }, []);
+
+  // Fetch real 30D daily OHLCV closes & calculate Pearson correlations across PAIRS
+  const fetchLivePearsonMatrix = React.useCallback(async () => {
+    setIsLoadingPearson(true);
+    try {
+      const results = await Promise.allSettled(
+        PAIRS.map(async (pair) => {
+          const res = await fetch(`/api/stocks/history?ticker=${encodeURIComponent(pair)}&timeframe=1D`);
+          if (!res.ok) return { pair, returns: [] as number[] };
+          const data = await res.json();
+          const candles = Array.isArray(data?.candles) ? data.candles.slice(-32) : [];
+          const returns: number[] = [];
+          for (let i = 1; i < candles.length; i++) {
+            const prev = Number(candles[i - 1]?.close);
+            const cur = Number(candles[i]?.close);
+            if (prev > 0 && cur > 0) {
+              returns.push((cur - prev) / prev);
+            }
+          }
+          return { pair, returns };
+        })
+      );
+
+      const returnsMap: Record<string, number[]> = {};
+      let validSeries = 0;
+      for (const r of results) {
+        if (r.status === 'fulfilled' && r.value.returns.length >= 6) {
+          returnsMap[r.value.pair] = r.value.returns;
+          validSeries++;
+        }
+      }
+
+      if (validSeries >= 2) {
+        const nextMatrix: Record<string, Record<string, number>> = {};
+        for (const row of PAIRS) {
+          nextMatrix[row] = { ...(CORRELATION_DATA[row] || {}) };
+          for (const col of PAIRS) {
+            if (row === col) {
+              nextMatrix[row][col] = 1.0;
+            } else if (returnsMap[row] && returnsMap[col]) {
+              const p = computePearsonCorrelation(returnsMap[row], returnsMap[col]);
+              if (p !== null) {
+                nextMatrix[row][col] = p;
+              }
+            }
+          }
+        }
+        setLiveMatrix(nextMatrix);
+        setIsLivePearson(true);
+        setLiveReturnCount(validSeries);
+      }
+    } catch {
+      // keep benchmark fallback matrix if offline
+    } finally {
+      setIsLoadingPearson(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    fetchLivePearsonMatrix();
+  }, [fetchLivePearsonMatrix]);
 
   // Sync with currentTicker prop
   React.useEffect(() => {
@@ -301,7 +419,9 @@ export const CurrencyCorrelationMatrix: React.FC<CurrencyCorrelationMatrixProps>
     };
 
     openPositions.forEach((pos) => {
-      const [base, quote] = pos.pair.split('/');
+      const [baseRaw, quoteRaw] = pos.pair.includes('/') ? pos.pair.split('/') : [pos.pair, 'USD'];
+      const base = baseRaw;
+      const quote = quoteRaw || 'USD';
       const lots = pos.lots;
 
       if (pos.direction === 'BUY') {
@@ -355,8 +475,19 @@ export const CurrencyCorrelationMatrix: React.FC<CurrencyCorrelationMatrixProps>
             <span className="text-[10px] text-teal-400 font-mono font-bold uppercase tracking-wider">
               Cross-Asset Correlation Engine
             </span>
-            <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-              8×8 HEATMAP
+            <span
+              className={`text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border ${
+                isLivePearson
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                  : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30'
+              }`}
+              title={
+                isLivePearson
+                  ? `Computed live from 30D daily OHLCV returns across ${liveReturnCount} markets`
+                  : 'Benchmark multi-asset correlation coefficients'
+              }
+            >
+              {isLivePearson ? 'LIVE 30D PEARSON' : '14×14 HEATMAP'}
             </span>
           </div>
           <h3 className="text-base font-extrabold text-white flex items-center gap-2 mt-0.5">
@@ -365,13 +496,24 @@ export const CurrencyCorrelationMatrix: React.FC<CurrencyCorrelationMatrixProps>
           </h3>
         </div>
 
-        <button
-          onClick={() => setShowExplanation((prev) => !prev)}
-          className="text-xs font-mono text-slate-400 hover:text-white flex items-center gap-1.5 cursor-pointer"
-        >
-          <HelpCircle className="w-3.5 h-3.5 text-teal-400" />
-          <span>{showExplanation ? 'Hide Guide' : 'How Correlation Works'}</span>
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={fetchLivePearsonMatrix}
+            disabled={isLoadingPearson}
+            className="text-xs font-mono text-cyan-300 hover:text-[#0df2c9] flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            title="Recalculate 30-day rolling Pearson correlation from live OHLCV candles"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoadingPearson ? 'animate-spin' : ''}`} />
+            <span>{isLoadingPearson ? 'Syncing...' : 'Sync Pearson'}</span>
+          </button>
+          <button
+            onClick={() => setShowExplanation((prev) => !prev)}
+            className="text-xs font-mono text-slate-400 hover:text-white flex items-center gap-1.5 cursor-pointer"
+          >
+            <HelpCircle className="w-3.5 h-3.5 text-teal-400" />
+            <span>{showExplanation ? 'Hide Guide' : 'How Correlation Works'}</span>
+          </button>
+        </div>
       </div>
 
       {/* Guide Banner */}
@@ -432,7 +574,7 @@ export const CurrencyCorrelationMatrix: React.FC<CurrencyCorrelationMatrixProps>
                 </td>
 
                 {PAIRS.map((colPair) => {
-                  const val = CORRELATION_DATA[rowPair]?.[colPair] ?? 0;
+                  const val = liveMatrix[rowPair]?.[colPair] ?? CORRELATION_DATA[rowPair]?.[colPair] ?? 0;
                   const isSelf = rowPair === colPair;
                   return (
                     <td

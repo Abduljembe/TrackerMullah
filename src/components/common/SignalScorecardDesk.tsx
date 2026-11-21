@@ -13,6 +13,8 @@ import {
   Clock,
   Sparkles,
   ArrowUpRight,
+  Send,
+  Check,
 } from 'lucide-react';
 import {
   TrackedSignalRecord,
@@ -21,6 +23,7 @@ import {
   deleteTrackedSignal,
   clearTrackedSignals,
   evaluateTrackedSignalsAgainstQuotes,
+  dispatchSignalWebhook,
   SCORECARD_EVENT,
 } from '../../utils/signalScorecard.ts';
 import { LiveTvQuote, lookupTradingViewQuote } from '../../utils/tradingViewSync.ts';
@@ -54,6 +57,7 @@ export const SignalScorecardDesk: React.FC<SignalScorecardDeskProps> = ({
   const [signals, setSignals] = useState<TrackedSignalRecord[]>(() => loadTrackedSignals());
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'WINS' | 'LOSSES'>('ALL');
   const [justLoggedNotice, setJustLoggedNotice] = useState(false);
+  const [sentSignalId, setSentSignalId] = useState<string | null>(null);
 
   // Sync across components & tabs when signals are added or auto-resolved
   useEffect(() => {
@@ -430,14 +434,42 @@ export const SignalScorecardDesk: React.FC<SignalScorecardDeskProps> = ({
                       {displayR >= 0 ? `+${displayR}R` : `${displayR}R`}
                     </td>
                     <td className="py-2.5 px-2 text-right">
-                      <button
-                        type="button"
-                        onClick={() => deleteTrackedSignal(sig.id)}
-                        className="p-1 text-slate-500 hover:text-rose-400 cursor-pointer"
-                        title="Remove record"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      <div className="inline-flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await dispatchSignalWebhook({
+                              symbol: sig.symbol,
+                              action: sig.action,
+                              timeframe: sig.timeframe,
+                              entryZone: formatNum(sig.entryPrice),
+                              sl: formatNum(sig.sl),
+                              tp1: formatNum(sig.tp1),
+                              tp2: formatNum(sig.tp2),
+                              riskReward: sig.riskReward,
+                              confidenceScore: sig.confidenceScore,
+                            });
+                            setSentSignalId(sig.id);
+                            setTimeout(() => setSentSignalId(null), 2000);
+                          }}
+                          className="p-1 text-cyan-400 hover:text-[#0df2c9] cursor-pointer"
+                          title="1-Click Broadcast to Telegram/Discord or Copy Alert"
+                        >
+                          {sentSignalId === sig.id ? (
+                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          ) : (
+                            <Send className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteTrackedSignal(sig.id)}
+                          className="p-1 text-slate-500 hover:text-rose-400 cursor-pointer"
+                          title="Remove record"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );

@@ -31,6 +31,7 @@ import {
   formatCurrencyWithSymbol,
 } from '../utils/currency.ts';
 import { forceRefreshTradingViewQuotes } from '../utils/tradingViewSync.ts';
+import { hydrateTradingCloudState, resetTradingCloudSession } from '../utils/tradingCloudSync.ts';
 
 export interface CurrencyNotice {
   from: CurrencyCode;
@@ -319,7 +320,10 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
 
   // Sync from cloud when user logs in with Firebase, or load from user vault
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      resetTradingCloudSession();
+      return;
+    }
 
     if (user.provider !== 'firebase' || !auth.currentUser) {
       // Local vault user: load user-scoped storage if exists
@@ -354,6 +358,7 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
     async function loadCloudData() {
       try {
         setIsCloudSyncing(true);
+        hydrateTradingCloudState(currentUid).catch(() => {});
         const ref = doc(db, 'users', currentUid, 'finance', 'main');
         const snap = await getDoc(ref);
         if (snap.exists() && !isCancelled) {

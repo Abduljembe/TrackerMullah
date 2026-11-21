@@ -23,9 +23,12 @@ import {
   Lock,
   X,
   ChevronRight,
+  AlertTriangle,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { getAssetMarketSession } from '../../utils/marketHours.ts';
+import { evaluatePortfolioExposure, emitPaperPositionsUpdated } from '../../utils/portfolioGuard.ts';
+import { scheduleTradingCloudPush, CLOUD_TRADING_HYDRATED_EVENT } from '../../utils/tradingCloudSync.ts';
 
 export interface Position {
   id: string;
@@ -180,17 +183,39 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
     }
   }, [prefillOrder]);
 
-  // Sync to localStorage
+  // Reload from localStorage whenever cloud state hydrates
+  useEffect(() => {
+    const onHydrated = () => {
+      try {
+        const bal = localStorage.getItem('njia_paper_balance');
+        if (bal) setBalance(parseFloat(bal));
+        const pos = localStorage.getItem('njia_paper_positions');
+        if (pos) setPositions(JSON.parse(pos));
+        const tr = localStorage.getItem('njia_paper_trades');
+        if (tr) setClosedTrades(JSON.parse(tr));
+      } catch {
+        // ignore storage parse failure
+      }
+    };
+    window.addEventListener(CLOUD_TRADING_HYDRATED_EVENT, onHydrated);
+    return () => window.removeEventListener(CLOUD_TRADING_HYDRATED_EVENT, onHydrated);
+  }, []);
+
+  // Sync to localStorage, notify Portfolio Guard & schedule Firestore sync
   useEffect(() => {
     localStorage.setItem('njia_paper_balance', balance.toString());
+    scheduleTradingCloudPush();
   }, [balance]);
 
   useEffect(() => {
     localStorage.setItem('njia_paper_positions', JSON.stringify(positions));
+    emitPaperPositionsUpdated();
+    scheduleTradingCloudPush();
   }, [positions]);
 
   useEffect(() => {
     localStorage.setItem('njia_paper_trades', JSON.stringify(closedTrades));
+    scheduleTradingCloudPush();
   }, [closedTrades]);
 
   // Calculate live Ask and Bid with authentic broker spreads
@@ -237,7 +262,7 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
     const tp = parseFloat(customTp) || (defaultTp ? parseFloat(defaultTp.replace(/[^0-9.]/g, '')) : undefined);
 
     const fillPrice = dir === 'LONG' ? liveAsk : liveBid;
-    const ticket = Math.floor(Math.random() * 900000 + 98400000);
+    const ticket = 98000000 + (Date.now() % 900000);
     const mult = isGold ? 100 * orderLots : (isForex ? 100000 * orderLots : orderLots);
     const initialSpreadPnl = -Math.round(spread * mult * 100) / 100;
 
@@ -577,6 +602,28 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
               </span>
             </div>
           )}
+
+          {(() => {
+            const exposure = evaluatePortfolioExposure(ticker, direction, orderLots, positions);
+            if (exposure.level === 'CLEAR') return null;
+            return (
+              <div
+                className={`p-3 rounded-xl border flex items-center justify-between gap-2 text-xs font-mono ${
+                  exposure.level === 'WARNING'
+                    ? 'bg-rose-500/15 border-rose-500/40 text-rose-200'
+                    : 'bg-amber-500/15 border-amber-500/40 text-amber-200'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{exposure.message}</span>
+                </span>
+                <span className="text-[10px] font-black px-2 py-0.5 rounded bg-black/30 shrink-0">
+                  {exposure.level}
+                </span>
+              </div>
+            );
+          })()}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* 1-Click BUY Button (Executes at live Ask) */}

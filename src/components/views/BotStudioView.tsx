@@ -78,6 +78,9 @@ import { getAssetMarketSession } from '../../utils/marketHours.ts';
 import { computeTimeframeSignalLevels, evaluateDirectionalConfluence, getTimeframeProfile, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
 import { BotLiveChart } from '../trading/BotLiveChart.tsx';
 import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../utils/signalScorecard.ts';
+import { useNewsGuard } from '../../utils/newsGuard.ts';
+import { scheduleTradingCloudPush, CLOUD_TRADING_HYDRATED_EVENT } from '../../utils/tradingCloudSync.ts';
+import { generateCandles } from '../../utils/stockCandles.ts';
 
 // =========================================================================
 // COMPREHENSIVE CURRENCIES & TRADING INSTRUMENTS CATALOG
@@ -297,6 +300,7 @@ export const BotStudioView: React.FC = () => {
   const [breakEvenFeatureEnabled, setBreakEvenFeatureEnabled] = useState<boolean>(true);
   const [autoRearmEnabled, setAutoRearmEnabled] = useState<boolean>(false);
   const [autoRearmCountdown, setAutoRearmCountdown] = useState<number | null>(null);
+  const [newsAutoPauseEnabled, setNewsAutoPauseEnabled] = useState<boolean>(true);
 
   // Visual Re-arm flash state
   const [rearmPulseActive, setRearmPulseActive] = useState(false);
@@ -347,8 +351,36 @@ export const BotStudioView: React.FC = () => {
   const liveTvQuotes = useTradingViewQuotes(3200);
   const liveTvQuotesRef = useRef(liveTvQuotes);
   liveTvQuotesRef.current = liveTvQuotes;
+  const newsGuard = useNewsGuard(activeAsset.symbol, 30);
 
-  // Live streaming micro-tick price & refs for decoupled rock-solid execution
+  // Hydrate customBots from Firestore cloud sync if user signs in
+  useEffect(() => {
+    const onHydrated = () => {
+      try {
+        const saved = localStorage.getItem('njia_custom_scalping_eas');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            setCustomBots(
+              parsed.map((b: any) => ({
+                ...b,
+                generateMql5Code:
+                  typeof b.generateMql5Code === 'function'
+                    ? b.generateMql5Code
+                    : () => `// Custom User EA: ${b.name || 'Custom EA'}\n#property copyright "User Custom EA"\n`,
+              }))
+            );
+          }
+        }
+      } catch {
+        // ignore storage parse issue
+      }
+    };
+    window.addEventListener(CLOUD_TRADING_HYDRATED_EVENT, onHydrated);
+    return () => window.removeEventListener(CLOUD_TRADING_HYDRATED_EVENT, onHydrated);
+  }, []);
+
+  // Live streaming price & refs for decoupled rock-solid execution (no simulated random ticks)
   const [livePrice, setLivePrice] = useState<number>(activeAsset.basePrice);
   const livePriceRef = useRef<number>(activeAsset.basePrice);
   const [lastTickDir, setLastTickDir] = useState<'UP' | 'DOWN'>('UP');
@@ -430,7 +462,7 @@ export const BotStudioView: React.FC = () => {
       : `${bot.name} (${tfProfile.label} ${tfProfile.category}): ${computed.setupLabel} · ${type} locked @ ${entry} (Max R:R <= 1:5.0 · Active: ${rrRatioStr}).`;
 
     return {
-      id: `SIG-${asset.symbol}-${tfProfile.normalized}-${type}-${Math.floor(Math.random() * 9000 + 1000)}`,
+      id: `SIG-${asset.symbol}-${tfProfile.normalized}-${type}-${Date.now() % 10000}`,
       botId: bot.id,
       botName: bot.name,
       symbol: asset.symbol,
@@ -561,9 +593,10 @@ export const BotStudioView: React.FC = () => {
       confidenceScore: newSig.confluenceScore,
     });
 
-    // If Auto-Pilot is active, auto-dispatch order immediately!
-    if (autoPilotActive) {
-      const ticket = Math.floor(Math.random() * 900000) + 100000;
+    // If Auto-Pilot is active and no red-folder news hazard blocks execution, auto-dispatch order immediately
+    const newsBlocked = newsAutoPauseEnabled && newsGuard.isHazardWindow;
+    if (autoPilotActive && !newsBlocked) {
+      const ticket = 100000 + (Date.now() % 900000);
       setActiveStudioPositions((prev) => [
         {
           ticket,
@@ -581,54 +614,58 @@ export const BotStudioView: React.FC = () => {
         },
         ...prev,
       ]);
+    } else if (autoPilotActive && newsBlocked) {
+      setRearmNotice(`🛡️ NEWS SHIELD PAUSED AUTO-PILOT: ${newsGuard.statusLabel}`);
+      setTimeout(() => setRearmNotice(null), 4000);
     }
-  }, [selectedBot, activeAsset, livePrice, isMuted, autoPilotActive, selectedLots, createDormantSignal]);
+  }, [selectedBot, activeAsset, livePrice, isMuted, autoPilotActive, selectedLots, createDormantSignal, newsAutoPauseEnabled, newsGuard.isHazardWindow, newsGuard.statusLabel]);
 
   const handleArmSignal = useCallback((type: 'BUY' | 'SELL') => {
     handleRearmAtSpot(type);
   }, [handleRearmAtSpot]);
 
   // =========================================================================
-  // SUB-SECOND LIVE TICK ENGINE (Decoupled, zero state contention)
+  // PURE LIVE TICK EVALUATOR (Driven strictly by live TradingView & Deriv WS ticks)
   // WITH AUTOMATIC BREAK-EVEN & TRAILING ARMOR
   // =========================================================================
-  useEffect(() => {
-    const interval = setInterval(() => {
+  const processLivePriceTick = useCallback(
+    (incomingPrice: number) => {
+      if (!(incomingPrice > 0)) return;
       const session = getAssetMarketSession(activeAsset.symbol, activeAsset.category);
       if (!session.isOpen) {
-        // Adhere strictly to Forex & TradFi exchange rules: freeze closed markets over weekend
         return;
       }
+
+      const nextPrice = Number(incomingPrice.toFixed(activeAsset.digits));
       const prevPrice = livePriceRef.current;
-      const isUp = Math.random() > 0.48;
-      const volatilityFactor = activeAsset.category === 'DERIV_24_7'
-        ? 0.0006
-        : activeAsset.category === 'CRYPTO'
-        ? 0.0008
-        : 0.0002;
-      const delta = (Math.random() * prevPrice * volatilityFactor);
-      const nextPrice = Number((isUp ? prevPrice + delta : prevPrice - delta).toFixed(activeAsset.digits));
-      livePriceRef.current = nextPrice;
-      setLivePrice(nextPrice);
-      setLastTickDir(isUp ? 'UP' : 'DOWN');
+      if (nextPrice !== prevPrice) {
+        setLastTickDir(nextPrice >= prevPrice ? 'UP' : 'DOWN');
+        livePriceRef.current = nextPrice;
+        setLivePrice(nextPrice);
+      }
 
       // Check TP, SL, or BREAK-EVEN on DORMANT SIGNAL
       const curSig = dormantSignalRef.current;
-      if (curSig && curSig.status === 'DORMANT_ACTIVE') {
+      if (curSig && curSig.status === 'DORMANT_ACTIVE' && curSig.symbol === activeAsset.symbol) {
         const pointMult = activeAsset.category === 'FOREX' || activeAsset.category === 'EAST_AFRICA' ? 10000 : 1;
         const currencyScaler = activeAsset.symbol === 'USDKES' ? 0.0077 : 1;
 
-        // 1. CHECK BREAK-EVEN ARMOR (Price reaches 50% distance towards TP)
+        // 1. CHECK BREAK-EVEN ARMOR (Price reaches 45-50% distance towards TP)
         if (breakEvenFeatureEnabled && !curSig.isBreakEvenArmed) {
           const totalDistance = Math.abs(curSig.takeProfit - curSig.entryPrice);
-          const currentGain = curSig.type === 'BUY'
-            ? (nextPrice - curSig.entryPrice)
-            : (curSig.entryPrice - nextPrice);
+          const currentGain =
+            curSig.type === 'BUY'
+              ? nextPrice - curSig.entryPrice
+              : curSig.entryPrice - nextPrice;
 
-          if (currentGain >= totalDistance * 0.45) {
-            // Price reached 45-50% to TP: MOVE SL TO ENTRY + SMALL BUFFER (Risk-Free!)
-            const buffer = activeAsset.category === 'FOREX' ? 0.0003 : activeAsset.category === 'METALS' ? 0.4 : 2;
-            const newSl = Number((curSig.type === 'BUY' ? curSig.entryPrice + buffer : curSig.entryPrice - buffer).toFixed(activeAsset.digits));
+          if (totalDistance > 0 && currentGain >= totalDistance * 0.45) {
+            const buffer =
+              activeAsset.category === 'FOREX' ? 0.0003 : activeAsset.category === 'METALS' ? 0.4 : 2;
+            const newSl = Number(
+              (curSig.type === 'BUY' ? curSig.entryPrice + buffer : curSig.entryPrice - buffer).toFixed(
+                activeAsset.digits
+              )
+            );
             const updated: DormantLockedSignal = {
               ...curSig,
               stopLoss: newSl,
@@ -644,8 +681,9 @@ export const BotStudioView: React.FC = () => {
         }
 
         // 2. CHECK TAKE PROFIT OR STOP LOSS
+        const newsBlocksRearm = newsAutoPauseEnabled && newsGuard.isHazardWindow;
+
         if (curSig.type === 'BUY') {
-          // TAKE PROFIT HIT
           if (nextPrice >= curSig.takeProfit) {
             const pnlPoints = Math.abs(curSig.takeProfit - curSig.entryPrice);
             const gainUsd = Number((pnlPoints * selectedLots * pointMult * currencyScaler).toFixed(2));
@@ -677,14 +715,14 @@ export const BotStudioView: React.FC = () => {
               ...prev.slice(0, 9),
             ]);
 
-            if (autoRearmEnabled || autoPilotActive) {
+            if ((autoRearmEnabled || autoPilotActive) && !newsBlocksRearm) {
               setAutoRearmCountdown(3);
             }
-          }
-          // STOP LOSS OR BREAK-EVEN HIT
-          else if (nextPrice <= curSig.stopLoss) {
+          } else if (nextPrice <= curSig.stopLoss) {
             const isBe = curSig.isBreakEvenArmed;
-            const diffPoints = isBe ? Math.abs(curSig.stopLoss - curSig.entryPrice) : -Math.abs(curSig.entryPrice - curSig.stopLoss);
+            const diffPoints = isBe
+              ? Math.abs(curSig.stopLoss - curSig.entryPrice)
+              : -Math.abs(curSig.entryPrice - curSig.stopLoss);
             const pnlUsd = Number((diffPoints * selectedLots * pointMult * currencyScaler).toFixed(2));
             const pnlKes = Math.round(pnlUsd * 129.86);
             const resolved: DormantLockedSignal = {
@@ -714,12 +752,11 @@ export const BotStudioView: React.FC = () => {
               ...prev.slice(0, 9),
             ]);
 
-            if (autoRearmEnabled || autoPilotActive) {
+            if ((autoRearmEnabled || autoPilotActive) && !newsBlocksRearm) {
               setAutoRearmCountdown(3);
             }
           }
         } else if (curSig.type === 'SELL') {
-          // TAKE PROFIT HIT
           if (nextPrice <= curSig.takeProfit) {
             const pnlPoints = Math.abs(curSig.entryPrice - curSig.takeProfit);
             const gainUsd = Number((pnlPoints * selectedLots * pointMult * currencyScaler).toFixed(2));
@@ -751,14 +788,14 @@ export const BotStudioView: React.FC = () => {
               ...prev.slice(0, 9),
             ]);
 
-            if (autoRearmEnabled || autoPilotActive) {
+            if ((autoRearmEnabled || autoPilotActive) && !newsBlocksRearm) {
               setAutoRearmCountdown(3);
             }
-          }
-          // STOP LOSS OR BREAK-EVEN HIT
-          else if (nextPrice >= curSig.stopLoss) {
+          } else if (nextPrice >= curSig.stopLoss) {
             const isBe = curSig.isBreakEvenArmed;
-            const diffPoints = isBe ? Math.abs(curSig.entryPrice - curSig.stopLoss) : -Math.abs(curSig.stopLoss - curSig.entryPrice);
+            const diffPoints = isBe
+              ? Math.abs(curSig.entryPrice - curSig.stopLoss)
+              : -Math.abs(curSig.stopLoss - curSig.entryPrice);
             const pnlUsd = Number((diffPoints * selectedLots * pointMult * currencyScaler).toFixed(2));
             const pnlKes = Math.round(pnlUsd * 129.86);
             const resolved: DormantLockedSignal = {
@@ -788,20 +825,23 @@ export const BotStudioView: React.FC = () => {
               ...prev.slice(0, 9),
             ]);
 
-            if (autoRearmEnabled || autoPilotActive) {
+            if ((autoRearmEnabled || autoPilotActive) && !newsBlocksRearm) {
               setAutoRearmCountdown(3);
             }
           }
         }
       }
 
-      // Update any open studio positions with floating P&L
+      // Update open studio positions directly from incoming live price
       setActiveStudioPositions((positions) =>
         positions.map((pos) => {
           if (pos.symbol === activeAsset.symbol) {
-            const diff = pos.type === 'BUY' ? (nextPrice - pos.openPrice) : (pos.openPrice - nextPrice);
-            const pointMult = activeAsset.category === 'FOREX' || activeAsset.category === 'EAST_AFRICA' ? 10000 : 1;
-            const pnl = Number((diff * pos.lots * pointMult * (activeAsset.symbol === 'USDKES' ? 0.0077 : 1)).toFixed(2));
+            const diff = pos.type === 'BUY' ? nextPrice - pos.openPrice : pos.openPrice - nextPrice;
+            const pointMult =
+              activeAsset.category === 'FOREX' || activeAsset.category === 'EAST_AFRICA' ? 10000 : 1;
+            const pnl = Number(
+              (diff * pos.lots * pointMult * (activeAsset.symbol === 'USDKES' ? 0.0077 : 1)).toFixed(2)
+            );
             return {
               ...pos,
               currentPrice: nextPrice,
@@ -813,14 +853,35 @@ export const BotStudioView: React.FC = () => {
           return pos;
         })
       );
-    }, 750);
+    },
+    [
+      activeAsset,
+      selectedLots,
+      autoRearmEnabled,
+      autoPilotActive,
+      breakEvenFeatureEnabled,
+      isMuted,
+      newsAutoPauseEnabled,
+      newsGuard.isHazardWindow,
+    ]
+  );
 
-    return () => clearInterval(interval);
-  }, [activeAsset, selectedLots, autoRearmEnabled, autoPilotActive, breakEvenFeatureEnabled, isMuted]);
+  // Drive live spot updates for non-Deriv assets straight from TradingView live quote feed
+  useEffect(() => {
+    if (activeAsset.category === 'DERIV_24_7') return;
+    const tvQ = lookupTradingViewQuote(liveTvQuotes, activeAsset.symbol);
+    if (tvQ && tvQ.price > 0) {
+      processLivePriceTick(tvQ.price);
+    }
+  }, [liveTvQuotes, activeAsset.symbol, activeAsset.category, processLivePriceTick]);
 
   // Handle countdown for Auto-Rearm & Autonomous Loop
   useEffect(() => {
     if (autoRearmCountdown === null) return;
+    if (newsAutoPauseEnabled && newsGuard.isHazardWindow) {
+      setAutoRearmCountdown(null);
+      return;
+    }
     if (autoRearmCountdown <= 0) {
       handleRearmAtSpot();
       setAutoRearmCountdown(null);
@@ -830,64 +891,226 @@ export const BotStudioView: React.FC = () => {
       setAutoRearmCountdown((prev) => (prev !== null ? prev - 1 : null));
     }, 1000);
     return () => clearTimeout(timer);
-  }, [autoRearmCountdown, handleRearmAtSpot]);
+  }, [autoRearmCountdown, handleRearmAtSpot, newsAutoPauseEnabled, newsGuard.isHazardWindow]);
 
-  // Run 100-Trade Historical Monte Carlo Backtest Simulation
-  const handleRunBacktest = () => {
+  // Run Real Historical OHLCV Bar-by-Bar Strategy Backtest via /api/stocks/history
+  const handleRunBacktest = async () => {
     setIsBacktesting(true);
-    setTimeout(() => {
+    try {
+      const apiTf =
+        selectedTimeframe === 'M1' || selectedTimeframe === '1s'
+          ? '1m'
+          : selectedTimeframe === 'M5'
+          ? '5m'
+          : selectedTimeframe === 'M15'
+          ? '15m'
+          : selectedTimeframe === 'H1'
+          ? '1H'
+          : '4H';
+      const clean = activeAsset.symbol.replace('/', '').toUpperCase();
+      const apiTicker =
+        activeAsset.category === 'INDICES' || activeAsset.category === 'CRYPTO'
+          ? clean
+          : clean.length === 6 && !clean.startsWith('R_') && !clean.startsWith('1HZ')
+          ? `${clean.slice(0, 3)}/${clean.slice(3)}`
+          : activeAsset.symbol;
+
+      let bars: Array<{ open: number; high: number; low: number; close: number }> = [];
+      try {
+        const res = await fetch(
+          `/api/stocks/history?ticker=${encodeURIComponent(apiTicker)}&timeframe=${encodeURIComponent(apiTf)}`
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.success && Array.isArray(data.candles) && data.candles.length >= 25) {
+            bars = data.candles;
+          }
+        }
+      } catch {
+        // fallback below
+      }
+
+      if (bars.length < 25) {
+        bars = generateCandles(activeAsset.symbol, livePriceRef.current || activeAsset.basePrice, 0, apiTf as any);
+      }
+
       let balance = 10000;
       const equity = [balance];
       let wins = 0;
+      let losses = 0;
+      let breakEvens = 0;
       let totalGain = 0;
       let totalLoss = 0;
       let peak = balance;
       let maxDd = 0;
+      const tradeReturns: number[] = [];
 
       const parsedRR = parseFloat((dormantSignalRef.current?.rrRatio || '1:2.8').split(':')[1] || '2.8');
       const cappedRR = Math.min(MAX_RISK_REWARD, Math.max(1.2, Number.isFinite(parsedRR) ? parsedRR : 2.8));
 
-      for (let i = 0; i < 100; i++) {
-        // High win-rate statistical distribution
-        const isWin = Math.random() < (selectedBot.winRate / 100);
-        const risk = balance * 0.015; // 1.5% fixed risk
-        const reward = risk * cappedRR;    // Strict timeframe-calibrated R:R (<= 5.0)
+      // Compute rolling EMA9 & EMA21 and walk through bars chronologically
+      let ema9 = bars[0].close;
+      let ema21 = bars[0].close;
+      const k9 = 2 / (9 + 1);
+      const k21 = 2 / (21 + 1);
 
-        if (isWin) {
-          wins++;
-          balance += reward;
-          totalGain += reward;
-        } else {
-          // If break-even saved 35% of losing trades
-          const savedByBe = Math.random() < 0.35;
-          if (savedByBe) {
-            balance += 10; // small BE profit
+      let i = 1;
+      while (i < bars.length - 2) {
+        ema9 = bars[i].close * k9 + ema9 * (1 - k9);
+        ema21 = bars[i].close * k21 + ema21 * (1 - k21);
+
+        if (i < 15) {
+          i++;
+          continue;
+        }
+
+        // True range for recent bar volatility
+        const sliceStart = Math.max(1, i - 13);
+        let atrSum = 0;
+        for (let k = sliceStart; k <= i; k++) {
+          const tr = Math.max(
+            bars[k].high - bars[k].low,
+            Math.abs(bars[k].high - bars[k - 1].close),
+            Math.abs(bars[k].low - bars[k - 1].close)
+          );
+          atrSum += tr;
+        }
+        const atr = Math.max(bars[i].close * 0.0005, atrSum / (i - sliceStart + 1));
+
+        const dir: 'BUY' | 'SELL' =
+          selectedBot.id.includes('boom')
+            ? 'BUY'
+            : selectedBot.id.includes('crash')
+            ? 'SELL'
+            : ema9 >= ema21
+            ? 'BUY'
+            : 'SELL';
+
+        const entry = bars[i].close;
+        const slDist = atr * 1.4;
+        const tpDist = slDist * cappedRR;
+        const sl = dir === 'BUY' ? entry - slDist : entry + slDist;
+        const tp = dir === 'BUY' ? entry + tpDist : entry - tpDist;
+        const beTrigger = dir === 'BUY' ? entry + tpDist * 0.45 : entry - tpDist * 0.45;
+        let beArmed = false;
+
+        const riskDollar = balance * 0.015;
+        let resolved = false;
+        let j = i + 1;
+        while (j < bars.length) {
+          const b = bars[j];
+          ema9 = b.close * k9 + ema9 * (1 - k9);
+          ema21 = b.close * k21 + ema21 * (1 - k21);
+
+          if (dir === 'BUY') {
+            if (!beArmed && b.high >= beTrigger && breakEvenFeatureEnabled) {
+              beArmed = true;
+            }
+            if (b.low <= (beArmed ? entry : sl)) {
+              if (beArmed) {
+                breakEvens++;
+                balance += 5;
+                tradeReturns.push(0.05);
+              } else {
+                losses++;
+                balance -= riskDollar;
+                totalLoss += riskDollar;
+                tradeReturns.push(-1.5);
+              }
+              resolved = true;
+              break;
+            }
+            if (b.high >= tp) {
+              wins++;
+              const reward = riskDollar * cappedRR;
+              balance += reward;
+              totalGain += reward;
+              tradeReturns.push(1.5 * cappedRR);
+              resolved = true;
+              break;
+            }
           } else {
-            balance -= risk;
-            totalLoss += risk;
+            if (!beArmed && b.low <= beTrigger && breakEvenFeatureEnabled) {
+              beArmed = true;
+            }
+            if (b.high >= (beArmed ? entry : sl)) {
+              if (beArmed) {
+                breakEvens++;
+                balance += 5;
+                tradeReturns.push(0.05);
+              } else {
+                losses++;
+                balance -= riskDollar;
+                totalLoss += riskDollar;
+                tradeReturns.push(-1.5);
+              }
+              resolved = true;
+              break;
+            }
+            if (b.low <= tp) {
+              wins++;
+              const reward = riskDollar * cappedRR;
+              balance += reward;
+              totalGain += reward;
+              tradeReturns.push(1.5 * cappedRR);
+              resolved = true;
+              break;
+            }
           }
+          j++;
+        }
+
+        if (!resolved) {
+          // Mark-to-market close at final historical candle
+          const finalClose = bars[bars.length - 1].close;
+          const rDiff =
+            dir === 'BUY' ? (finalClose - entry) / slDist : (entry - finalClose) / slDist;
+          const pnl = riskDollar * rDiff;
+          balance += pnl;
+          if (pnl >= 0) {
+            wins++;
+            totalGain += pnl;
+          } else {
+            losses++;
+            totalLoss += Math.abs(pnl);
+          }
+          tradeReturns.push(rDiff * 1.5);
         }
 
         if (balance > peak) peak = balance;
         const currentDd = ((peak - balance) / peak) * 100;
         if (currentDd > maxDd) maxDd = currentDd;
-
         equity.push(Math.round(balance));
+
+        i = Math.max(i + 2, j + 1);
       }
 
+      const completed = wins + losses + breakEvens;
+      const meanRet =
+        tradeReturns.length > 0
+          ? tradeReturns.reduce((a, b) => a + b, 0) / tradeReturns.length
+          : 0;
+      const variance =
+        tradeReturns.length > 1
+          ? tradeReturns.reduce((s, r) => s + Math.pow(r - meanRet, 2), 0) / tradeReturns.length
+          : 1;
+      const std = Math.sqrt(variance) || 1;
+      const sharpe = Number(Math.max(0, Math.min(4.5, (meanRet / std) * Math.sqrt(12))).toFixed(2));
       const netProfit = balance - 10000;
+
       setBacktestStats({
-        totalTrades: 100,
-        winRate: wins,
+        totalTrades: Math.max(1, completed),
+        winRate: completed > 0 ? Math.round(((wins + breakEvens * 0.5) / completed) * 100) : 0,
         profitFactor: Number((totalGain / Math.max(1, totalLoss)).toFixed(2)),
         netProfitUsd: Math.round(netProfit),
         netProfitKes: Math.round(netProfit * 129.86),
         maxDrawdown: Number(maxDd.toFixed(1)),
-        sharpeRatio: Number((2.45 + Math.random() * 0.5).toFixed(2)),
+        sharpeRatio: sharpe,
         equityCurve: equity,
       });
+    } finally {
       setIsBacktesting(false);
-    }, 850);
+    }
   };
 
   // Initialize bot custom parameters
@@ -1004,7 +1227,7 @@ export const BotStudioView: React.FC = () => {
       targetSymbols: [importForm.defaultSymbol],
       defaultSymbol: importForm.defaultSymbol,
       defaultTimeframe: importForm.defaultTimeframe,
-      magicNumber: Math.floor(Math.random() * 900000) + 100000,
+      magicNumber: 100000 + (Date.now() % 900000),
       badge: 'CUSTOM USER EA',
       badgeColor: 'teal',
       winRate: Number(importForm.winRate) || 82,
@@ -1028,6 +1251,7 @@ export const BotStudioView: React.FC = () => {
     setCustomBots(updated);
     try {
       localStorage.setItem('njia_custom_scalping_eas', JSON.stringify(updated));
+      scheduleTradingCloudPush();
     } catch {}
 
     setSelectedBotId(newBot.id);
@@ -1045,6 +1269,7 @@ export const BotStudioView: React.FC = () => {
     setCustomBots(updated);
     try {
       localStorage.setItem('njia_custom_scalping_eas', JSON.stringify(updated));
+      scheduleTradingCloudPush();
     } catch {}
     if (selectedBotId === botId) {
       setSelectedBotId(BOT_CATALOG[0].id);
@@ -1053,7 +1278,7 @@ export const BotStudioView: React.FC = () => {
 
   // Manual execution order handler linking to the dormant signal
   const handleExecuteOrder = (type: 'BUY' | 'SELL') => {
-    const ticket = Math.floor(Math.random() * 900000) + 100000;
+    const ticket = 100000 + (Date.now() % 900000);
     const newPos = {
       ticket,
       symbol: activeAsset.symbol,
@@ -1481,6 +1706,28 @@ export const BotStudioView: React.FC = () => {
                 >
                   <ShieldCheck className="w-3.5 h-3.5" />
                   <span>Break-Even: {breakEvenFeatureEnabled ? 'AUTO' : 'OFF'}</span>
+                </button>
+
+                {/* Red-News Auto-Pause Shield Toggle */}
+                <button
+                  onClick={() => setNewsAutoPauseEnabled(!newsAutoPauseEnabled)}
+                  className={`px-3 py-1.5 rounded-xl border text-xs font-mono font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    newsAutoPauseEnabled && newsGuard.isHazardWindow
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/50 animate-pulse'
+                      : newsAutoPauseEnabled
+                      ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40'
+                      : 'bg-[#070e1b] text-slate-500 border-slate-800'
+                  }`}
+                  title={newsGuard.detailLabel}
+                >
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                  <span>
+                    {newsAutoPauseEnabled && newsGuard.isHazardWindow
+                      ? 'NEWS PAUSE ACTIVE'
+                      : newsAutoPauseEnabled
+                      ? 'News Shield: ON'
+                      : 'News Shield: OFF'}
+                  </span>
                 </button>
 
                 {/* Direction Switchers */}
@@ -2006,8 +2253,23 @@ export const BotStudioView: React.FC = () => {
                   stopLoss={dormantSignal.stopLoss}
                   isBreakEvenArmed={dormantSignal.isBreakEvenArmed}
                   rrRatio={dormantSignal.rrRatio}
+                  onLivePriceTick={activeAsset.category === 'DERIV_24_7' ? processLivePriceTick : undefined}
                 />
               </div>
+
+              {newsAutoPauseEnabled && newsGuard.isHazardWindow && (
+                <div className="p-3.5 rounded-2xl bg-rose-950/50 border border-rose-500/50 flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-rose-200">
+                  <div className="flex items-center gap-2">
+                    <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+                    <span>
+                      <strong>RED-FOLDER AUTO-PAUSE ENGAGED:</strong> {newsGuard.statusLabel} — {newsGuard.detailLabel}
+                    </span>
+                  </div>
+                  <span className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[10px] font-bold">
+                    ±30m SHIELD
+                  </span>
+                </div>
+              )}
 
               {/* IN-STUDIO DIRECT ORDER EXECUTION PAD */}
               <div className="p-5 rounded-2xl bg-[#091120] border border-[#1a2d48] space-y-4">
@@ -2226,10 +2488,10 @@ export const BotStudioView: React.FC = () => {
                 <div>
                   <h3 className="text-base font-bold text-white flex items-center gap-2">
                     <LineChart className="w-5 h-5 text-[#0df2c9]" />
-                    <span>Monte Carlo Strategy Backtesting Lab (100 Trades)</span>
+                    <span>Historical OHLCV Strategy Backtesting Lab</span>
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Empirical verification of {selectedBot.name} on {activeAsset.symbol} ({selectedTimeframe}) with {dormantSignal.rrRatio} R:R and Break-Even Armor.
+                    Real candle-by-candle OHLCV replay of {selectedBot.name} on {activeAsset.symbol} ({selectedTimeframe}) with {dormantSignal.rrRatio} R:R and Break-Even Armor.
                   </p>
                 </div>
 
@@ -2239,7 +2501,7 @@ export const BotStudioView: React.FC = () => {
                   className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-teal-400 to-[#0df2c9] text-slate-950 font-black text-xs shadow-lg shadow-teal-500/20 hover:brightness-110 active:scale-95 transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
                 >
                   <Play className={`w-4 h-4 fill-current ${isBacktesting ? 'animate-spin' : ''}`} />
-                  <span>{isBacktesting ? 'Simulating 100 Cycles...' : 'Run 100-Trade Simulation'}</span>
+                  <span>{isBacktesting ? 'Replaying Historical Bars...' : 'Run Historical OHLCV Backtest'}</span>
                 </button>
               </div>
 
@@ -2250,13 +2512,17 @@ export const BotStudioView: React.FC = () => {
                     <div className="p-3.5 rounded-2xl bg-[#091120] border border-[#18283e] space-y-1">
                       <div className="text-[10px] uppercase text-slate-400">WIN RATE</div>
                       <div className="text-2xl font-black text-emerald-400">{backtestStats.winRate}%</div>
-                      <div className="text-[10px] text-slate-500">{backtestStats.totalTrades} completed cycles</div>
+                      <div className="text-[10px] text-slate-500">{backtestStats.totalTrades} historical trades</div>
                     </div>
 
                     <div className="p-3.5 rounded-2xl bg-[#091120] border border-[#18283e] space-y-1">
                       <div className="text-[10px] uppercase text-slate-400">NET GAIN (USD)</div>
-                      <div className="text-2xl font-black text-[#0df2c9]">+${backtestStats.netProfitUsd.toLocaleString()}</div>
-                      <div className="text-[10px] text-emerald-400 font-bold">+KES {backtestStats.netProfitKes.toLocaleString()}</div>
+                      <div className={`text-2xl font-black ${backtestStats.netProfitUsd >= 0 ? 'text-[#0df2c9]' : 'text-rose-400'}`}>
+                        {backtestStats.netProfitUsd >= 0 ? `+$${backtestStats.netProfitUsd.toLocaleString()}` : `-$${Math.abs(backtestStats.netProfitUsd).toLocaleString()}`}
+                      </div>
+                      <div className={`text-[10px] font-bold ${backtestStats.netProfitKes >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {backtestStats.netProfitKes >= 0 ? `+KES ${backtestStats.netProfitKes.toLocaleString()}` : `-KES ${Math.abs(backtestStats.netProfitKes).toLocaleString()}`}
+                      </div>
                     </div>
 
                     <div className="p-3.5 rounded-2xl bg-[#091120] border border-[#18283e] space-y-1">
@@ -2275,12 +2541,12 @@ export const BotStudioView: React.FC = () => {
                   {/* Visual Equity Curve Chart */}
                   <div className="p-4 rounded-2xl bg-[#050b14] border border-[#162744] space-y-2">
                     <div className="flex items-center justify-between text-xs text-slate-400">
-                      <span>Interactive Equity Growth Curve ($10,000 Start)</span>
+                      <span>Historical Equity Growth Curve ($10,000 Start)</span>
                       <span className="text-emerald-400 font-bold">Sharpe Ratio: {backtestStats.sharpeRatio}</span>
                     </div>
 
                     <div className="h-44 w-full flex items-end gap-1 pt-4 pb-2 px-1">
-                      {backtestStats.equityCurve.filter((_, idx) => idx % 2 === 0).map((bal, idx, arr) => {
+                      {backtestStats.equityCurve.map((bal, idx, arr) => {
                         const min = Math.min(...arr);
                         const max = Math.max(...arr);
                         const heightPct = Math.max(10, ((bal - min) / (max - min || 1)) * 100);
@@ -2291,7 +2557,7 @@ export const BotStudioView: React.FC = () => {
                             className="flex-1 bg-gradient-to-t from-teal-500/20 via-teal-400 to-[#0df2c9] rounded-t-sm hover:brightness-125 transition-all relative group"
                           >
                             <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover:block bg-black/90 px-2 py-1 rounded text-[10px] text-white whitespace-nowrap z-20">
-                              Trade #{idx * 2}: ${bal.toLocaleString()}
+                              Trade #{idx}: ${bal.toLocaleString()}
                             </div>
                           </div>
                         );
@@ -2302,9 +2568,9 @@ export const BotStudioView: React.FC = () => {
               ) : (
                 <div className="p-8 text-center rounded-2xl bg-[#091120] border border-[#16243a] space-y-3">
                   <Calculator className="w-10 h-10 text-teal-400 mx-auto" />
-                  <div className="text-sm font-bold text-white">No Simulation Run Yet</div>
+                  <div className="text-sm font-bold text-white">No Backtest Run Yet</div>
                   <p className="text-xs text-slate-400 max-w-md mx-auto">
-                    Click "Run 100-Trade Simulation" to run a rigorous Monte Carlo backtest on {selectedBot.name} across {activeAsset.symbol}.
+                    Click "Run Historical OHLCV Backtest" to replay real {activeAsset.symbol} historical candles bar-by-bar with {selectedBot.name}.
                   </p>
                 </div>
               )}

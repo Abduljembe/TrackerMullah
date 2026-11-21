@@ -64,6 +64,7 @@ import {
   Wallet,
   Gamepad2,
 } from 'lucide-react';
+import { fetchSharedCalendarEvents, evaluateNewsGuardForSymbol } from '../../utils/newsGuard.ts';
 import { EaParameters, DEFAULT_EA_PARAMS, generateMql5Code } from '../../utils/mql5Generator.ts';
 import { PropFirmRiskGuardian } from '../common/PropFirmRiskGuardian.tsx';
 import { CurrencyStrengthMeter } from '../common/CurrencyStrengthMeter.tsx';
@@ -1216,12 +1217,31 @@ export const Mt5EaScalperStudio: React.FC = () => {
       await new Promise((r) => setTimeout(r, 380));
     }
 
+    // Check real Forex Factory calendar before allowing autonomous sniper execution
+    let effectiveAutoOpen = autoOpenTrade;
+    if (newsFilterEnabled || params.useNewsGuard) {
+      const calEvents = await fetchSharedCalendarEvents();
+      const newsEval = evaluateNewsGuardForSymbol(params.symbol || 'XAUUSD', calEvents, 30);
+      if (newsEval.isHazardWindow && effectiveAutoOpen) {
+        effectiveAutoOpen = false;
+        setTerminalLogs((prev) => [
+          {
+            id: `log-news-${Date.now()}`,
+            time: new Date().toLocaleTimeString(),
+            text: `🛡️ [NEWS GUARD AUTO-PAUSE] ${newsEval.statusLabel} — ${newsEval.detailLabel}. Scanning opportunities without auto-execution.`,
+            type: 'warn',
+          },
+          ...prev.slice(0, 40),
+        ]);
+      }
+    }
+
     try {
       const res = await fetch('/api/ea/ai-scan-and-open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          autoOpen: autoOpenTrade,
+          autoOpen: effectiveAutoOpen,
           minScore: 85,
           riskPercent: params.riskPercent,
           lots: activeTradingLot,
@@ -1678,44 +1698,25 @@ export const Mt5EaScalperStudio: React.FC = () => {
         anchorQuotesRef.current[activeSym]?.price ||
         livePriceRef.current;
 
-      let tickDelta = 0;
       let digits = 5;
-
-      if (isGold) {
-        // Gold spot market tick: moves $0.05 to $0.35 per tick with realistic liquidity jitter
+      if (isGold || isCrypto) {
         digits = 2;
-        const meanReversion = (anchor - livePriceRef.current) * 0.12;
-        const volatility = 0.28;
-        const noise = (Math.random() - 0.495) * volatility * 2;
-        tickDelta = meanReversion + noise;
       } else if (isSilver) {
         digits = 3;
-        tickDelta = (anchor - livePriceRef.current) * 0.10 + (Math.random() - 0.495) * 0.04;
-      } else if (isCrypto) {
-        digits = 2;
-        const vol = activeSym.includes('BTC') ? 12.0 : 1.8;
-        tickDelta = (anchor - livePriceRef.current) * 0.15 + (Math.random() - 0.495) * vol;
       } else if (isIndex) {
         digits = 1;
-        tickDelta = (anchor - livePriceRef.current) * 0.12 + (Math.random() - 0.495) * 4.5;
       } else if (isDeriv) {
-        digits = activeSym.includes('R_75') ? 2 : activeSym.includes('STP') ? 1 : 2;
-        const vol = activeSym.includes('R_75') ? 18.0 : activeSym.includes('BOOM') || activeSym.includes('CRASH') ? 2.5 : 0.8;
-        tickDelta = (anchor - livePriceRef.current) * 0.12 + (Math.random() - 0.49) * vol;
+        digits = activeSym.includes('STP') ? 1 : 2;
       } else if (isJpy) {
         digits = 3;
-        tickDelta = (anchor - livePriceRef.current) * 0.10 + (Math.random() - 0.495) * 0.015;
-      } else {
-        // Standard Forex pairs (EURUSD, GBPUSD, etc.): 0.1 to 0.4 fractional pips
-        digits = 5;
-        tickDelta = (anchor - livePriceRef.current) * 0.10 + (Math.random() - 0.495) * 0.00018;
       }
 
+      const tickDelta = anchor - livePriceRef.current;
       const activeSession = getAssetMarketSession(activeSym);
 
-      if (activeSession.isOpen) {
-        const nextPrice = Number((livePriceRef.current + tickDelta).toFixed(digits));
-        if (nextPrice > 0 && nextPrice !== livePriceRef.current) {
+      if (activeSession.isOpen && anchor > 0) {
+        const nextPrice = Number(anchor.toFixed(digits));
+        if (nextPrice !== livePriceRef.current) {
           livePriceRef.current = nextPrice;
           setLivePrice(nextPrice);
           setPriceFlash(tickDelta >= 0 ? 'up' : 'down');
@@ -1745,15 +1746,18 @@ export const Mt5EaScalperStudio: React.FC = () => {
           const posIsJpy = sym.includes('JPY');
           const mult = posIsGold ? 100 : posIsSilver ? 5000 : (posIsIndex || posIsCrypto || posIsDeriv) ? 1.0 : posIsJpy ? 1000 : 100000;
 
-          // Determine live tick price for this position
+          // Determine live price directly from active quote or TradingView anchor (zero random jitter)
           let curPrice = pos.currentPrice;
           if (posIsActiveSym) {
             curPrice = livePriceRef.current;
           } else {
-            // Slight tick variation for background open trades
-            const posAnchor = anchorQuotesRef.current[sym]?.price || pos.currentPrice;
-            const bgDelta = posIsGold ? (Math.random() - 0.495) * 0.25 : (Math.random() - 0.495) * 0.00015;
-            curPrice = Number(((pos.currentPrice + (posAnchor - pos.currentPrice) * 0.08 + bgDelta)).toFixed(posIsGold || posIsJpy ? 2 : 5));
+            const posAnchor =
+              anchorQuotesRef.current[`OANDA:${sym}`]?.price ||
+              anchorQuotesRef.current[`FX:${sym}`]?.price ||
+              anchorQuotesRef.current[sym]?.price;
+            if (posAnchor && posAnchor > 0) {
+              curPrice = Number(posAnchor.toFixed(posIsGold || posIsJpy ? 2 : 5));
+            }
           }
 
           const priceDiff = pos.type === 'BUY' ? curPrice - pos.openPrice : pos.openPrice - curPrice;
@@ -2128,7 +2132,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
         server: brokerData.server,
         accountType: brokerData.accountType,
         isConnected: true,
-        pingMs: brokerData.pingMs || Math.floor(Math.random() * 6 + 9),
+        pingMs: brokerData.pingMs || 12,
         balance: brokerData.balance,
         equity: brokerData.equity,
         currency: brokerData.currency || 'USD',

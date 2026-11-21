@@ -23,6 +23,21 @@
         "updatedAt": { "type": "string" }
       },
       "required": ["uid"]
+    },
+    "UserTradingState": {
+      "title": "UserTradingState",
+      "description": "Cross-device cloud state for Signal Scorecard, Paper Trading positions, closed trades, and custom EA bots",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "paperBalance": { "type": "number" },
+        "paperPositions": { "type": "array" },
+        "closedTrades": { "type": "array" },
+        "trackedSignals": { "type": "array" },
+        "customBots": { "type": "array" },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["uid", "updatedAt"]
     }
   },
   "firestore": {
@@ -33,6 +48,10 @@
     "/users/{userId}/finance/{docId}": {
       "schema": "UserFinanceData",
       "description": "Private financial records isolated strictly to the authenticated user"
+    },
+    "/users/{userId}/trading/{docId}": {
+      "schema": "UserTradingState",
+      "description": "Cross-device synced trading scorecard, paper trading desk, and custom EAs isolated to the owner"
     }
   }
 }

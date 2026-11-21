@@ -1,4 +1,5 @@
 import { LiveTvQuote, lookupTradingViewQuote } from './tradingViewSync.ts';
+import { scheduleTradingCloudPush } from './tradingCloudSync.ts';
 
 export type TrackedSignalStatus = 'ACTIVE' | 'TP1_HIT' | 'TP2_HIT' | 'STOPPED_OUT';
 export type TrackedSignalSource = 'RADAR' | 'EA_SCANNER' | 'BOT_STUDIO' | 'MANUAL';
@@ -24,12 +25,30 @@ export interface TrackedSignalRecord {
   realizedR?: number;
 }
 
+export interface SignalHitAlertDetail {
+  id: string;
+  symbol: string;
+  timeframe: string;
+  direction: 'BUY' | 'SELL';
+  status: 'TP1_HIT' | 'TP2_HIT' | 'STOPPED_OUT';
+  resolvedPrice: number;
+  realizedR: number;
+  timestamp: string;
+}
+
 const STORAGE_KEY = 'mullah_signal_scorecard_v1';
 export const SCORECARD_EVENT = 'mullah-signal-scorecard-updated';
+export const SIGNAL_HIT_ALERT_EVENT = 'mullah-signal-hit-alert';
 
 function emitScorecardUpdate() {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(SCORECARD_EVENT));
+  }
+}
+
+function emitSignalHitAlert(detail: SignalHitAlertDetail) {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent<SignalHitAlertDetail>(SIGNAL_HIT_ALERT_EVENT, { detail }));
   }
 }
 
@@ -50,6 +69,7 @@ export function saveTrackedSignals(records: TrackedSignalRecord[]): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(records.slice(0, 120)));
     emitScorecardUpdate();
+    scheduleTradingCloudPush();
   } catch {
     // ignore storage quota failures
   }
@@ -119,6 +139,7 @@ export function evaluateTrackedSignalsAgainstQuotes(
 
   let changed = false;
   const nowIso = new Date().toISOString();
+  const alertsToEmit: SignalHitAlertDetail[] = [];
 
   const updated = list.map((rec) => {
     if (rec.status === 'TP2_HIT' || rec.status === 'STOPPED_OUT') {
@@ -135,28 +156,64 @@ export function evaluateTrackedSignalsAgainstQuotes(
     if (rec.direction === 'BUY') {
       if (live >= rec.tp2) {
         changed = true;
+        const rVal = Number((Math.abs(rec.tp2 - rec.entryPrice) / riskDist).toFixed(2));
+        alertsToEmit.push({
+          id: rec.id,
+          symbol: rec.symbol,
+          timeframe: rec.timeframe,
+          direction: rec.direction,
+          status: 'TP2_HIT',
+          resolvedPrice: live,
+          realizedR: rVal,
+          timestamp: nowIso,
+        });
         return {
           ...rec,
           status: 'TP2_HIT' as const,
           resolvedAt: nowIso,
           resolvedPrice: live,
-          realizedR: Number((Math.abs(rec.tp2 - rec.entryPrice) / riskDist).toFixed(2)),
+          realizedR: rVal,
         };
       }
       if (live >= rec.tp1 && rec.status === 'ACTIVE') {
         changed = true;
+        const rVal = Number((Math.abs(rec.tp1 - rec.entryPrice) / riskDist).toFixed(2));
+        alertsToEmit.push({
+          id: rec.id,
+          symbol: rec.symbol,
+          timeframe: rec.timeframe,
+          direction: rec.direction,
+          status: 'TP1_HIT',
+          resolvedPrice: live,
+          realizedR: rVal,
+          timestamp: nowIso,
+        });
         return {
           ...rec,
           status: 'TP1_HIT' as const,
           resolvedAt: nowIso,
           resolvedPrice: live,
-          realizedR: Number((Math.abs(rec.tp1 - rec.entryPrice) / riskDist).toFixed(2)),
+          realizedR: rVal,
         };
       }
       if (live <= rec.sl) {
         changed = true;
-        // If TP1 was already hit earlier, lock in partial positive outcome (+0.5R) or full loss (-1.0R)
-        const rVal = rec.status === 'TP1_HIT' ? Number(((Math.abs(rec.tp1 - rec.entryPrice) / riskDist) * 0.5).toFixed(2)) : -1.0;
+        const rVal =
+          rec.status === 'TP1_HIT'
+            ? Number(((Math.abs(rec.tp1 - rec.entryPrice) / riskDist) * 0.5).toFixed(2))
+            : -1.0;
+        if (rec.status !== 'TP1_HIT') {
+          alertsToEmit.push({
+            id: rec.id,
+            symbol: rec.symbol,
+            timeframe: rec.timeframe,
+            direction: rec.direction,
+            status: 'STOPPED_OUT',
+            resolvedPrice: live,
+            realizedR: rVal,
+            timestamp: nowIso,
+          });
+        }
         return {
           ...rec,
           status: rec.status === 'TP1_HIT' ? ('TP1_HIT' as const) : ('STOPPED_OUT' as const),
@@ -169,27 +226,64 @@ export function evaluateTrackedSignalsAgainstQuotes(
       // SELL
       if (live <= rec.tp2) {
         changed = true;
+        const rVal = Number((Math.abs(rec.entryPrice - rec.tp2) / riskDist).toFixed(2));
+        alertsToEmit.push({
+          id: rec.id,
+          symbol: rec.symbol,
+          timeframe: rec.timeframe,
+          direction: rec.direction,
+          status: 'TP2_HIT',
+          resolvedPrice: live,
+          realizedR: rVal,
+          timestamp: nowIso,
+        });
         return {
           ...rec,
           status: 'TP2_HIT' as const,
           resolvedAt: nowIso,
           resolvedPrice: live,
-          realizedR: Number((Math.abs(rec.entryPrice - rec.tp2) / riskDist).toFixed(2)),
+          realizedR: rVal,
         };
       }
       if (live <= rec.tp1 && rec.status === 'ACTIVE') {
         changed = true;
+        const rVal = Number((Math.abs(rec.entryPrice - rec.tp1) / riskDist).toFixed(2));
+        alertsToEmit.push({
+          id: rec.id,
+          symbol: rec.symbol,
+          timeframe: rec.timeframe,
+          direction: rec.direction,
+          status: 'TP1_HIT',
+          resolvedPrice: live,
+          realizedR: rVal,
+          timestamp: nowIso,
+        });
         return {
           ...rec,
           status: 'TP1_HIT' as const,
           resolvedAt: nowIso,
           resolvedPrice: live,
-          realizedR: Number((Math.abs(rec.entryPrice - rec.tp1) / riskDist).toFixed(2)),
+          realizedR: rVal,
         };
       }
       if (live >= rec.sl) {
         changed = true;
-        const rVal = rec.status === 'TP1_HIT' ? Number(((Math.abs(rec.entryPrice - rec.tp1) / riskDist) * 0.5).toFixed(2)) : -1.0;
+        const rVal =
+          rec.status === 'TP1_HIT'
+            ? Number(((Math.abs(rec.entryPrice - rec.tp1) / riskDist) * 0.5).toFixed(2))
+            : -1.0;
+        if (rec.status !== 'TP1_HIT') {
+          alertsToEmit.push({
+            id: rec.id,
+            symbol: rec.symbol,
+            timeframe: rec.timeframe,
+            direction: rec.direction,
+            status: 'STOPPED_OUT',
+            resolvedPrice: live,
+            realizedR: rVal,
+            timestamp: nowIso,
+          });
+        }
         return {
           ...rec,
           status: rec.status === 'TP1_HIT' ? ('TP1_HIT' as const) : ('STOPPED_OUT' as const),
@@ -205,6 +299,7 @@ export function evaluateTrackedSignalsAgainstQuotes(
 
   if (changed) {
     saveTrackedSignals(updated);
+    alertsToEmit.forEach((alert) => emitSignalHitAlert(alert));
   }
   return changed;
 }
@@ -221,4 +316,76 @@ export function clearTrackedSignals(mode: 'RESOLVED' | 'ALL'): void {
   }
   const activeOnly = loadTrackedSignals().filter((r) => r.status === 'ACTIVE');
   saveTrackedSignals(activeOnly);
+}
+
+export async function dispatchSignalWebhook(payload: {
+  symbol: string;
+  action: string;
+  timeframe: string;
+  entryZone: string | number;
+  sl: string | number;
+  tp1: string | number;
+  tp2: string | number;
+  riskReward: string;
+  confidenceScore: number;
+}): Promise<{ ok: boolean; channels: string[]; copiedOnly?: boolean }> {
+  const isBuy = payload.action.toUpperCase().includes('BUY');
+  const message = `⚡️ *INSTITUTIONAL SIGNAL ALERT* ⚡️
+━━━━━━━━━━━━━━━━━━
+🎯 *ASSET:* #${payload.symbol.replace('/', '')} (${payload.timeframe})
+📊 *ACTION:* ${isBuy ? '🟢' : '🔴'} ${payload.action} (${payload.confidenceScore}% Conviction)
+📍 *ENTRY:* \`${payload.entryZone}\`
+🛑 *STOP LOSS:* \`${payload.sl}\`
+🎯 *TP1:* \`${payload.tp1}\`
+🚀 *TP2:* \`${payload.tp2}\`
+⚖️ *R:R:* \`${payload.riskReward}\`
+━━━━━━━━━━━━━━━━━━
+⏱ ${new Date().toUTCString()}`;
+
+  const tgToken = localStorage.getItem('mullah_tg_token') || '';
+  const tgChatId = localStorage.getItem('mullah_tg_chat_id') || '';
+  const discordUrl = localStorage.getItem('mullah_discord_webhook') || '';
+  const channels: string[] = [];
+
+  if (tgToken && tgChatId) {
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: tgChatId,
+          text: message,
+          parse_mode: 'Markdown',
+        }),
+      });
+      if (r.ok) channels.push('Telegram');
+    } catch {
+      // ignore network block
+    }
+  }
+
+  if (discordUrl) {
+    try {
+      const r = await fetch(discordUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: message }),
+      });
+      if (r.ok) channels.push('Discord');
+    } catch {
+      // ignore network block
+    }
+  }
+
+  try {
+    await navigator.clipboard.writeText(message);
+  } catch {
+    // ignore clipboard fallback
+  }
+
+  return {
+    ok: true,
+    channels,
+    copiedOnly: channels.length === 0,
+  };
 }

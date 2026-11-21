@@ -429,22 +429,16 @@ export const GoldScalperView: React.FC = () => {
         // Global Spot Gold (XAU/USD) follows 24/5 Sun 22:00 UTC - Fri 22:00 UTC schedule
         return;
       }
-      // 1. Update micro-tick price of Gold
-      const delta = (Math.random() - 0.48) * 0.40;
-      setGoldPrice((prev) => {
-        const next = Number((prev + delta).toFixed(2));
-        const newSpread = Math.floor(Math.random() * 8 + 22); // 22 - 30 points
-        setSpreadPoints(newSpread);
-        setBidPrice(Number((next - newSpread * 0.01).toFixed(2)));
-        setAskPrice(Number((next + newSpread * 0.01).toFixed(2)));
-
-        // Micro update indicators
-        setFastEmaVal((f) => Number((f + delta * 0.3).toFixed(2)));
-        setSlowEmaVal((s) => Number((s + delta * 0.1).toFixed(2)));
-        setRsiVal((r) => Math.min(85, Math.max(20, Number((r + (delta > 0 ? 0.3 : -0.3)).toFixed(1)))));
-
-        return next;
-      });
+      // 1. Anchor spread cleanly to UTC session liquidity (London/NY tight 18pts, Asian 26pts)
+      const utcHour = new Date().getUTCHours();
+      const sessionSpread = utcHour >= 7 && utcHour <= 20 ? 18 : 26;
+      setSpreadPoints(sessionSpread);
+      const tvGold = lookupTradingViewQuote(liveTvQuotes, 'XAUUSD');
+      if (tvGold && tvGold.price > 0) {
+        setGoldPrice(tvGold.price);
+        setBidPrice(Number((tvGold.price - sessionSpread * 0.01).toFixed(2)));
+        setAskPrice(Number((tvGold.price + sessionSpread * 0.01).toFixed(2)));
+      }
 
       // 2. Decrement M1 bar timer
       setBarTimerSeconds((sec) => {
@@ -512,7 +506,7 @@ export const GoldScalperView: React.FC = () => {
     }, 1000);
 
     return () => clearInterval(tickInterval);
-  }, [isBotRunning, positions.length, bidPrice, askPrice, atrVal, strategyParams]);
+  }, [isBotRunning, positions.length, bidPrice, askPrice, atrVal, strategyParams, liveTvQuotes]);
 
   // Handle M1 Candle Close & EA Trading Signal Evaluation
   const handleNewM1Bar = () => {
@@ -561,7 +555,7 @@ export const GoldScalperView: React.FC = () => {
       const lot = Math.max(0.01, Math.min(0.50, Number((riskDollars / (stopDist * 100)).toFixed(2))));
 
       const newPos: GoldPosition = {
-        ticket: Math.floor(Math.random() * 80000 + 940000),
+        ticket: 940000 + (Date.now() % 80000),
         symbol: 'XAUUSD',
         type,
         volume: lot,
@@ -618,7 +612,7 @@ export const GoldScalperView: React.FC = () => {
     const tpDist = Number(Math.min(rawTpDist, stopDist * MAX_RISK_REWARD).toFixed(2));
     const sl = action === 'BUY' ? Number((entryPrice - stopDist).toFixed(2)) : Number((entryPrice + stopDist).toFixed(2));
     const tp = action === 'BUY' ? Number((entryPrice + tpDist).toFixed(2)) : Number((entryPrice - tpDist).toFixed(2));
-    const newTicket = Math.floor(Math.random() * 8000000 + 1000000);
+    const newTicket = 1000000 + (Date.now() % 8000000);
 
     const localPosition: GoldPosition = {
       ticket: newTicket,
@@ -740,7 +734,7 @@ export const GoldScalperView: React.FC = () => {
   // Log feeder
   const addLog = (text: string, type: 'info' | 'trade' | 'alert' | 'profit') => {
     const newEntry = {
-      id: Math.random().toString(),
+      id: `gold-log-${Date.now()}`,
       time: new Date().toLocaleTimeString(),
       text,
       type,

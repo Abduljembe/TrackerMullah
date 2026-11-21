@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -17,6 +17,8 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { ClosedTrade } from './PaperTradingDesk.tsx';
+import { CLOUD_TRADING_HYDRATED_EVENT } from '../../utils/tradingCloudSync.ts';
+import { PAPER_POSITIONS_EVENT } from '../../utils/portfolioGuard.ts';
 
 interface TradingJournalDeskProps {
   currentTicker?: string;
@@ -116,6 +118,30 @@ export const TradingJournalDesk: React.FC<TradingJournalDeskProps> = ({ currentT
   const [filterTicker, setFilterTicker] = useState<'ALL' | string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [outcomeFilter, setOutcomeFilter] = useState<'ALL' | 'WIN' | 'LOSS'>('ALL');
+
+  useEffect(() => {
+    const syncTrades = () => {
+      try {
+        const saved = localStorage.getItem('njia_paper_trades');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setTrades(parsed);
+          }
+        }
+      } catch {
+        // ignore parse failure
+      }
+    };
+    window.addEventListener(CLOUD_TRADING_HYDRATED_EVENT, syncTrades);
+    window.addEventListener(PAPER_POSITIONS_EVENT, syncTrades);
+    window.addEventListener('storage', syncTrades);
+    return () => {
+      window.removeEventListener(CLOUD_TRADING_HYDRATED_EVENT, syncTrades);
+      window.removeEventListener(PAPER_POSITIONS_EVENT, syncTrades);
+      window.removeEventListener('storage', syncTrades);
+    };
+  }, []);
 
   // Trade analytics calculations
   const stats = useMemo(() => {

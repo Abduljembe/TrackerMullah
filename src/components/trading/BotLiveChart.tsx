@@ -23,6 +23,7 @@ interface BotLiveChartProps {
   stopLoss: number;
   isBreakEvenArmed: boolean;
   rrRatio: string;
+  onLivePriceTick?: (price: number) => void;
 }
 
 interface OhlcPoint {
@@ -77,12 +78,15 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
   stopLoss,
   isBreakEvenArmed,
   rrRatio,
+  onLivePriceTick,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick', Time> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const barsRef = useRef<OhlcPoint[]>([]);
+  const onLivePriceTickRef = useRef(onLivePriceTick);
+  onLivePriceTickRef.current = onLivePriceTick;
   const [feedSource, setFeedSource] = useState<'DERIV_WS' | 'LIVE_OHLCV' | 'ESTIMATED'>('LIVE_OHLCV');
 
   // 1. Initialize Lightweight Charts instance once
@@ -209,6 +213,8 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
               }));
               setFeedSource('DERIV_WS');
               applyBars(mapped);
+              const latestClose = mapped[mapped.length - 1]?.close;
+              if (latestClose > 0) onLivePriceTickRef.current?.(latestClose);
             } else if (msg.ohlc && seriesRef.current) {
               const bar: OhlcPoint = {
                 time: Number(msg.ohlc.open_time || msg.ohlc.epoch) as Time,
@@ -219,6 +225,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
               };
               setFeedSource('DERIV_WS');
               seriesRef.current.update(bar);
+              if (bar.close > 0) onLivePriceTickRef.current?.(bar.close);
               const existing = barsRef.current;
               if (existing.length > 0 && existing[existing.length - 1].time === bar.time) {
                 existing[existing.length - 1] = bar;

@@ -40,6 +40,7 @@ import { ClearDataModal } from './components/modals/ClearDataModal.tsx';
 import { CurrencyConverterModal } from './components/modals/CurrencyConverterModal.tsx';
 import { BackupRestoreModal } from './components/modals/BackupRestoreModal.tsx';
 import { OfflineIndicator } from './components/pwa/OfflineIndicator.tsx';
+import { GlobalSignalToast } from './components/common/GlobalSignalToast.tsx';
 import { AuthModal } from './components/auth/AuthModal.tsx';
 import { useAuth } from './context/AuthContext.tsx';
 import { LandingPage } from './components/landing/LandingPage.tsx';
@@ -155,6 +156,9 @@ const MainContent: React.FC = () => {
       <CurrencyConverterModal />
       <BackupRestoreModal />
       <AuthModal />
+
+      {/* Global Signal Hit Notifications */}
+      <GlobalSignalToast />
 
       {/* PWA Network Status Alert */}
       <OfflineIndicator />
