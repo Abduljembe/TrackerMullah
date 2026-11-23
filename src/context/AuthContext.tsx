@@ -9,7 +9,7 @@ import {
   signOut,
   updateProfile,
 } from 'firebase/auth';
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db, validateFirestoreConnection } from '../lib/firebase.ts';
 
 export interface AuthUser {
@@ -92,10 +92,29 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     // Listen to Firebase Auth state
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
+        let resolvedDisplayName = (firebaseUser.displayName || '').trim();
+
+        // Check Firestore user profile if Auth displayName wasn't populated yet
+        if (!resolvedDisplayName && !firebaseUser.isAnonymous) {
+          try {
+            const snap = await getDoc(doc(db, 'users', firebaseUser.uid));
+            if (snap.exists()) {
+              const storedName = String(snap.data()?.displayName || '').trim();
+              if (storedName && storedName.toLowerCase() !== 'investor') {
+                resolvedDisplayName = storedName;
+              }
+            }
+          } catch {
+            // ignore profile read failure
+          }
+        }
+
         const appUser: AuthUser = {
           uid: firebaseUser.uid,
           email: firebaseUser.email,
-          displayName: firebaseUser.displayName || (firebaseUser.email ? firebaseUser.email.split('@')[0] : 'Investor'),
+          displayName:
+            resolvedDisplayName ||
+            (firebaseUser.email ? firebaseUser.email.split('@')[0] : firebaseUser.isAnonymous ? 'Guest Explorer' : 'Investor'),
           isAnonymous: firebaseUser.isAnonymous,
           provider: 'firebase',
         };
@@ -221,6 +240,29 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const res = await createUserWithEmailAndPassword(auth, cleanEmail, pass);
       if (cleanName) {
         await updateProfile(res.user, { displayName: cleanName });
+        const updatedUser: AuthUser = {
+          uid: res.user.uid,
+          email: res.user.email || cleanEmail,
+          displayName: cleanName,
+          isAnonymous: res.user.isAnonymous,
+          provider: 'firebase',
+        };
+        setUser(updatedUser);
+        localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(updatedUser));
+        try {
+          await setDoc(
+            doc(db, 'users', res.user.uid),
+            {
+              uid: res.user.uid,
+              email: updatedUser.email || '',
+              displayName: cleanName,
+              lastLoginAt: new Date().toISOString(),
+            },
+            { merge: true }
+          );
+        } catch {
+          // ignore
+        }
       }
       setIsAuthModalOpen(false);
       return;

@@ -1,6 +1,8 @@
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase.ts';
 
+export type MullahVoiceGender = 'man' | 'woman';
+
 export interface MullahMemoryNote {
   id: string;
   text: string;
@@ -10,6 +12,8 @@ export interface MullahMemoryNote {
 export interface MullahMemoryProfile {
   voiceRate: number;
   voiceName: string;
+  voiceGender: MullahVoiceGender;
+  cloudVoiceName: string;
   briefingMode: 'full' | 'concise';
   favoriteChannel: string;
   preferredRiskPct: number;
@@ -19,9 +23,39 @@ export interface MullahMemoryProfile {
 
 const STORAGE_PREFIX = 'njia_mullah_memory_v1';
 
+export const HUMAN_VOICE_PERSONAS: Record<
+  MullahVoiceGender,
+  Array<{ id: string; label: string; description: string }>
+> = {
+  man: [
+    { id: 'Charon', label: 'Marcus (Warm & Deep)', description: 'Calm, composed executive male voice' },
+    { id: 'Fenrir', label: 'David (Confident)', description: 'Clear, grounded conversational man' },
+    { id: 'Puck', label: 'Leo (Friendly)', description: 'Relaxed, upbeat everyday male tone' },
+  ],
+  woman: [
+    { id: 'Kore', label: 'Amara (Warm & Clear)', description: 'Natural, expressive female advisor' },
+    { id: 'Aoede', label: 'Elena (Calm & Smooth)', description: 'Gentle, reassuring woman voice' },
+    { id: 'Zephyr', label: 'Maya (Bright)', description: 'Friendly, engaging conversational woman' },
+  ],
+};
+
+export function getDefaultCloudVoiceForGender(gender: MullahVoiceGender): string {
+  return gender === 'woman' ? 'Kore' : 'Charon';
+}
+
+export function inferGenderFromCloudVoice(cloudVoiceName: string): MullahVoiceGender {
+  const lower = (cloudVoiceName || '').toLowerCase();
+  if (lower === 'kore' || lower === 'aoede' || lower === 'zephyr' || lower === 'leda') {
+    return 'woman';
+  }
+  return 'man';
+}
+
 export const DEFAULT_MULLAH_MEMORY: MullahMemoryProfile = {
-  voiceRate: 1.02,
+  voiceRate: 0.98,
   voiceName: 'auto',
+  voiceGender: 'man',
+  cloudVoiceName: 'Charon',
   briefingMode: 'full',
   favoriteChannel: 'bloomberg',
   preferredRiskPct: 1,
@@ -38,12 +72,19 @@ export function loadLocalMullahMemory(uid?: string | null): MullahMemoryProfile 
     const raw = localStorage.getItem(getStorageKey(uid));
     if (!raw) return { ...DEFAULT_MULLAH_MEMORY };
     const parsed = JSON.parse(raw) as Partial<MullahMemoryProfile>;
+    const voiceGender: MullahVoiceGender = parsed.voiceGender === 'woman' ? 'woman' : 'man';
+    const cloudVoiceName =
+      typeof parsed.cloudVoiceName === 'string' && parsed.cloudVoiceName
+        ? parsed.cloudVoiceName
+        : getDefaultCloudVoiceForGender(voiceGender);
     return {
       voiceRate:
         typeof parsed.voiceRate === 'number' && parsed.voiceRate >= 0.75 && parsed.voiceRate <= 1.5
           ? parsed.voiceRate
           : DEFAULT_MULLAH_MEMORY.voiceRate,
       voiceName: typeof parsed.voiceName === 'string' && parsed.voiceName ? parsed.voiceName : 'auto',
+      voiceGender,
+      cloudVoiceName,
       briefingMode: parsed.briefingMode === 'concise' ? 'concise' : 'full',
       favoriteChannel: typeof parsed.favoriteChannel === 'string' && parsed.favoriteChannel ? parsed.favoriteChannel : 'bloomberg',
       preferredRiskPct:
@@ -105,9 +146,20 @@ export async function hydrateMullahMemoryFromCloud(uid: string): Promise<MullahM
       typeof cloud.updatedAt === 'string' &&
       (!local.updatedAt || new Date(cloud.updatedAt).getTime() >= new Date(local.updatedAt).getTime());
 
+    const resolvedGender: MullahVoiceGender =
+      useCloudPrimary && (cloud.voiceGender === 'man' || cloud.voiceGender === 'woman')
+        ? cloud.voiceGender
+        : local.voiceGender;
+    const resolvedCloudVoice =
+      useCloudPrimary && typeof cloud.cloudVoiceName === 'string' && cloud.cloudVoiceName
+        ? cloud.cloudVoiceName
+        : local.cloudVoiceName || getDefaultCloudVoiceForGender(resolvedGender);
+
     const merged: MullahMemoryProfile = {
       voiceRate: useCloudPrimary && typeof cloud.voiceRate === 'number' ? cloud.voiceRate : local.voiceRate,
       voiceName: useCloudPrimary && typeof cloud.voiceName === 'string' ? cloud.voiceName : local.voiceName,
+      voiceGender: resolvedGender,
+      cloudVoiceName: resolvedCloudVoice,
       briefingMode: useCloudPrimary && cloud.briefingMode === 'concise' ? 'concise' : local.briefingMode,
       favoriteChannel:
         useCloudPrimary && typeof cloud.favoriteChannel === 'string' ? cloud.favoriteChannel : local.favoriteChannel,

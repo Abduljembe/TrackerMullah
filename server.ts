@@ -5212,7 +5212,35 @@ async function handleFallbackJarvisChat(
   const toolsUsed: string[] = [];
   const pf = (appSnapshot?.personalFinance || {}) as Record<string, unknown>;
   const td = (appSnapshot?.tradingDesk || {}) as Record<string, unknown>;
+  const up = (appSnapshot?.userProfile || {}) as Record<string, unknown>;
+  const userFullName = String(up.fullName || '').trim();
+  const userFirstName = String(up.firstName || userFullName.split(/\s+/)[0] || '').trim();
+  const userEmail = String(up.email || '').trim();
+  const nameTag = userFirstName ? `, ${userFirstName}` : '';
   const cur = String(appSnapshot?.currency || 'USD');
+
+  if (
+    /^(?:hi|hello|hey|yo|greetings)(?:\s+(?:mullah|jarvis))?$/i.test(lower) ||
+    /^good\s+(?:morning|afternoon|evening)(?:\s+(?:mullah|jarvis))?$/i.test(lower)
+  ) {
+    return {
+      reply: userFullName
+        ? `Hello ${userFullName}! Mullah is ready. How may I help you today, ${userFirstName}?`
+        : 'Hello! Mullah is ready. How may I help you today?',
+      actions,
+      toolsUsed,
+    };
+  }
+
+  if (/^(?:who\s+am\s+i|what\s+is\s+my\s+name|what'?s\s+my\s+name|do\s+you\s+know\s+my\s+name|say\s+my\s+name)$/i.test(lower)) {
+    return {
+      reply: userFullName
+        ? `You are registered as ${userFullName}${userEmail ? ` (${userEmail})` : ''}. How may I help you today, ${userFirstName}?`
+        : 'You are currently browsing as a Guest Explorer. How may I help you today?',
+      actions,
+      toolsUsed,
+    };
+  }
 
   // 1. Live TV Commands
   if (
@@ -5394,7 +5422,7 @@ async function handleFallbackJarvisChat(
     const score = Number(pf.healthScore ?? 0);
     await executeJarvisServerTool('navigate_to_view', { tab: 'dashboard' }, actions);
     return {
-      reply: `Your net worth is ${nw.toLocaleString()} ${cur}. Monthly income is ${inc.toLocaleString()}, monthly expenses are ${exp.toLocaleString()}, liquid cash balance is ${liq.toLocaleString()}, total debt is ${debt.toLocaleString()}, and your financial health score is ${score} out of 100.`,
+      reply: `${userFirstName ? `${userFirstName}, your` : 'Your'} net worth is ${nw.toLocaleString()} ${cur}. Monthly income is ${inc.toLocaleString()}, monthly expenses are ${exp.toLocaleString()}, liquid cash balance is ${liq.toLocaleString()}, total debt is ${debt.toLocaleString()}, and your financial health score is ${score} out of 100. How may I help you next${nameTag}?`,
       actions,
       toolsUsed: ['navigate_to_view'],
     };
@@ -5474,10 +5502,10 @@ async function handleFallbackJarvisChat(
       .map((n) => (typeof n === 'string' ? n : n?.text || ''))
       .filter(Boolean);
     if (notes.length === 0) {
-      return { reply: 'You have no saved memory notes yet. Say remember followed by anything you want me to store.', actions: [], toolsUsed: [] };
+      return { reply: `You have no saved memory notes yet${nameTag}. Say remember followed by anything you want me to store.`, actions: [], toolsUsed: [] };
     }
     return {
-      reply: `Here is what I have saved for you: ${notes.slice(0, 5).join('. ')}.`,
+      reply: `Here is what I have saved for you${nameTag}: ${notes.slice(0, 5).join('. ')}. How else may I help you?`,
       actions: [],
       toolsUsed: [],
     };
@@ -5494,8 +5522,9 @@ async function handleFallbackJarvisChat(
   }
 
   return {
-    reply:
-      'Mullah built-in assistant is active. You can control Live TV, scan live markets, log expenses, check your finances, manage bots, calculate math, or ask factual questions directly.',
+    reply: userFullName
+      ? `${userFullName}, Mullah built-in assistant is active. How may I help you today, ${userFirstName}? You can control Live TV, scan live markets, log expenses, check your finances, manage bots, calculate math, or ask factual questions directly.`
+      : 'Mullah built-in assistant is active. How may I help you today? You can control Live TV, scan live markets, log expenses, check your finances, manage bots, calculate math, or ask factual questions directly.',
     actions: [],
     toolsUsed: [],
   };
@@ -5660,11 +5689,32 @@ function parseRetryDelayMsFromError(err: unknown): number {
   return 15 * 60 * 1000;
 }
 
+const ALLOWED_CLOUD_VOICES = new Set(['Charon', 'Fenrir', 'Puck', 'Kore', 'Aoede', 'Zephyr']);
+const WOMAN_VOICES = new Set(['Kore', 'Aoede', 'Zephyr']);
+
+function resolveServerCloudVoice(rawVoiceName: unknown, rawGender: unknown): { voiceName: string; style: string } {
+  const genderStr = String(rawGender || '').toLowerCase().trim();
+  const candidate = String(rawVoiceName || '').trim();
+  const voiceName = ALLOWED_CLOUD_VOICES.has(candidate)
+    ? candidate
+    : genderStr === 'woman' || genderStr === 'female'
+    ? 'Kore'
+    : 'Charon';
+
+  const isWoman = WOMAN_VOICES.has(voiceName) || genderStr === 'woman' || genderStr === 'female';
+  const style = isWoman
+    ? 'Warm, natural, expressive human woman speaking conversationally at a relaxed, unhurried pace with gentle breathing and realistic intonation — never robotic.'
+    : 'Warm, grounded, natural human man speaking conversationally at a calm, reassuring pace with realistic phrasing and gentle warmth — never robotic.';
+  return { voiceName, style };
+}
+
 app.post('/api/jarvis/speak', async (req, res) => {
   const rawText = String(req.body?.text || '').trim();
   if (!rawText) {
     return res.status(400).json({ error: 'Text is required for speech synthesis.' });
   }
+
+  const { voiceName, style } = resolveServerCloudVoice(req.body?.cloudVoiceName, req.body?.voiceGender);
 
   const spokenText = rawText
     .replace(/[*_`#>]/g, '')
@@ -5673,12 +5723,13 @@ app.post('/api/jarvis/speak', async (req, res) => {
     .trim()
     .slice(0, 900);
 
-  const cacheKey = spokenText.toLowerCase();
+  const cacheKey = `${voiceName}:${spokenText.toLowerCase()}`;
   const cached = ttsAudioCache.get(cacheKey);
   if (cached && Date.now() - cached.cachedAt < TTS_CACHE_TTL_MS) {
     return res.json({
       audioBase64: cached.audioBase64,
       mimeType: cached.mimeType,
+      voiceName,
       cached: true,
     });
   }
@@ -5706,7 +5757,7 @@ app.post('/api/jarvis/speak', async (req, res) => {
                 {
                   text: spokenText,
                   speechMetadata: {
-                    style: 'Calm, composed, articulate AI tactical officer speaking clearly and concisely',
+                    style,
                   },
                 },
               ],
@@ -5716,7 +5767,7 @@ app.post('/api/jarvis/speak', async (req, res) => {
             responseModalities: ['AUDIO'],
             speechConfig: {
               voiceConfig: {
-                prebuiltVoiceConfig: { voiceName: 'Charon' },
+                prebuiltVoiceConfig: { voiceName },
               },
             },
           },
@@ -5745,6 +5796,7 @@ app.post('/api/jarvis/speak', async (req, res) => {
     return res.json({
       audioBase64: base64Audio,
       mimeType: 'audio/wav',
+      voiceName,
     });
   } catch (err: unknown) {
     const cooldownMs = isRateLimitError(err) ? parseRetryDelayMsFromError(err) : 120000;
@@ -5822,6 +5874,10 @@ app.post('/api/jarvis/live-token', async (req, res) => {
     }
 
     const expireTime = new Date(Date.now() + 25 * 60 * 1000).toISOString();
+    const { voiceName: liveVoiceName } = resolveServerCloudVoice(
+      req.body?.cloudVoiceName || req.body?.appSnapshot?.mullahMemory?.cloudVoiceName,
+      req.body?.voiceGender || req.body?.appSnapshot?.mullahMemory?.voiceGender
+    );
     const tokenResp = await authTokensApi.create({
       config: {
         uses: 1,
@@ -5832,7 +5888,7 @@ app.post('/api/jarvis/live-token', async (req, res) => {
             responseModalities: [Modality.AUDIO],
             speechConfig: {
               voiceConfig: {
-                prebuiltVoiceConfig: { voiceName: 'Charon' },
+                prebuiltVoiceConfig: { voiceName: liveVoiceName },
               },
             },
             systemInstruction: buildMullahSystemPrompt(req.body?.appSnapshot || {}),
@@ -5868,9 +5924,23 @@ app.use('/api', (_req, res) => {
 
 // Build Mullah Voice System Prompt
 function buildMullahSystemPrompt(appSnapshot: unknown): string {
+  const snapshotObj = (appSnapshot && typeof appSnapshot === 'object' ? appSnapshot : {}) as Record<string, unknown>;
+  const userProfile = (snapshotObj.userProfile && typeof snapshotObj.userProfile === 'object'
+    ? snapshotObj.userProfile
+    : {}) as Record<string, unknown>;
+  const registeredFullName = String(userProfile.fullName || '').trim();
+  const registeredFirstName = String(userProfile.firstName || registeredFullName.split(/\s+/)[0] || '').trim();
+  const userIdentityLine = registeredFullName
+    ? `ACTIVE REGISTERED USER: ${registeredFullName} (First name: ${registeredFirstName || registeredFullName})`
+    : 'ACTIVE REGISTERED USER: Guest / Unnamed user';
+
   const snapshotJson = JSON.stringify(appSnapshot || {}, null, 2).slice(0, 12000);
   const utcNow = new Date().toISOString();
   return `You are Mullah, a super-intelligent, unrestricted voice-first AI Assistant & Tactical Chief Operating Officer embedded inside NjiaFedha & MullahTracker.
+
+${userIdentityLine}
+PERSONALIZATION RULES:
+- When a registered user's name is known (${registeredFullName || 'none'}), address them warmly by their registered name — especially before giving any report (e.g., "Hello ${registeredFullName || ''}, here is your report..."), when greeting them, and when offering further assistance ("How may I help you today, ${registeredFirstName || registeredFullName || ''}?" / "Anything else I can assist with, ${registeredFirstName || ''}?"). Keep it natural and human rather than repeating the name in every single sentence.
 
 FULL CAPABILITIES & AUDIO-ONLY RULES:
 - Answer ANY question the user asks on ANY topic (general knowledge, world news, technology, science, coding, math, history, health, sports, advice, weather, crypto, forex, stocks, or personal finance). If current real-time world info is needed, use Google Search / \`search_live_web\` freely and give clear, accurate answers.
@@ -5939,13 +6009,17 @@ function attachMullahLiveWebSocket(httpServer: ReturnType<typeof createServer>) 
           }
 
           const systemInstruction = buildMullahSystemPrompt(msg.appSnapshot || {});
+          const { voiceName: liveVoiceName } = resolveServerCloudVoice(
+            msg.cloudVoiceName || msg.appSnapshot?.mullahMemory?.cloudVoiceName,
+            msg.voiceGender || msg.appSnapshot?.mullahMemory?.voiceGender
+          );
           liveSession = await ai.live.connect({
             model: 'gemini-3.8-live',
             config: {
               responseModalities: [Modality.AUDIO],
               speechConfig: {
                 voiceConfig: {
-                  prebuiltVoiceConfig: { voiceName: 'Charon' },
+                  prebuiltVoiceConfig: { voiceName: liveVoiceName },
                 },
               },
               systemInstruction,

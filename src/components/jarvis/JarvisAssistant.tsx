@@ -4,11 +4,8 @@ import {
   MicOff,
   Volume2,
   X,
-  Minimize2,
   Zap,
   ShieldAlert,
-  TrendingUp,
-  Terminal,
   Square,
   AlertTriangle,
   Radio,
@@ -44,6 +41,9 @@ import { parseMpesaSms } from '../../utils/mpesaParser.ts';
 import { fetchSharedCalendarEvents, CalendarNewsEvent } from '../../utils/newsGuard.ts';
 import {
   MullahMemoryProfile,
+  MullahVoiceGender,
+  HUMAN_VOICE_PERSONAS,
+  getDefaultCloudVoiceForGender,
   loadLocalMullahMemory,
   hydrateMullahMemoryFromCloud,
   persistMullahMemoryToCloud,
@@ -241,10 +241,33 @@ function parseSpokenFastCommand(
   | {
       kind: 'fullReport';
     }
+  | {
+      kind: 'greeting';
+    }
+  | {
+      kind: 'whoAmI';
+    }
+  | {
+      kind: 'voicePersona';
+      gender: MullahVoiceGender;
+    }
   | null {
   const clean = rawText.trim();
   const lower = clean.toLowerCase().replace(/[?!.,]+$/g, '').trim();
   if (!lower) return null;
+
+  if (/^(?:hi|hello|hey|yo|greetings)(?:\s+(?:mullah|jarvis))?$/i.test(lower) || /^good\s+(?:morning|afternoon|evening)(?:\s+(?:mullah|jarvis))?$/i.test(lower)) {
+    return { kind: 'greeting' };
+  }
+  if (/^(?:who\s+am\s+i|what\s+is\s+my\s+name|what'?s\s+my\s+name|do\s+you\s+know\s+my\s+name|say\s+my\s+name)$/i.test(lower)) {
+    return { kind: 'whoAmI' };
+  }
+  if (/\b(?:switch|change|use|speak|sound|set|make)\b.*\b(?:woman|female|lady|girl)\b(?:\s+voice)?/i.test(lower)) {
+    return { kind: 'voicePersona', gender: 'woman' };
+  }
+  if (/\b(?:switch|change|use|speak|sound|set|make)\b.*\b(?:man|male|guy|gentleman|boy)\b(?:\s+voice)?/i.test(lower)) {
+    return { kind: 'voicePersona', gender: 'man' };
+  }
 
   // Never intercept analytical / open-ended questions — let Gemini AI answer those
   if (
@@ -494,9 +517,136 @@ function parseSpokenFastCommand(
   return null;
 }
 
-function buildWelcomeGreeting(): string {
+function humanizeTextForLocalSpeech(text: string): string {
+  return text
+    .replace(/[*_`#>]/g, '')
+    .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+    .replace(/\bXAU\/?USD\b/gi, 'Gold')
+    .replace(/\bXAG\/?USD\b/gi, 'Silver')
+    .replace(/\bBTC\/?USD\b/gi, 'Bitcoin')
+    .replace(/\bETH\/?USD\b/gi, 'Ethereum')
+    .replace(/\bEUR\/?USD\b/gi, 'Euro Dollar')
+    .replace(/\bGBP\/?USD\b/gi, 'Pound Dollar')
+    .replace(/\bUSD\/?JPY\b/gi, 'Dollar Yen')
+    .replace(/\bUSD\/?KES\b/gi, 'Dollar Shilling')
+    .replace(/\bTP1\b/gi, 'target 1')
+    .replace(/\bTP2\b/gi, 'target 2')
+    .replace(/\bSL\b/gi, 'stop loss')
+    .replace(/\bR:R\b/gi, 'risk to reward')
+    .replace(/(\d+(?:,\d+)*(?:\.\d+)?)\s*USD\b/gi, '$1 US dollars')
+    .replace(/(\d+(?:,\d+)*(?:\.\d+)?)\s*KES\b/gi, '$1 shillings')
+    .replace(/(\d+(?:,\d+)*(?:\.\d+)?)\s*EUR\b/gi, '$1 euros')
+    .replace(/(\d+(?:,\d+)*(?:\.\d+)?)\s*GBP\b/gi, '$1 pounds')
+    .replace(/\s*&\s*/g, ' and ')
+    .replace(/:\s+/g, ', ')
+    .replace(/;\s+/g, ', ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const FEMALE_VOICE_RE =
+  /\b(female|woman|aria|jenny|ava|emma|michelle|sonia|libby|maisie|clara|samantha|karen|moira|serena|tessa|victoria|allison|nicky|susan|zira|hazel|catherine|katya|veena|joanna|amy|ruth|chloe|sophia|olivia|elena|amara|maya|kore|aoede|zephyr|salli|kimberly|kendra|ivy|nicole|raveena|fiona)\b/i;
+
+const MALE_VOICE_RE =
+  /\b(male|man|daniel|guy|ryan|andrew|brian|christopher|eric|roger|steffan|oliver|arthur|alex|aaron|fred|jorge|thomas|mark|david|richard|george|james|matthew|liam|william|henry|charlie|harry|rishi|lee|gordon|charon|fenrir|puck|joey|justin|russell|geraint)\b/i;
+
+function scoreBrowserVoiceForGender(voice: SpeechSynthesisVoice, gender: MullahVoiceGender): number {
+  const name = voice.name || '';
+  const lang = (voice.lang || '').toLowerCase();
+  if (!lang.startsWith('en')) return -1000;
+
+  let score = 0;
+  // Strong preference for neural / natural / enhanced human system voices
+  if (/\b(natural|online|neural|siri|enhanced|premium)\b/i.test(name)) score += 130;
+  if (/google\s+uk\s+english|google\s+us\s+english/i.test(name)) score += 65;
+  if (/microsoft.*online/i.test(name)) score += 90;
+  if (/desktop|espeak|festival|compact/i.test(name)) score -= 50;
+
+  const looksFemale = FEMALE_VOICE_RE.test(name);
+  const looksMale = MALE_VOICE_RE.test(name);
+
+  if (gender === 'woman') {
+    if (looksFemale) score += 110;
+    if (looksMale && !looksFemale) score -= 180;
+  } else {
+    if (looksMale) score += 110;
+    if (looksFemale && !looksMale) score -= 180;
+  }
+
+  if (lang === 'en-us' || lang === 'en-gb' || lang === 'en-ke' || lang === 'en-au') score += 15;
+  if (voice.localService !== false) score += 8;
+  return score;
+}
+
+function selectBestNaturalBrowserVoice(
+  voices: SpeechSynthesisVoice[],
+  gender: MullahVoiceGender,
+  explicitVoiceName?: string
+): SpeechSynthesisVoice | undefined {
+  if (!voices || voices.length === 0) return undefined;
+  if (explicitVoiceName && explicitVoiceName !== 'auto') {
+    const exact = voices.find((v) => v.name === explicitVoiceName);
+    if (exact) return exact;
+  }
+  const english = voices.filter((v) => v.lang.toLowerCase().startsWith('en'));
+  const pool = english.length > 0 ? english : voices;
+  return [...pool].sort((a, b) => scoreBrowserVoiceForGender(b, gender) - scoreBrowserVoiceForGender(a, gender))[0];
+}
+
+function toTitleCaseName(raw: string): string {
+  return raw
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => {
+      if (word.length <= 1) return word.toUpperCase();
+      // Preserve intentional mixed case (e.g., McDonald, DeLuca) unless all lowercase or all caps
+      const isAllLower = word === word.toLowerCase();
+      const isAllUpper = word === word.toUpperCase();
+      if (isAllLower || isAllUpper) {
+        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+      }
+      return word;
+    })
+    .join(' ');
+}
+
+function resolveRegisteredUserNames(
+  user: { displayName?: string | null; email?: string | null; isAnonymous?: boolean } | null | undefined
+): { fullName: string; firstName: string; isNamedUser: boolean } {
+  if (!user || user.isAnonymous) {
+    return { fullName: '', firstName: '', isNamedUser: false };
+  }
+  const rawDisplay = (user.displayName || '').trim();
+  const genericSet = new Set(['investor', 'user', 'guest explorer', 'anonymous', 'guest']);
+
+  let cleaned = '';
+  if (rawDisplay && !genericSet.has(rawDisplay.toLowerCase())) {
+    if (!/\s/.test(rawDisplay) && /[._-]/.test(rawDisplay)) {
+      cleaned = rawDisplay.replace(/[._-]+/g, ' ').replace(/\d+$/g, '').trim();
+    } else if (!/\s/.test(rawDisplay) && user.email && rawDisplay.toLowerCase() === user.email.split('@')[0]?.toLowerCase()) {
+      cleaned = rawDisplay.replace(/[._-]+/g, ' ').replace(/\d+$/g, '').trim();
+    } else {
+      cleaned = rawDisplay;
+    }
+  } else if (user.email) {
+    const prefix = user.email.split('@')[0] || '';
+    cleaned = prefix.replace(/[._-]+/g, ' ').replace(/\d+$/g, '').trim();
+  }
+
+  const fullName = cleaned ? toTitleCaseName(cleaned) : '';
+  const firstName = fullName ? fullName.split(/\s+/)[0] || fullName : '';
+  return {
+    fullName,
+    firstName,
+    isNamedUser: Boolean(fullName),
+  };
+}
+
+function buildWelcomeGreeting(userFullName = '', userFirstName = ''): string {
   const hour = new Date().getHours();
   const timeOfDay = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  const greetingAddress = userFullName ? `, ${userFullName}` : '';
+  const assistAddress = userFirstName ? `, ${userFirstName}` : '';
   const fxOpen = getAssetMarketSession('EUR/USD', 'FOREX').isOpen;
   const openCount = loadOpenPaperPositions().length;
   const propGuard = evaluatePropTradeBlock();
@@ -505,7 +655,7 @@ function buildWelcomeGreeting(): string {
     : 'Traditional Forex markets are closed for the weekend, while crypto and synthetics remain active.';
   const posNote = openCount > 0 ? `You have ${openCount} open position${openCount > 1 ? 's' : ''} monitored.` : '';
   const propNote = propGuard.blocked ? 'Warning: Prop Firm Risk Guardian lockout is currently active.' : '';
-  return `${timeOfDay}. Mullah is online with full command. ${marketNote} ${posNote} ${propNote} Ask me any question, add an expense, control Live TV, scan markets, or manage your bots.`
+  return `${timeOfDay}${greetingAddress}. Mullah is online with full command. ${marketNote} ${posNote} ${propNote} How may I help you today${assistAddress}? Ask me any question, add an expense, control Live TV, scan markets, or manage your bots.`
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -672,7 +822,10 @@ export const JarvisAssistant: React.FC = () => {
     isCloudSyncing,
   } = useFinance();
 
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
+  const userNames = resolveRegisteredUserNames(user);
+  const userNamesRef = useRef(userNames);
+  userNamesRef.current = userNames;
 
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
@@ -684,7 +837,8 @@ export const JarvisAssistant: React.FC = () => {
   // Auto-open Mullah when website first loads
   const [isOpen, setIsOpen] = useState(true);
   const [jarvisState, setJarvisState] = useState<JarvisState>('idle');
-  const [handsFreeLoop, setHandsFreeLoop] = useState<boolean>(true);
+  // Default to stable Tap-to-Speak mode so speakers never self-trigger mic echo loops; users can toggle AUTO anytime
+  const [handsFreeLoop, setHandsFreeLoop] = useState<boolean>(false);
   const [liveStreamMode, setLiveStreamMode] = useState<boolean>(false);
   const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(false);
   const [proactiveAlertsEnabled, setProactiveAlertsEnabled] = useState<boolean>(true);
@@ -699,7 +853,7 @@ export const JarvisAssistant: React.FC = () => {
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const calendarEventsRef = useRef<CalendarNewsEvent[]>([]);
 
-  const initialGreetingRef = useRef<string>(buildWelcomeGreeting());
+  const initialGreetingRef = useRef<string>(buildWelcomeGreeting(userNames.fullName, userNames.firstName));
   const [messages, setMessages] = useState<JarvisMessage[]>([
     {
       id: 'jarvis-boot',
@@ -708,15 +862,29 @@ export const JarvisAssistant: React.FC = () => {
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     },
   ]);
+  const messagesRef = useRef<JarvisMessage[]>(messages);
+  messagesRef.current = messages;
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
   const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-  const speechKeepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const speechGenerationRef = useRef<number>(0);
+  const speakDispatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const speakWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoListenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingWelcomeAudioRef = useRef<{ base64: string; mimeType: string } | null>(null);
   const pendingSpeechRef = useRef<{ text: string; triggerAutoListenAfter: boolean } | null>(null);
   const hasUserGestureRef = useRef<boolean>(false);
   const justFlushedAudioAtRef = useRef<number>(0);
+  const lastSpokenRef = useRef<{ key: string; textLower: string; words: string[]; at: number }>({
+    key: '',
+    textLower: '',
+    words: [],
+    at: 0,
+  });
+  const lastSpeakEndedAtRef = useRef<number>(0);
+  const isProcessingCommandRef = useRef<boolean>(false);
+  const lastCommandRef = useRef<{ key: string; at: number }>({ key: '', at: 0 });
   const availableVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const clientTtsCacheRef = useRef<Map<string, { base64: string; mimeType: string }>>(new Map());
   const cloudTtsCooldownUntilRef = useRef<number>(
@@ -822,21 +990,34 @@ export const JarvisAssistant: React.FC = () => {
 
   useEffect(() => {
     return () => {
-      activeAudioRef.current?.pause();
-      if (speechKeepAliveRef.current) {
-        clearInterval(speechKeepAliveRef.current);
-        speechKeepAliveRef.current = null;
+      speechGenerationRef.current += 1;
+      if (speakDispatchTimerRef.current) {
+        clearTimeout(speakDispatchTimerRef.current);
+        speakDispatchTimerRef.current = null;
       }
+      if (speakWatchdogTimerRef.current) {
+        clearTimeout(speakWatchdogTimerRef.current);
+        speakWatchdogTimerRef.current = null;
+      }
+      if (autoListenTimerRef.current) {
+        clearTimeout(autoListenTimerRef.current);
+        autoListenTimerRef.current = null;
+      }
+      activeAudioRef.current?.pause();
+      activeAudioRef.current = null;
       activeUtteranceRef.current = null;
+      try {
+        window.speechSynthesis?.cancel();
+      } catch {}
       stopLiveAudioStream();
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach((t) => t.stop());
       }
       try {
-        speechRecognitionRef.current?.stop();
+        speechRecognitionRef.current?.abort?.();
       } catch {}
       try {
-        wakeRecognitionRef.current?.stop();
+        wakeRecognitionRef.current?.abort?.();
       } catch {}
     };
   }, [stopLiveAudioStream]);
@@ -913,18 +1094,36 @@ export const JarvisAssistant: React.FC = () => {
   }, []);
 
   const stopSpeaking = useCallback(() => {
+    speechGenerationRef.current += 1;
+    if (speakDispatchTimerRef.current) {
+      clearTimeout(speakDispatchTimerRef.current);
+      speakDispatchTimerRef.current = null;
+    }
+    if (speakWatchdogTimerRef.current) {
+      clearTimeout(speakWatchdogTimerRef.current);
+      speakWatchdogTimerRef.current = null;
+    }
+    if (autoListenTimerRef.current) {
+      clearTimeout(autoListenTimerRef.current);
+      autoListenTimerRef.current = null;
+    }
     if (activeAudioRef.current) {
+      activeAudioRef.current.onended = null;
+      activeAudioRef.current.onerror = null;
       activeAudioRef.current.pause();
       activeAudioRef.current = null;
     }
-    if (speechKeepAliveRef.current) {
-      clearInterval(speechKeepAliveRef.current);
-      speechKeepAliveRef.current = null;
+    if (activeUtteranceRef.current) {
+      activeUtteranceRef.current.onstart = null;
+      activeUtteranceRef.current.onend = null;
+      activeUtteranceRef.current.onerror = null;
+      activeUtteranceRef.current = null;
     }
-    activeUtteranceRef.current = null;
     try {
-      if (window.speechSynthesis && (window.speechSynthesis.speaking || window.speechSynthesis.pending)) {
-        window.speechSynthesis.cancel();
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+          window.speechSynthesis.cancel();
+        }
       }
     } catch {}
     liveActiveSourcesRef.current.forEach((src) => {
@@ -936,186 +1135,286 @@ export const JarvisAssistant: React.FC = () => {
     if (liveOutputCtxRef.current) {
       liveNextStartTimeRef.current = liveOutputCtxRef.current.currentTime;
     }
+    lastSpeakEndedAtRef.current = Date.now();
     setJarvisState((prev) => (prev === 'speaking' ? 'idle' : prev));
   }, []);
 
-  const speakWithBrowserSynthesis = useCallback((text: string, triggerAutoListenAfter = true): boolean => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      setJarvisState('idle');
-      return false;
-    }
-    const cleanText = text
-      .replace(/[*_`#>]/g, '')
-      .replace(/\[(.*?)\]\(.*?\)/g, '$1')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (!cleanText) {
-      setJarvisState('idle');
-      return false;
-    }
-
-    try {
-      const synth = window.speechSynthesis;
-      if (speechKeepAliveRef.current) {
-        clearInterval(speechKeepAliveRef.current);
-        speechKeepAliveRef.current = null;
-      }
-
-      const utter = new SpeechSynthesisUtterance(cleanText);
-      activeUtteranceRef.current = utter;
-
-      const voices = availableVoicesRef.current.length > 0 ? availableVoicesRef.current : synth.getVoices();
-      const mem = mullahMemoryRef.current;
-      const explicitVoice =
-        mem.voiceName && mem.voiceName !== 'auto'
-          ? voices.find((v) => v.name === mem.voiceName)
-          : undefined;
-      const localEnglish = voices.filter((v) => v.lang.toLowerCase().startsWith('en') && v.localService !== false);
-      const anyEnglish = voices.filter((v) => v.lang.toLowerCase().startsWith('en'));
-      const preferred =
-        explicitVoice ||
-        localEnglish.find((v) => /daniel|samantha|alex|arthur|george|ryan|mark|david|karen|google/i.test(v.name)) ||
-        localEnglish.find((v) => v.default) ||
-        localEnglish[0] ||
-        anyEnglish.find((v) => v.default) ||
-        anyEnglish[0];
-      if (preferred) {
-        utter.voice = preferred;
-        utter.lang = preferred.lang;
+  const splitSpeechChunks = useCallback((input: string): string[] => {
+    const sentences = input
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const chunks: string[] = [];
+    for (const sentence of sentences) {
+      if (sentence.length <= 210) {
+        chunks.push(sentence);
       } else {
-        utter.lang = 'en-US';
-      }
-      utter.rate = typeof mem.voiceRate === 'number' ? mem.voiceRate : 1.02;
-      utter.pitch = 0.96;
-      utter.volume = 1;
-
-      let didStart = false;
-      let didFinish = false;
-
-      const clearUtterTimers = () => {
-        if (speechKeepAliveRef.current) {
-          clearInterval(speechKeepAliveRef.current);
-          speechKeepAliveRef.current = null;
+        const words = sentence.split(/\s+/);
+        let buf = '';
+        for (const w of words) {
+          const candidate = buf ? `${buf} ${w}` : w;
+          if (candidate.length > 190 && buf) {
+            chunks.push(buf);
+            buf = w;
+          } else {
+            buf = candidate;
+          }
         }
-      };
+        if (buf) chunks.push(buf);
+      }
+    }
+    return chunks.length > 0 ? chunks : [input];
+  }, []);
 
-      utter.onstart = () => {
-        didStart = true;
-        pendingSpeechRef.current = null;
-        setAutoplayBlocked(false);
-        setJarvisState('speaking');
-        // Keep Chrome desktop/Android SpeechSynthesis active on longer spoken replies
-        clearUtterTimers();
-        speechKeepAliveRef.current = setInterval(() => {
+  const speakWithBrowserSynthesis = useCallback(
+    (text: string, triggerAutoListenAfter = false, expectedGeneration?: number): boolean => {
+      if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+        setJarvisState('idle');
+        return false;
+      }
+      const cleanText = humanizeTextForLocalSpeech(text);
+      if (!cleanText) {
+        setJarvisState('idle');
+        return false;
+      }
+
+      const gen = expectedGeneration ?? speechGenerationRef.current;
+      if (gen !== speechGenerationRef.current) {
+        return false;
+      }
+
+      try {
+        const synth = window.speechSynthesis;
+        const chunks = splitSpeechChunks(cleanText);
+
+        const voices = availableVoicesRef.current.length > 0 ? availableVoicesRef.current : synth.getVoices();
+        const mem = mullahMemoryRef.current;
+        const voiceGender: MullahVoiceGender = mem.voiceGender === 'woman' ? 'woman' : 'man';
+        const preferred = selectBestNaturalBrowserVoice(voices, voiceGender, mem.voiceName);
+
+        const speakChunk = (chunkIdx: number) => {
+          if (speechGenerationRef.current !== gen) return;
+
+          if (chunkIdx >= chunks.length) {
+            activeUtteranceRef.current = null;
+            lastSpeakEndedAtRef.current = Date.now();
+            setJarvisState('idle');
+            if (triggerAutoListenAfter && handsFreeLoopRef.current) {
+              if (autoListenTimerRef.current) clearTimeout(autoListenTimerRef.current);
+              autoListenTimerRef.current = setTimeout(() => {
+                autoListenTimerRef.current = null;
+                if (speechGenerationRef.current === gen && jarvisStateRef.current === 'idle') {
+                  startListeningRef.current();
+                }
+              }, 1100);
+            }
+            return;
+          }
+
+          const utter = new SpeechSynthesisUtterance(chunks[chunkIdx]);
+          activeUtteranceRef.current = utter;
+
+          if (preferred) {
+            utter.voice = preferred;
+            utter.lang = preferred.lang;
+          } else {
+            utter.lang = 'en-US';
+          }
+          // Calibrated human conversational rate & gentle natural pitch based on Man vs Woman voice
+          const baseRate = typeof mem.voiceRate === 'number' ? mem.voiceRate : 0.98;
+          utter.rate = Math.min(1.4, Math.max(0.78, baseRate));
+          const selectedIsWoman = preferred ? FEMALE_VOICE_RE.test(preferred.name) : false;
+          const selectedIsMale = preferred ? MALE_VOICE_RE.test(preferred.name) : false;
+          if (voiceGender === 'woman') {
+            utter.pitch = selectedIsWoman ? 1.03 : 1.12;
+          } else {
+            utter.pitch = selectedIsMale ? 0.96 : 0.88;
+          }
+          utter.volume = 1;
+
+          let didStart = false;
+          let didFinish = false;
+
+          utter.onstart = () => {
+            if (speechGenerationRef.current !== gen) return;
+            didStart = true;
+            if (speakWatchdogTimerRef.current) {
+              clearTimeout(speakWatchdogTimerRef.current);
+              speakWatchdogTimerRef.current = null;
+            }
+            pendingSpeechRef.current = null;
+            setAutoplayBlocked(false);
+            setJarvisState('speaking');
+          };
+
+          utter.onend = () => {
+            if (didFinish) return;
+            didFinish = true;
+            if (speakWatchdogTimerRef.current) {
+              clearTimeout(speakWatchdogTimerRef.current);
+              speakWatchdogTimerRef.current = null;
+            }
+            if (activeUtteranceRef.current === utter) {
+              activeUtteranceRef.current = null;
+            }
+            if (speechGenerationRef.current !== gen) return;
+            if (chunkIdx + 1 < chunks.length) {
+              // Brief natural breath pause between sentences so speech flows like a human
+              if (speakDispatchTimerRef.current) clearTimeout(speakDispatchTimerRef.current);
+              speakDispatchTimerRef.current = setTimeout(() => {
+                speakDispatchTimerRef.current = null;
+                speakChunk(chunkIdx + 1);
+              }, 85);
+            } else {
+              speakChunk(chunkIdx + 1);
+            }
+          };
+
+          utter.onerror = (event: SpeechSynthesisErrorEvent) => {
+            if (didFinish) return;
+            didFinish = true;
+            if (speakWatchdogTimerRef.current) {
+              clearTimeout(speakWatchdogTimerRef.current);
+              speakWatchdogTimerRef.current = null;
+            }
+            if (activeUtteranceRef.current === utter) {
+              activeUtteranceRef.current = null;
+            }
+            const errType = String(event?.error || '').toLowerCase();
+            // 'interrupted' / 'canceled' fires whenever stopSpeaking() supersedes old speech — never re-queue!
+            if (errType === 'interrupted' || errType === 'canceled' || speechGenerationRef.current !== gen) {
+              return;
+            }
+            if (errType === 'not-allowed' || (!hasUserGestureRef.current && !didStart)) {
+              pendingSpeechRef.current = { text: cleanText, triggerAutoListenAfter };
+              setAutoplayBlocked(true);
+            }
+            setJarvisState('idle');
+          };
+
           try {
             if (synth.paused) synth.resume();
-          } catch {}
-        }, 7000);
-      };
+            setJarvisState('speaking');
+            synth.speak(utter);
 
-      utter.onend = () => {
-        if (didFinish) return;
-        didFinish = true;
-        clearUtterTimers();
-        if (activeUtteranceRef.current === utter) {
-          activeUtteranceRef.current = null;
-        }
-        setJarvisState('idle');
-        if (triggerAutoListenAfter && handsFreeLoopRef.current) {
-          setTimeout(() => {
-            startListeningRef.current();
-          }, 260);
-        }
-      };
-
-      utter.onerror = (event: SpeechSynthesisErrorEvent) => {
-        if (didFinish) return;
-        didFinish = true;
-        clearUtterTimers();
-        if (activeUtteranceRef.current === utter) {
-          activeUtteranceRef.current = null;
-        }
-        const errType = String(event?.error || '').toLowerCase();
-        if (errType === 'not-allowed' || (!hasUserGestureRef.current && !didStart)) {
-          pendingSpeechRef.current = { text: cleanText, triggerAutoListenAfter };
-          setAutoplayBlocked(true);
-        }
-        setJarvisState('idle');
-      };
-
-      const dispatchSpeak = () => {
-        try {
-          if (synth.paused) synth.resume();
-          setJarvisState('speaking');
-          synth.speak(utter);
-
-          // Watchdog: Safari/iOS/Chrome silently drop un-gestured boot speech without always firing onerror
-          setTimeout(() => {
-            if (!didStart && !didFinish && activeUtteranceRef.current === utter) {
-              const active = synth.speaking || synth.pending;
-              if (!active) {
-                clearUtterTimers();
-                activeUtteranceRef.current = null;
-                pendingSpeechRef.current = { text: cleanText, triggerAutoListenAfter };
-                setAutoplayBlocked(true);
-                setJarvisState('idle');
-              }
+            // Watchdog only for chunk 0: Safari/iOS/Chrome silently drop un-gestured speech without firing onerror
+            if (chunkIdx === 0) {
+              if (speakWatchdogTimerRef.current) clearTimeout(speakWatchdogTimerRef.current);
+              speakWatchdogTimerRef.current = setTimeout(() => {
+                speakWatchdogTimerRef.current = null;
+                if (
+                  speechGenerationRef.current === gen &&
+                  !didStart &&
+                  !didFinish &&
+                  activeUtteranceRef.current === utter
+                ) {
+                  const active = synth.speaking || synth.pending;
+                  if (!active) {
+                    activeUtteranceRef.current = null;
+                    pendingSpeechRef.current = { text: cleanText, triggerAutoListenAfter };
+                    setAutoplayBlocked(true);
+                    setJarvisState('idle');
+                  }
+                }
+              }, 1400);
             }
-          }, 450);
-        } catch {
-          clearUtterTimers();
-          activeUtteranceRef.current = null;
+          } catch {
+            activeUtteranceRef.current = null;
+            if (speechGenerationRef.current === gen) {
+              pendingSpeechRef.current = { text: cleanText, triggerAutoListenAfter };
+              setAutoplayBlocked(true);
+              setJarvisState('idle');
+            }
+          }
+        };
+
+        // Synchronous speak when idle preserves mobile gesture; only brief cancel delay if actively speaking
+        if (synth.speaking || synth.pending) {
+          synth.cancel();
+          if (speakDispatchTimerRef.current) clearTimeout(speakDispatchTimerRef.current);
+          speakDispatchTimerRef.current = setTimeout(() => {
+            speakDispatchTimerRef.current = null;
+            speakChunk(0);
+          }, 60);
+        } else {
+          speakChunk(0);
+        }
+        return true;
+      } catch {
+        if (speechGenerationRef.current === gen) {
           pendingSpeechRef.current = { text: cleanText, triggerAutoListenAfter };
           setAutoplayBlocked(true);
           setJarvisState('idle');
         }
-      };
-
-      // Only cancel if already speaking/queued; synchronous speak() preserves mobile Safari user gesture
-      if (synth.speaking || synth.pending) {
-        synth.cancel();
-        setTimeout(dispatchSpeak, 45);
-      } else {
-        dispatchSpeak();
+        return false;
       }
-      return true;
-    } catch {
-      pendingSpeechRef.current = { text: cleanText, triggerAutoListenAfter };
-      setAutoplayBlocked(true);
-      setJarvisState('idle');
-      return false;
-    }
-  }, []);
+    },
+    [splitSpeechChunks]
+  );
 
   const playAudioPayload = useCallback(
-    async (audioBase64: string, mimeType: string, triggerAutoListenAfter = true): Promise<boolean> => {
-      stopSpeaking();
+    async (
+      audioBase64: string,
+      mimeType: string,
+      triggerAutoListenAfter = false,
+      expectedGeneration?: number
+    ): Promise<boolean> => {
+      const gen = expectedGeneration ?? speechGenerationRef.current;
+      if (gen !== speechGenerationRef.current) return false;
+
+      // Clear any lingering audio element without bumping generation when called within active gen
+      if (activeAudioRef.current) {
+        activeAudioRef.current.onended = null;
+        activeAudioRef.current.onerror = null;
+        activeAudioRef.current.pause();
+        activeAudioRef.current = null;
+      }
+
       const audio = new Audio(`data:${mimeType || 'audio/wav'};base64,${audioBase64}`);
       activeAudioRef.current = audio;
       setJarvisState('speaking');
 
       audio.onended = () => {
-        activeAudioRef.current = null;
+        if (activeAudioRef.current === audio) {
+          activeAudioRef.current = null;
+        }
+        if (speechGenerationRef.current !== gen) return;
+        lastSpeakEndedAtRef.current = Date.now();
         setJarvisState('idle');
         if (triggerAutoListenAfter && handsFreeLoopRef.current) {
-          setTimeout(() => {
-            startListeningRef.current();
-          }, 260);
+          if (autoListenTimerRef.current) clearTimeout(autoListenTimerRef.current);
+          autoListenTimerRef.current = setTimeout(() => {
+            autoListenTimerRef.current = null;
+            if (speechGenerationRef.current === gen && jarvisStateRef.current === 'idle') {
+              startListeningRef.current();
+            }
+          }, 1100);
         }
       };
 
       audio.onerror = () => {
-        activeAudioRef.current = null;
-        setJarvisState('idle');
+        if (activeAudioRef.current === audio) {
+          activeAudioRef.current = null;
+        }
+        if (speechGenerationRef.current === gen) {
+          setJarvisState('idle');
+        }
       };
 
       try {
         await audio.play();
+        if (speechGenerationRef.current !== gen) {
+          audio.pause();
+          return false;
+        }
         pendingWelcomeAudioRef.current = null;
         setAutoplayBlocked(false);
         return true;
       } catch (err: unknown) {
-        activeAudioRef.current = null;
+        if (activeAudioRef.current === audio) {
+          activeAudioRef.current = null;
+        }
+        if (speechGenerationRef.current !== gen) return false;
         setJarvisState('idle');
         const msg = err instanceof Error ? err.message : String(err || '');
         if (
@@ -1131,11 +1430,15 @@ export const JarvisAssistant: React.FC = () => {
         return false;
       }
     },
-    [stopSpeaking]
+    []
   );
 
   const flushPendingSpeechOnGesture = useCallback(() => {
     hasUserGestureRef.current = true;
+    // Debounce double triggers from pointerdown + click on the same tap
+    if (Date.now() - justFlushedAudioAtRef.current < 500) {
+      return false;
+    }
     try {
       window.speechSynthesis?.resume();
     } catch {}
@@ -1143,9 +1446,12 @@ export const JarvisAssistant: React.FC = () => {
     if (pendingWelcomeAudioRef.current) {
       const pendingAudio = pendingWelcomeAudioRef.current;
       pendingWelcomeAudioRef.current = null;
+      pendingSpeechRef.current = null;
       justFlushedAudioAtRef.current = Date.now();
       setAutoplayBlocked(false);
-      playAudioPayload(pendingAudio.base64, pendingAudio.mimeType, true);
+      stopSpeaking();
+      const gen = speechGenerationRef.current;
+      playAudioPayload(pendingAudio.base64, pendingAudio.mimeType, false, gen);
       return true;
     }
 
@@ -1154,12 +1460,14 @@ export const JarvisAssistant: React.FC = () => {
       pendingSpeechRef.current = null;
       justFlushedAudioAtRef.current = Date.now();
       setAutoplayBlocked(false);
-      speakWithBrowserSynthesis(pendingText.text, pendingText.triggerAutoListenAfter);
+      stopSpeaking();
+      const gen = speechGenerationRef.current;
+      speakWithBrowserSynthesis(pendingText.text, pendingText.triggerAutoListenAfter, gen);
       return true;
     }
 
     return false;
-  }, [playAudioPayload, speakWithBrowserSynthesis]);
+  }, [playAudioPayload, speakWithBrowserSynthesis, stopSpeaking]);
 
   // First user tap/click/key anywhere unlocks browser audio on HTTPS/Vercel immediately
   useEffect(() => {
@@ -1178,21 +1486,43 @@ export const JarvisAssistant: React.FC = () => {
   }, [flushPendingSpeechOnGesture]);
 
   const speakText = useCallback(
-    async (text: string, triggerAutoListenAfter = true) => {
+    async (text: string, triggerAutoListenAfter = false) => {
+      const normalizedKey = text.trim().toLowerCase().replace(/\s+/g, ' ');
+      if (!normalizedKey) return;
+
+      const mem = mullahMemoryRef.current;
+      const activeVoiceGender: MullahVoiceGender = mem.voiceGender === 'woman' ? 'woman' : 'man';
+      const activeCloudVoice = mem.cloudVoiceName || getDefaultCloudVoiceForGender(activeVoiceGender);
+      const voiceCacheKey = `${activeVoiceGender}:${activeCloudVoice}:${normalizedKey}`;
+
+      // Prevent accidental double/triple playback of the exact same message with the same voice in <2.5s
+      const now = Date.now();
+      if (
+        lastSpokenRef.current.key === voiceCacheKey &&
+        (jarvisStateRef.current === 'speaking' || now - lastSpokenRef.current.at < 2500)
+      ) {
+        return;
+      }
+
       stopSpeaking();
+      const gen = speechGenerationRef.current;
+      const words = normalizedKey
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter((w) => w.length >= 3);
+      lastSpokenRef.current = { key: voiceCacheKey, textLower: normalizedKey, words, at: now };
       setVoiceError(null);
-      const normalizedKey = text.trim().toLowerCase();
 
       // Use instant Unlimited Browser Speech when selected OR during cloud TTS cooldown
       if (voiceEngineModeRef.current === 'unlimited' || Date.now() < cloudTtsCooldownUntilRef.current) {
-        speakWithBrowserSynthesis(text, triggerAutoListenAfter);
+        speakWithBrowserSynthesis(text, triggerAutoListenAfter, gen);
         return;
       }
 
       // Check client cache first (0 API calls)
-      const cachedClient = clientTtsCacheRef.current.get(normalizedKey);
+      const cachedClient = clientTtsCacheRef.current.get(voiceCacheKey);
       if (cachedClient) {
-        await playAudioPayload(cachedClient.base64, cachedClient.mimeType, triggerAutoListenAfter);
+        await playAudioPayload(cachedClient.base64, cachedClient.mimeType, triggerAutoListenAfter, gen);
         return;
       }
 
@@ -1209,10 +1539,17 @@ export const JarvisAssistant: React.FC = () => {
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text }),
+            body: JSON.stringify({
+              text,
+              voiceGender: activeVoiceGender,
+              cloudVoiceName: activeCloudVoice,
+            }),
           },
           { timeoutMs: 4500, retries: 0 }
         );
+
+        // Abort if superseded or stopped while cloud TTS fetch was in flight
+        if (speechGenerationRef.current !== gen) return;
 
         if (!res.ok || data.fallbackLocalTts || !data.audioBase64) {
           const cooldownMs = Number(data.cooldownRemainingMs || 300000);
@@ -1221,34 +1558,65 @@ export const JarvisAssistant: React.FC = () => {
           try {
             localStorage.setItem('njia_cloud_tts_cooldown_until', String(until));
           } catch {}
-          speakWithBrowserSynthesis(text, triggerAutoListenAfter);
+          speakWithBrowserSynthesis(text, triggerAutoListenAfter, gen);
           return;
         }
 
         if (clientTtsCacheRef.current.size < 40) {
-          clientTtsCacheRef.current.set(normalizedKey, {
+          clientTtsCacheRef.current.set(voiceCacheKey, {
             base64: data.audioBase64,
             mimeType: data.mimeType || 'audio/wav',
           });
         }
-        await playAudioPayload(data.audioBase64, data.mimeType || 'audio/wav', triggerAutoListenAfter);
+        await playAudioPayload(data.audioBase64, data.mimeType || 'audio/wav', triggerAutoListenAfter, gen);
       } catch {
+        if (speechGenerationRef.current !== gen) return;
         const until = Date.now() + 180000;
         cloudTtsCooldownUntilRef.current = until;
         try {
           localStorage.setItem('njia_cloud_tts_cooldown_until', String(until));
         } catch {}
-        speakWithBrowserSynthesis(text, triggerAutoListenAfter);
+        speakWithBrowserSynthesis(text, triggerAutoListenAfter, gen);
       }
     },
     [playAudioPayload, speakWithBrowserSynthesis, stopSpeaking]
   );
 
+  const switchVoicePersona = useCallback(
+    (gender: MullahVoiceGender, specificCloudVoice?: string): MullahMemoryProfile => {
+      const nextCloud = specificCloudVoice || getDefaultCloudVoiceForGender(gender);
+      const nextProfile: MullahMemoryProfile = {
+        ...mullahMemoryRef.current,
+        voiceGender: gender,
+        cloudVoiceName: nextCloud,
+        voiceName: 'auto',
+      };
+      mullahMemoryRef.current = nextProfile;
+      updateMullahMemory(() => nextProfile);
+      return nextProfile;
+    },
+    [updateMullahMemory]
+  );
+
+  const handleTestSelectedVoice = useCallback(() => {
+    hasUserGestureRef.current = true;
+    const { firstName } = userNamesRef.current;
+    const mem = mullahMemoryRef.current;
+    const persona = HUMAN_VOICE_PERSONAS[mem.voiceGender].find((p) => p.id === mem.cloudVoiceName);
+    const label = persona ? persona.label.split(' ')[0] : mem.voiceGender === 'woman' ? 'Amara' : 'Marcus';
+    const sampleText = firstName
+      ? `Hello ${firstName}, this is ${label}. I sound natural and ready to assist. How may I help you today?`
+      : `Hello, this is ${label}. I sound natural and ready to assist. How may I help you today?`;
+    speakText(sampleText, false);
+  }, [speakText]);
+
   // Full Spoken App Report across Personal Finance, Bills, Budgets, Markets, Positions, Prop Guardian & Red News
   const buildFullAppBriefing = useCallback(() => {
     const hour = new Date().getHours();
     const timeOfDay = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
-    const parts: string[] = [`${timeOfDay}. Mullah is online with your full app report.`];
+    const { fullName, firstName } = userNamesRef.current;
+    const greetingAddr = fullName ? `, ${fullName}` : '';
+    const parts: string[] = [`${timeOfDay}${greetingAddr}. Mullah is online with your full app report.`];
 
     // 1. Personal Finance
     const nw = Math.round(netWorth).toLocaleString();
@@ -1338,7 +1706,11 @@ export const JarvisAssistant: React.FC = () => {
       parts.push(`Saved reminder: ${memNotes[0].text}.`);
     }
 
-    parts.push('Tap the reactor or ask me anything to begin.');
+    parts.push(
+      firstName
+        ? `How may I help you today, ${firstName}? Tap the reactor or ask me anything.`
+        : 'How may I help you today? Tap the reactor or ask me anything.'
+    );
     return parts.join(' ').replace(/\s+/g, ' ').trim();
   }, [
     bills,
@@ -1358,9 +1730,9 @@ export const JarvisAssistant: React.FC = () => {
   const buildFullAppBriefingRef = useRef(buildFullAppBriefing);
   buildFullAppBriefingRef.current = buildFullAppBriefing;
 
-  // Opening automatic Full App Report after initial finance/Firestore hydration settles
+  // Opening automatic Full App Report after auth & finance/Firestore hydration settles
   useEffect(() => {
-    if (hasBootGreetedRef.current || isCloudSyncing) return;
+    if (hasBootGreetedRef.current || authLoading || isCloudSyncing) return;
 
     const timer = setTimeout(async () => {
       if (hasBootGreetedRef.current) return;
@@ -1376,9 +1748,10 @@ export const JarvisAssistant: React.FC = () => {
         }
       } catch {}
 
+      const { fullName, firstName } = userNamesRef.current;
       const reportText =
         mullahMemoryRef.current.briefingMode === 'concise'
-          ? buildWelcomeGreeting()
+          ? buildWelcomeGreeting(fullName, firstName)
           : buildFullAppBriefingRef.current();
 
       setMessages((prev) =>
@@ -1395,11 +1768,11 @@ export const JarvisAssistant: React.FC = () => {
             : m
         )
       );
-      speakText(reportText, true);
+      speakText(reportText, false);
     }, 650);
 
     return () => clearTimeout(timer);
-  }, [isCloudSyncing, speakText]);
+  }, [authLoading, isCloudSyncing, speakText]);
 
   const buildAppSnapshot = useCallback(() => {
     const openPositions = loadOpenPaperPositions();
@@ -1464,6 +1837,11 @@ export const JarvisAssistant: React.FC = () => {
     return {
       activeTab,
       currency,
+      userProfile: {
+        fullName: userNamesRef.current.fullName || null,
+        firstName: userNamesRef.current.firstName || null,
+        email: user?.email || null,
+      },
       personalFinance: {
         netWorth: Math.round(netWorth),
         totalMonthlyIncome: Math.round(totalMonthlyIncome),
@@ -1552,6 +1930,8 @@ export const JarvisAssistant: React.FC = () => {
         briefingMode: mullahMemory.briefingMode,
         favoriteChannel: mullahMemory.favoriteChannel,
         preferredRiskPct: mullahMemory.preferredRiskPct,
+        voiceGender: mullahMemory.voiceGender,
+        cloudVoiceName: mullahMemory.cloudVoiceName,
         notes: (mullahMemory.notes || []).slice(0, 10).map((n) => n.text),
       },
     };
@@ -2173,10 +2553,15 @@ export const JarvisAssistant: React.FC = () => {
 
     try {
       // Probe ephemeral Live API endpoint on serverless hosts (e.g. Vercel) before attempting WebSocket upgrade
+      const snap = buildAppSnapshot();
       const tokenProbe = await fetch('/api/jarvis/live-token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ appSnapshot: buildAppSnapshot() }),
+        body: JSON.stringify({
+          appSnapshot: snap,
+          voiceGender: mullahMemoryRef.current.voiceGender,
+          cloudVoiceName: mullahMemoryRef.current.cloudVoiceName,
+        }),
       })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null);
@@ -2212,7 +2597,9 @@ export const JarvisAssistant: React.FC = () => {
         ws.send(
           JSON.stringify({
             type: 'init',
-            appSnapshot: buildAppSnapshot(),
+            appSnapshot: snap,
+            voiceGender: mullahMemoryRef.current.voiceGender,
+            cloudVoiceName: mullahMemoryRef.current.cloudVoiceName,
           })
         );
       };
@@ -2338,33 +2725,84 @@ export const JarvisAssistant: React.FC = () => {
   const sendSpokenCommand = useCallback(
     async (spokenText: string) => {
       const trimmed = spokenText.trim();
-      if (!trimmed || jarvisState === 'thinking') return;
+      const normalizedCmd = trimmed.toLowerCase().replace(/\s+/g, ' ');
+      if (!trimmed || isProcessingCommandRef.current || jarvisStateRef.current === 'thinking') return;
 
-      stopSpeaking();
-      setVoiceError(null);
+      const now = Date.now();
+      // Reject duplicate identical transcripts fired rapidly by browser SpeechRecognition
+      if (lastCommandRef.current.key === normalizedCmd && now - lastCommandRef.current.at < 3500) {
+        return;
+      }
 
-      const userMsg: JarvisMessage = {
-        id: `usr-${Date.now()}`,
-        role: 'user',
-        text: trimmed,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      };
+      // Acoustic self-echo rejection: if mic opens right after speakers finish and hears Mullah's own words
+      if (now - lastSpeakEndedAtRef.current < 3000 && lastSpokenRef.current.textLower) {
+        const heardWords = normalizedCmd
+          .replace(/[^a-z0-9\s]/g, ' ')
+          .split(/\s+/)
+          .filter((w) => w.length >= 3);
+        if (heardWords.length >= 3) {
+          const spokenSet = new Set(lastSpokenRef.current.words);
+          const overlapCount = heardWords.filter((w) => spokenSet.has(w)).length;
+          if (
+            lastSpokenRef.current.textLower.includes(normalizedCmd) ||
+            overlapCount / heardWords.length >= 0.6
+          ) {
+            return;
+          }
+        }
+      }
 
-      const nextHistory = [...messages, userMsg];
-      setMessages(nextHistory);
+      isProcessingCommandRef.current = true;
+      lastCommandRef.current = { key: normalizedCmd, at: now };
 
-      // ZERO-QUOTA INSTANT FAST-PATH: Handle Live TV, Navigation, Clear Market Scans, Quick Expense/Income, Bots & Currency locally in <5ms
+      try {
+        stopSpeaking();
+        setVoiceError(null);
+
+        const userMsg: JarvisMessage = {
+          id: `usr-${Date.now()}`,
+          role: 'user',
+          text: trimmed,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+
+        const nextHistory = [...messagesRef.current, userMsg];
+        setMessages(nextHistory);
+
+      // ZERO-QUOTA INSTANT FAST-PATH: Handle Greetings, Identity, Live TV, Navigation, Clear Market Scans, Quick Expense/Income, Bots & Currency locally in <5ms
       const localFast = parseSpokenFastCommand(trimmed);
       if (localFast) {
+        const { fullName, firstName } = userNamesRef.current;
+        const nameTag = firstName ? `, ${firstName}` : '';
         let localActions: JarvisAction[] = [];
         let replyText = 'Done.';
+        let directRespondOnly = false;
 
-        if (localFast.kind === 'liveTv') {
+        if (localFast.kind === 'greeting') {
+          const hour = new Date().getHours();
+          const tod = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+          replyText = fullName
+            ? `${tod}, ${fullName}! Mullah is ready. How may I help you today, ${firstName}?`
+            : `${tod}! Mullah is ready. How may I help you today?`;
+          directRespondOnly = true;
+        } else if (localFast.kind === 'whoAmI') {
+          replyText = fullName
+            ? `You are registered as ${fullName}${user?.email ? ` under ${user.email}` : ''}. How may I help you today, ${firstName}?`
+            : 'You are currently browsing as a Guest Explorer. Sign in anytime so I can personalize your sessions.';
+          directRespondOnly = true;
+        } else if (localFast.kind === 'voicePersona') {
+          switchVoicePersona(localFast.gender);
+          replyText =
+            localFast.gender === 'woman'
+              ? `Switched to the natural woman voice${nameTag}. How does my voice sound now?`
+              : `Switched to the natural man voice${nameTag}. How does my voice sound now?`;
+          directRespondOnly = true;
+        } else if (localFast.kind === 'liveTv') {
           localActions = localFast.actions;
-          replyText = localFast.spokenReply;
+          replyText = firstName ? `${localFast.spokenReply.replace(/\.$/, '')}${nameTag}.` : localFast.spokenReply;
         } else if (localFast.kind === 'navigate') {
           localActions = [{ type: 'navigate', payload: { tab: localFast.tab } }];
-          replyText = `Opened ${localFast.label}.`;
+          replyText = `Opened ${localFast.label}${nameTag}. How may I help you here?`;
         } else if (localFast.kind === 'transaction') {
           localActions = [
             {
@@ -2376,21 +2814,21 @@ export const JarvisAssistant: React.FC = () => {
               },
             },
           ];
-          replyText = `Recorded ${localFast.txType} of ${localFast.amount} ${currency} for ${localFast.title}.`;
+          replyText = `Recorded ${localFast.txType} of ${localFast.amount} ${currency} for ${localFast.title}${nameTag}. How else may I help you?`;
         } else if (localFast.kind === 'bot') {
           localActions = [{ type: 'controlBot', payload: { action: localFast.action, target: localFast.target } }];
           replyText = `${localFast.target === 'ALL' ? 'All trading bots' : localFast.target} ${
             localFast.action === 'STOP' ? 'stopped' : 'started'
-          }.`;
+          }${nameTag}. How else may I assist?`;
         } else if (localFast.kind === 'closeTrades') {
           localActions = [{ type: 'closePaperPositions', payload: { symbol: localFast.symbol } }];
-          replyText = 'Closed matching open paper positions.';
+          replyText = `Closed matching open paper positions${nameTag}.`;
         } else if (localFast.kind === 'currency') {
           localActions = [{ type: 'setCurrency', payload: { currency: localFast.currency } }];
-          replyText = `Switched currency to ${localFast.currency}.`;
+          replyText = `Switched currency to ${localFast.currency}${nameTag}.`;
         } else if (localFast.kind === 'financeSummary') {
           localActions = [{ type: 'navigate', payload: { tab: 'dashboard' } }];
-          replyText = `Your net worth is ${Math.round(netWorth).toLocaleString()} ${currency}. Monthly income is ${Math.round(totalMonthlyIncome).toLocaleString()}, monthly expenses are ${Math.round(totalMonthlyExpenses).toLocaleString()}, liquid balance is ${Math.round(totalLiquidBalance).toLocaleString()}, and your financial health score is ${financialHealth.score} out of 100.`;
+          replyText = `${firstName ? `${firstName}, your` : 'Your'} net worth is ${Math.round(netWorth).toLocaleString()} ${currency}. Monthly income is ${Math.round(totalMonthlyIncome).toLocaleString()}, monthly expenses are ${Math.round(totalMonthlyExpenses).toLocaleString()}, liquid balance is ${Math.round(totalLiquidBalance).toLocaleString()}, and your financial health score is ${financialHealth.score} out of 100. How may I help you next${nameTag}?`;
         } else if (localFast.kind === 'fullReport') {
           localActions = [{ type: 'navigate', payload: { tab: 'dashboard' } }];
           replyText = buildFullAppBriefing();
@@ -2409,16 +2847,16 @@ export const JarvisAssistant: React.FC = () => {
               quote: q,
               market: localFast.symbol.includes('XAU') ? 'METALS' : localFast.symbol.includes('BTC') ? 'CRYPTO' : 'FOREX',
             });
-            replyText = `${localFast.symbol} on ${localFast.timeframe} is ${
+            replyText = `${firstName ? `${firstName}, ` : ''}${localFast.symbol} on ${localFast.timeframe} is ${
               session.isOpen ? 'live' : 'weekend frozen'
             } at ${spot}. Signal is ${levels.action}, entry ${levels.entryZone}, stop loss ${levels.sl}, TP1 ${levels.tp1}, TP2 ${levels.tp2}, risk reward ${levels.riskReward}.`;
           } else {
-            replyText = `Focused radar on ${localFast.symbol} ${localFast.timeframe}.`;
+            replyText = `Focused radar on ${localFast.symbol} ${localFast.timeframe}${nameTag}.`;
           }
         }
 
-        if (localActions.length > 0) {
-          const actionsExecuted = await executeJarvisActions(localActions);
+        if (localActions.length > 0 || directRespondOnly) {
+          const actionsExecuted = localActions.length > 0 ? await executeJarvisActions(localActions) : [];
           setMessages((prev) => [
             ...prev,
             {
@@ -2549,29 +2987,38 @@ export const JarvisAssistant: React.FC = () => {
           speakWithBrowserSynthesis(errMsg, false);
         }
       }
+      } finally {
+        isProcessingCommandRef.current = false;
+      }
     },
     [
       buildAppSnapshot,
+      buildFullAppBriefing,
       currency,
       executeJarvisActions,
       financialHealth.score,
-      jarvisState,
-      messages,
       netWorth,
       speakText,
       speakWithBrowserSynthesis,
       stopSpeaking,
+      switchVoicePersona,
       totalLiquidBalance,
       totalMonthlyExpenses,
       totalMonthlyIncome,
+      user?.email,
     ]
   );
 
   const stopListening = useCallback(() => {
     stopLiveAudioStream();
+    if (autoListenTimerRef.current) {
+      clearTimeout(autoListenTimerRef.current);
+      autoListenTimerRef.current = null;
+    }
     try {
-      speechRecognitionRef.current?.stop();
+      speechRecognitionRef.current?.abort?.();
     } catch {}
+    speechRecognitionRef.current = null;
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
@@ -2583,7 +3030,13 @@ export const JarvisAssistant: React.FC = () => {
   }, [stopLiveAudioStream]);
 
   const startListening = useCallback(async () => {
-    if (jarvisState === 'listening' || jarvisState === 'thinking') return;
+    if (
+      jarvisStateRef.current === 'listening' ||
+      jarvisStateRef.current === 'thinking' ||
+      isProcessingCommandRef.current
+    ) {
+      return;
+    }
     hasUserGestureRef.current = true;
 
     if (pendingWelcomeAudioRef.current || pendingSpeechRef.current) {
@@ -2599,6 +3052,12 @@ export const JarvisAssistant: React.FC = () => {
     stopSpeaking();
     setVoiceError(null);
 
+    // Abort any stale SpeechRecognition instance cleanly before opening a new mic session
+    try {
+      speechRecognitionRef.current?.abort?.();
+    } catch {}
+    speechRecognitionRef.current = null;
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
@@ -2611,8 +3070,19 @@ export const JarvisAssistant: React.FC = () => {
         speechRecognitionRef.current = recognition;
         setJarvisState('listening');
 
+        let resultHandled = false;
+
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         recognition.onresult = (event: any) => {
+          if (resultHandled) return;
+          resultHandled = true;
+          try {
+            recognition.stop();
+          } catch {}
+          if (jarvisStateRef.current === 'speaking' || Date.now() - lastSpeakEndedAtRef.current < 900) {
+            setJarvisState('idle');
+            return;
+          }
           const transcript = event?.results?.[0]?.[0]?.transcript?.trim();
           setJarvisState('idle');
           if (transcript) {
@@ -2621,6 +3091,9 @@ export const JarvisAssistant: React.FC = () => {
         };
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         recognition.onerror = (event: any) => {
+          if (speechRecognitionRef.current === recognition) {
+            speechRecognitionRef.current = null;
+          }
           setJarvisState('idle');
           if (event?.error === 'no-speech') {
             setVoiceError('No voice detected. Tap the reactor when ready to speak.');
@@ -2629,6 +3102,9 @@ export const JarvisAssistant: React.FC = () => {
           }
         };
         recognition.onend = () => {
+          if (speechRecognitionRef.current === recognition) {
+            speechRecognitionRef.current = null;
+          }
           setJarvisState((prev) => (prev === 'listening' ? 'idle' : prev));
         };
         recognition.start();
@@ -2706,7 +3182,7 @@ export const JarvisAssistant: React.FC = () => {
       setJarvisState('idle');
       setVoiceError('Microphone access is required for voice commands.');
     }
-  }, [flushPendingSpeechOnGesture, jarvisState, liveStreamMode, sendSpokenCommand, startLiveAudioSession, stopSpeaking]);
+  }, [flushPendingSpeechOnGesture, liveStreamMode, sendSpokenCommand, startLiveAudioSession, stopSpeaking]);
 
   useEffect(() => {
     startListeningRef.current = startListening;
@@ -2799,7 +3275,7 @@ export const JarvisAssistant: React.FC = () => {
         actionsExecuted: ['Full App Report'],
       },
     ]);
-    speakText(reportText, true);
+    speakText(reportText, false);
   }, [buildFullAppBriefing, speakText]);
 
   // Listen to triggers from MobileBottomNav mic button & Cmd+K Command Palette
@@ -2828,9 +3304,10 @@ export const JarvisAssistant: React.FC = () => {
     hasUserGestureRef.current = true;
     stopSpeaking();
     stopListening();
+    const { fullName, firstName } = userNamesRef.current;
     const reportText =
       mullahMemoryRef.current.briefingMode === 'concise'
-        ? buildWelcomeGreeting()
+        ? buildWelcomeGreeting(fullName, firstName)
         : buildFullAppBriefing();
     setMessages([
       {
@@ -2841,7 +3318,7 @@ export const JarvisAssistant: React.FC = () => {
         actionsExecuted: mullahMemoryRef.current.briefingMode === 'concise' ? undefined : ['Full App Report'],
       },
     ]);
-    speakText(reportText, true);
+    speakText(reportText, false);
   };
 
   const isForexOpen = getAssetMarketSession('EUR/USD', 'FOREX').isOpen;
@@ -2872,21 +3349,21 @@ export const JarvisAssistant: React.FC = () => {
           aria-label="Mullah Audio Copilot"
           className="fixed bottom-4 right-4 z-50 w-[calc(100vw-2rem)] sm:w-[420px] max-h-[86vh] h-[630px] flex flex-col rounded-2xl bg-[#050c17]/96 border border-[#0df2c9]/50 shadow-[0_0_55px_rgba(13,242,201,0.24)] backdrop-blur-xl overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-200"
         >
-          {/* HUD Top Header */}
-          <div className="px-4 py-3 bg-gradient-to-r from-[#071526] via-[#091c2f] to-[#071526] border-b border-[#0df2c9]/25 flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-[#0df2c9] animate-pulse" />
-                <span className="text-xs font-mono font-black tracking-widest text-white">MULLAH</span>
+          {/* Clean Mullah Header */}
+          <div className="px-4 py-3 bg-[#071526] border-b border-[#0df2c9]/20 flex items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 whitespace-nowrap">
+                <span className="text-xs font-mono font-bold tracking-widest text-white">MULLAH</span>
+                <span aria-hidden="true" className="text-slate-600">·</span>
                 <span
-                  className={`text-[9px] font-mono font-bold uppercase px-1.5 py-0.5 rounded border ${
+                  className={`text-[11px] font-medium whitespace-nowrap ${
                     jarvisState === 'listening'
-                      ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-300'
+                      ? 'text-emerald-400'
                       : jarvisState === 'thinking'
-                      ? 'bg-cyan-500/20 border-cyan-400/50 text-cyan-300'
+                      ? 'text-cyan-300'
                       : jarvisState === 'speaking'
-                      ? 'bg-amber-500/20 border-amber-400/50 text-amber-300'
-                      : 'bg-[#0df2c9]/10 border-[#0df2c9]/35 text-[#0df2c9]'
+                      ? 'text-amber-300'
+                      : 'text-[#0df2c9]'
                   }`}
                 >
                   {jarvisState === 'listening'
@@ -2894,133 +3371,48 @@ export const JarvisAssistant: React.FC = () => {
                       ? 'Live Stream'
                       : 'Listening'
                     : jarvisState === 'thinking'
-                    ? 'Processing'
+                    ? 'Thinking'
                     : jarvisState === 'speaking'
                     ? 'Speaking'
                     : wakeWordEnabled
                     ? 'Wake Standby'
-                    : 'Audio Ready'}
+                    : 'Ready'}
                 </span>
               </div>
-              <div className="text-[10px] font-mono text-slate-400 truncate mt-0.5">
-                View: <span className="text-slate-200">{activeTab}</span> · FX:{' '}
+              <div className="text-[11px] text-slate-400 truncate mt-0.5">
+                <span className="capitalize text-slate-300">{activeTab}</span>
+                <span aria-hidden="true"> · </span>
                 <span className={isForexOpen ? 'text-emerald-400' : 'text-amber-400'}>
-                  {isForexOpen ? 'Live' : 'Weekend Frozen'}
+                  {isForexOpen ? 'FX Live' : 'FX Closed'}
                 </span>
+                <span aria-hidden="true"> · </span>
+                <span>{mullahMemory.voiceGender === 'woman' ? 'Woman Voice' : 'Man Voice'}</span>
               </div>
             </div>
 
-            <div className="flex items-center gap-1 shrink-0">
-              <button
-                type="button"
-                onClick={() => setVoiceEngineMode((m) => (m === 'auto' ? 'unlimited' : 'auto'))}
-                title={
-                  voiceEngineMode === 'unlimited'
-                    ? 'Unlimited Local Speech Synthesis (0 cloud voice quota used)'
-                    : 'Auto Voice: Neural Audio with automatic Unlimited Local fallback'
-                }
-                className={`px-2 py-1 rounded-lg border text-[9px] font-mono font-bold transition-colors cursor-pointer ${
-                  voiceEngineMode === 'unlimited'
-                    ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-300'
-                    : 'bg-[#0b1628] border-[#1b2e4b] text-slate-300 hover:text-white'
-                }`}
-              >
-                {voiceEngineMode === 'unlimited' ? 'UNL VOICE' : 'AUTO VOICE'}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  stopListening();
-                  setLiveStreamMode((v) => !v);
-                }}
-                title="Switch between ultra-low latency Gemini Live Stream WebSocket and Resilient Voice Mode"
-                className={`px-2 py-1 rounded-lg border text-[9px] font-mono font-bold transition-colors cursor-pointer ${
-                  liveStreamMode
-                    ? 'bg-cyan-500/20 border-cyan-400/50 text-cyan-300'
-                    : 'bg-[#0b1628] border-[#1b2e4b] text-slate-400 hover:text-white'
-                }`}
-              >
-                {liveStreamMode ? 'LIVE WS' : 'RESILIENT'}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setWakeWordEnabled((v) => !v)}
-                title='Hands-free "Hey Mullah" wake word detector'
-                className={`px-2 py-1 rounded-lg border text-[9px] font-mono font-bold transition-colors cursor-pointer ${
-                  wakeWordEnabled
-                    ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-300'
-                    : 'bg-[#0b1628] border-[#1b2e4b] text-slate-400 hover:text-white'
-                }`}
-              >
-                {wakeWordEnabled ? 'HEY MULLAH' : 'WAKE OFF'}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setHandsFreeLoop((v) => !v)}
-                title={handsFreeLoop ? 'Continuous Voice Loop: ON' : 'Continuous Voice Loop: OFF'}
-                className={`px-2 py-1 rounded-lg border text-[9px] font-mono font-bold transition-colors cursor-pointer ${
-                  handsFreeLoop
-                    ? 'bg-[#0df2c9]/20 border-[#0df2c9]/50 text-[#0df2c9]'
-                    : 'bg-[#0b1628] border-[#1b2e4b] text-slate-400 hover:text-white'
-                }`}
-              >
-                {handsFreeLoop ? 'AUTO' : 'TAP'}
-              </button>
-
+            <div className="flex items-center gap-1.5 shrink-0">
               <button
                 type="button"
                 onClick={triggerFullAppBriefing}
-                title="Speak full live app report across finances, markets & news"
-                className="p-1.5 rounded-lg bg-[#0b1628] border border-[#1b2e4b] text-[#0df2c9] hover:text-white transition-colors cursor-pointer"
+                title="Speak full app report"
+                aria-label="Speak full app report"
+                className="p-2 rounded-lg bg-[#0b182c] border border-[#1b2e4b] text-[#0df2c9] hover:bg-[#10223c] hover:text-white transition-colors cursor-pointer"
               >
-                <ClipboardList className="w-3.5 h-3.5" />
+                <ClipboardList className="w-4 h-4" />
               </button>
 
               <button
                 type="button"
                 onClick={() => setShowVoiceSettings((v) => !v)}
-                title="Voice settings, speed & saved memory"
-                className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+                title="Voice & assistant settings"
+                aria-label="Voice and assistant settings"
+                className={`p-2 rounded-lg border transition-colors cursor-pointer ${
                   showVoiceSettings
-                    ? 'bg-[#0df2c9]/20 border-[#0df2c9]/50 text-[#0df2c9]'
-                    : 'bg-[#0b1628] border-[#1b2e4b] text-slate-400 hover:text-white'
+                    ? 'bg-[#0df2c9]/15 border-[#0df2c9]/50 text-[#0df2c9]'
+                    : 'bg-[#0b182c] border-[#1b2e4b] text-slate-300 hover:bg-[#10223c] hover:text-white'
                 }`}
               >
-                <SlidersHorizontal className="w-3.5 h-3.5" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setProactiveAlertsEnabled((v) => !v)}
-                title="Proactive spoken alerts for TP/SL fills and 15m red news"
-                className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
-                  proactiveAlertsEnabled
-                    ? 'bg-amber-500/15 border-amber-400/40 text-amber-300'
-                    : 'bg-[#0b1628] border-[#1b2e4b] text-slate-500'
-                }`}
-              >
-                <Bell className="w-3.5 h-3.5" />
-              </button>
-
-              <button
-                type="button"
-                onClick={handleResetSession}
-                title="Replay full briefing & reset audio session"
-                className="p-1.5 rounded-lg bg-[#0b1628] border border-[#1b2e4b] text-slate-400 hover:text-white transition-colors cursor-pointer"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setIsOpen(false)}
-                title="Minimize"
-                className="p-1.5 rounded-lg bg-[#0b1628] border border-[#1b2e4b] text-slate-400 hover:text-white transition-colors cursor-pointer"
-              >
-                <Minimize2 className="w-3.5 h-3.5" />
+                <SlidersHorizontal className="w-4 h-4" />
               </button>
 
               <button
@@ -3031,43 +3423,94 @@ export const JarvisAssistant: React.FC = () => {
                   setIsOpen(false);
                 }}
                 title="Close"
-                className="p-1.5 rounded-lg bg-[#0b1628] border border-[#1b2e4b] text-slate-400 hover:text-rose-300 transition-colors cursor-pointer"
+                aria-label="Close Mullah"
+                className="p-2 rounded-lg bg-[#0b182c] border border-[#1b2e4b] text-slate-300 hover:bg-[#10223c] hover:text-rose-300 transition-colors cursor-pointer"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
           </div>
 
-          {/* Live Telemetry Bar */}
-          <div className="px-3.5 py-1.5 bg-[#040a14] border-b border-[#14233b] flex items-center justify-between text-[10px] font-mono text-slate-400">
-            <span className="flex items-center gap-1">
-              <TrendingUp className="w-3 h-3 text-[#0df2c9]" />
-              Net: <strong className="text-slate-200">{currency} {Math.round(netWorth).toLocaleString()}</strong>
+          {/* Clean Telemetry Strip */}
+          <div className="px-4 py-2 bg-[#040a14] border-b border-[#14233b] flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums text-slate-400">
+            <span className="truncate">
+              Net <strong className="text-slate-100">{currency} {Math.round(netWorth).toLocaleString()}</strong>
             </span>
-            <span className="flex items-center gap-1">
-              <Terminal className="w-3 h-3 text-cyan-400" />
-              Health: <strong className="text-emerald-400">{financialHealth.score}/100</strong>
+            <span className="shrink-0">
+              Health <strong className="text-emerald-400">{financialHealth.score}/100</strong>
             </span>
-            <span className="flex items-center gap-1">
-              <Zap className="w-3 h-3 text-amber-400" />
-              Trades: <strong className="text-white">{loadOpenPaperPositions().length}</strong>
+            <span className="shrink-0">
+              Trades <strong className="text-white">{loadOpenPaperPositions().length}</strong>
             </span>
           </div>
 
-          {/* Voice Preferences & Persistent Cloud Memory Drawer */}
+          {/* Organized Settings Drawer (Voice, Engine, Mic, Alerts & Memory) */}
           {showVoiceSettings && (
-            <div className="px-3.5 py-3 bg-[#061120] border-b border-[#142642] space-y-2.5 text-[11px] font-mono">
+            <div className="max-h-[340px] overflow-y-auto px-4 py-3 bg-[#061120] border-b border-[#142642] space-y-2.5 text-[11px]">
               <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-400">Voice:</span>
+                <span className="text-slate-400 font-medium">Voice Persona</span>
+                <div className="flex items-center gap-1.5">
+                  {(['man', 'woman'] as const).map((g) => (
+                    <button
+                      key={g}
+                      type="button"
+                      onClick={() => switchVoicePersona(g)}
+                      className={`px-2.5 py-1 rounded-md border text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                        mullahMemory.voiceGender === g
+                          ? g === 'woman'
+                            ? 'bg-pink-500/20 border-pink-400/50 text-pink-200'
+                            : 'bg-sky-500/20 border-sky-400/50 text-sky-200'
+                          : 'bg-[#0a1628] border-[#1a2e4a] text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {g === 'man' ? 'Man' : 'Woman'}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={handleTestSelectedVoice}
+                    title="Hear a sample of the selected human voice"
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#0df2c9]/15 border border-[#0df2c9]/45 text-[#0df2c9] hover:bg-[#0df2c9]/25 text-[11px] font-semibold cursor-pointer whitespace-nowrap"
+                  >
+                    <Volume2 className="w-3 h-3" />
+                    Test
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-400 font-medium">Human Style</span>
+                <select
+                  value={mullahMemory.cloudVoiceName}
+                  onChange={(e) => switchVoicePersona(mullahMemory.voiceGender, e.target.value)}
+                  className="flex-1 max-w-[230px] bg-[#0a1628] border border-[#1a2e4a] rounded-md px-2.5 py-1 text-slate-200 text-[11px] focus:outline-none focus:border-[#0df2c9]"
+                >
+                  {HUMAN_VOICE_PERSONAS[mullahMemory.voiceGender].map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label} — {p.description}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-400 font-medium">Local Voice</span>
                 <select
                   value={mullahMemory.voiceName}
                   onChange={(e) => updateMullahMemory((p) => ({ ...p, voiceName: e.target.value }))}
-                  className="flex-1 max-w-[230px] bg-[#0a1628] border border-[#1a2e4a] rounded-lg px-2 py-1 text-slate-200 text-[10px] focus:outline-none focus:border-[#0df2c9]"
+                  className="flex-1 max-w-[230px] bg-[#0a1628] border border-[#1a2e4a] rounded-md px-2.5 py-1 text-slate-200 text-[11px] focus:outline-none focus:border-[#0df2c9]"
                 >
-                  <option value="auto">Auto Best English Voice</option>
-                  {availableVoices
+                  <option value="auto">
+                    Auto Best Natural ({mullahMemory.voiceGender === 'woman' ? 'Woman' : 'Man'})
+                  </option>
+                  {[...availableVoices]
                     .filter((v) => v.lang.toLowerCase().startsWith('en'))
-                    .slice(0, 20)
+                    .sort(
+                      (a, b) =>
+                        scoreBrowserVoiceForGender(b, mullahMemory.voiceGender) -
+                        scoreBrowserVoiceForGender(a, mullahMemory.voiceGender)
+                    )
+                    .slice(0, 24)
                     .map((v) => (
                       <option key={`${v.name}-${v.lang}`} value={v.name}>
                         {v.name} ({v.lang})
@@ -3077,16 +3520,16 @@ export const JarvisAssistant: React.FC = () => {
               </div>
 
               <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-400">Speed: {mullahMemory.voiceRate.toFixed(2)}x</span>
+                <span className="text-slate-400 font-medium">Speed ({mullahMemory.voiceRate.toFixed(2)}x)</span>
                 <div className="flex items-center gap-1">
-                  {[0.9, 1.02, 1.15, 1.25].map((r) => (
+                  {[0.9, 0.98, 1.08, 1.2].map((r) => (
                     <button
                       key={r}
                       type="button"
                       onClick={() => updateMullahMemory((p) => ({ ...p, voiceRate: r }))}
-                      className={`px-2 py-0.5 rounded border text-[10px] cursor-pointer ${
+                      className={`px-2 py-1 rounded-md border text-[11px] font-mono tabular-nums cursor-pointer ${
                         Math.abs(mullahMemory.voiceRate - r) < 0.03
-                          ? 'bg-[#0df2c9]/20 border-[#0df2c9]/50 text-[#0df2c9]'
+                          ? 'bg-[#0df2c9]/15 border-[#0df2c9]/50 text-[#0df2c9]'
                           : 'bg-[#0a1628] border-[#1a2e4a] text-slate-400 hover:text-white'
                       }`}
                     >
@@ -3096,17 +3539,74 @@ export const JarvisAssistant: React.FC = () => {
                 </div>
               </div>
 
+              <div className="pt-2 border-t border-[#142642] grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setVoiceEngineMode((m) => (m === 'auto' ? 'unlimited' : 'auto'))}
+                  className={`px-2.5 py-1.5 rounded-md border text-left transition-colors cursor-pointer ${
+                    voiceEngineMode === 'unlimited'
+                      ? 'bg-emerald-500/15 border-emerald-400/45 text-emerald-200'
+                      : 'bg-[#0a1628] border-[#1a2e4a] text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <div className="text-[10px] text-slate-400">Voice Engine</div>
+                  <div className="font-semibold">{voiceEngineMode === 'unlimited' ? 'Unlimited Local' : 'Auto (Cloud + Local)'}</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    stopListening();
+                    setLiveStreamMode((v) => !v);
+                  }}
+                  className={`px-2.5 py-1.5 rounded-md border text-left transition-colors cursor-pointer ${
+                    liveStreamMode
+                      ? 'bg-cyan-500/15 border-cyan-400/45 text-cyan-200'
+                      : 'bg-[#0a1628] border-[#1a2e4a] text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <div className="text-[10px] text-slate-400">Connection</div>
+                  <div className="font-semibold">{liveStreamMode ? 'Live Stream' : 'Resilient Mode'}</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setHandsFreeLoop((v) => !v)}
+                  className={`px-2.5 py-1.5 rounded-md border text-left transition-colors cursor-pointer ${
+                    handsFreeLoop
+                      ? 'bg-[#0df2c9]/15 border-[#0df2c9]/45 text-[#0df2c9]'
+                      : 'bg-[#0a1628] border-[#1a2e4a] text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <div className="text-[10px] text-slate-400">Mic Trigger</div>
+                  <div className="font-semibold">{handsFreeLoop ? 'Hands-Free Loop' : 'Tap to Speak'}</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setWakeWordEnabled((v) => !v)}
+                  className={`px-2.5 py-1.5 rounded-md border text-left transition-colors cursor-pointer ${
+                    wakeWordEnabled
+                      ? 'bg-emerald-500/15 border-emerald-400/45 text-emerald-200'
+                      : 'bg-[#0a1628] border-[#1a2e4a] text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <div className="text-[10px] text-slate-400">Wake Phrase</div>
+                  <div className="font-semibold">{wakeWordEnabled ? '"Hey Mullah" On' : 'Off'}</div>
+                </button>
+              </div>
+
               <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-400">On Launch:</span>
+                <span className="text-slate-400 font-medium">On Launch</span>
                 <div className="flex items-center gap-1">
                   {(['full', 'concise'] as const).map((mode) => (
                     <button
                       key={mode}
                       type="button"
                       onClick={() => updateMullahMemory((p) => ({ ...p, briefingMode: mode }))}
-                      className={`px-2 py-0.5 rounded border text-[10px] capitalize cursor-pointer ${
+                      className={`px-2.5 py-1 rounded-md border text-[11px] cursor-pointer ${
                         mullahMemory.briefingMode === mode
-                          ? 'bg-[#0df2c9]/20 border-[#0df2c9]/50 text-[#0df2c9]'
+                          ? 'bg-[#0df2c9]/15 border-[#0df2c9]/50 text-[#0df2c9]'
                           : 'bg-[#0a1628] border-[#1a2e4a] text-slate-400 hover:text-white'
                       }`}
                     >
@@ -3116,11 +3616,35 @@ export const JarvisAssistant: React.FC = () => {
                 </div>
               </div>
 
+              <div className="flex items-center justify-between gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setProactiveAlertsEnabled((v) => !v)}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-[11px] font-medium cursor-pointer transition-colors ${
+                    proactiveAlertsEnabled
+                      ? 'bg-amber-500/15 border-amber-400/40 text-amber-200'
+                      : 'bg-[#0a1628] border-[#1a2e4a] text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Bell className="w-3.5 h-3.5" />
+                  Alerts {proactiveAlertsEnabled ? 'On' : 'Off'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResetSession}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-[#0a1628] border border-[#1a2e4a] text-slate-300 hover:text-white text-[11px] font-medium cursor-pointer transition-colors"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Replay Briefing
+                </button>
+              </div>
+
               {mullahMemory.notes.length > 0 && (
-                <div className="pt-1.5 border-t border-[#142642] space-y-1 max-h-24 overflow-y-auto">
-                  <div className="text-[10px] text-[#0df2c9]">Saved Cloud Memory ({mullahMemory.notes.length}):</div>
+                <div className="pt-2 border-t border-[#142642] space-y-1 max-h-24 overflow-y-auto">
+                  <div className="text-[10px] text-[#0df2c9] font-medium">Saved Memory ({mullahMemory.notes.length})</div>
                   {mullahMemory.notes.slice(0, 4).map((note) => (
-                    <div key={note.id} className="flex items-center justify-between gap-2 text-[10px] text-slate-300">
+                    <div key={note.id} className="flex items-center justify-between gap-2 text-[11px] text-slate-300">
                       <span className="truncate">{note.text}</span>
                       <button
                         type="button"
