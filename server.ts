@@ -1,7 +1,9 @@
 import express from 'express';
+import { createServer } from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, FunctionDeclaration, Type, ThinkingLevel } from '@google/genai';
+import { WebSocketServer, WebSocket } from 'ws';
+import { GoogleGenAI, FunctionDeclaration, Type, ThinkingLevel, Modality, LiveServerMessage } from '@google/genai';
 import dotenv from 'dotenv';
 import {
   MAX_RISK_REWARD,
@@ -4238,7 +4240,16 @@ Respond strictly in valid JSON format:
 // ==========================================
 
 export interface JarvisClientAction {
-  type: 'navigate' | 'focusAsset' | 'logTransaction' | 'setCurrency' | 'broadcastSignal';
+  type:
+    | 'navigate'
+    | 'focusAsset'
+    | 'logTransaction'
+    | 'setCurrency'
+    | 'broadcastSignal'
+    | 'executePaperTrade'
+    | 'closePaperPositions'
+    | 'setPriceAlert'
+    | 'controlBot';
   payload: Record<string, unknown>;
 }
 
@@ -4316,6 +4327,94 @@ const JARVIS_TOOLS: FunctionDeclaration[] = [
     },
   },
   {
+    name: 'execute_paper_trade',
+    description:
+      'Place a live paper market BUY or SELL order with automatic calibrated SL, TP1, and TP2 on the Paper Trading Desk (enforces weekend market lock and Prop Firm Risk Guardian checks).',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        symbol: {
+          type: Type.STRING,
+          description: 'Asset ticker such as XAU/USD, EUR/USD, GBP/USD, USD/JPY, BTC/USD, or NAS100.',
+        },
+        direction: {
+          type: Type.STRING,
+          description: 'BUY or SELL.',
+        },
+        lots: {
+          type: Type.NUMBER,
+          description: 'Optional position lot size (e.g. 0.05, 0.1, 0.25). Defaults to 0.10.',
+        },
+        timeframe: {
+          type: Type.STRING,
+          description: 'Optional timeframe for SL/TP calibration: 1M, 5M, 15M, 1H, 4H. Defaults to 15M.',
+        },
+      },
+      required: ['symbol', 'direction'],
+    },
+  },
+  {
+    name: 'close_paper_positions',
+    description:
+      'Close open paper trading positions for a specific symbol (e.g. XAU/USD) or ALL open positions immediately at current live market price.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        symbol: {
+          type: Type.STRING,
+          description: 'Symbol to close (e.g. XAU/USD, EUR/USD) or "ALL" to close every open paper position.',
+        },
+      },
+      required: ['symbol'],
+    },
+  },
+  {
+    name: 'set_price_alert',
+    description:
+      'Create a live price alert for a symbol so Mullah notifies and speaks to the user when price crosses the target level.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        symbol: {
+          type: Type.STRING,
+          description: 'Asset symbol e.g. XAU/USD, EUR/USD, BTC/USD.',
+        },
+        targetPrice: {
+          type: Type.NUMBER,
+          description: 'Target trigger price level.',
+        },
+        direction: {
+          type: Type.STRING,
+          description: 'Optional: ABOVE, BELOW, or AUTO.',
+        },
+      },
+      required: ['symbol', 'targetPrice'],
+    },
+  },
+  {
+    name: 'control_trading_bot',
+    description:
+      'Start or stop the automated algorithmic trading bot (Bot Studio Auto-Pilot or MT5 EA Master Engine) by voice command.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        target: {
+          type: Type.STRING,
+          description: 'Which bot engine to control: BOT_STUDIO, MT5_EA, or ALL.',
+        },
+        action: {
+          type: Type.STRING,
+          description: 'START or STOP.',
+        },
+        symbol: {
+          type: Type.STRING,
+          description: 'Optional symbol focus such as XAU/USD or R_75.',
+        },
+      },
+      required: ['action'],
+    },
+  },
+  {
     name: 'log_finance_transaction',
     description:
       'Record a personal income or expense entry directly into the user’s NjiaFedha financial ledger.',
@@ -4375,6 +4474,22 @@ const JARVIS_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
+async function withServerTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), ms);
+      }),
+    ]);
+  } catch {
+    return fallback;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function lookupQuoteInMap(quotes: Record<string, TradingViewQuote>, rawSymbol: string): TradingViewQuote | undefined {
   const upper = rawSymbol.toUpperCase().trim();
   const clean = upper.replace(/[/_\s-]/g, '');
@@ -4402,7 +4517,7 @@ async function executeJarvisServerTool(
     const rawSym = String(args.symbol || 'XAU/USD').toUpperCase().trim();
     const tfRaw = String(args.timeframe || '15M').toUpperCase().trim();
     const tfProfile = getTimeframeProfile(tfRaw);
-    const quotes = await fetchLiveTradingViewQuotes();
+    const quotes = await withServerTimeout(fetchLiveTradingViewQuotes(), 2500, {} as Record<string, TradingViewQuote>);
     const q = lookupQuoteInMap(quotes, rawSym);
     const marketOpen = isServerMarketOpen(rawSym);
     const clean = rawSym.replace(/[/_\s-]/g, '');
@@ -4424,7 +4539,7 @@ async function executeJarvisServerTool(
         : null;
 
     const tfQuote = resolveQuoteForTimeframe(q, tfProfile.normalized);
-    const events = await getLiveForexFactoryEvents();
+    const events = await withServerTimeout(getLiveForexFactoryEvents(), 2500, []);
     const currencies = rawSym.includes('/')
       ? rawSym.split('/').map((c) => c.trim())
       : [clean.slice(0, 3), clean.slice(3, 6) || 'USD'];
@@ -4476,7 +4591,7 @@ async function executeJarvisServerTool(
 
   if (name === 'check_economic_calendar') {
     const filter = String(args.filter || 'ALL').toUpperCase().trim();
-    const events = await getLiveForexFactoryEvents();
+    const events = await withServerTimeout(getLiveForexFactoryEvents(), 2500, []);
     const cleanFilter = filter.replace(/[/_\s-]/g, '');
     const tokens =
       filter === 'ALL' || !filter
@@ -4530,6 +4645,95 @@ async function executeJarvisServerTool(
       payload: { symbol, timeframe, bottomTab },
     });
     return { status: 'queued', symbol, timeframe, bottomTab: bottomTab || null };
+  }
+
+  if (name === 'execute_paper_trade') {
+    const symbol = String(args.symbol || 'XAU/USD').toUpperCase().trim();
+    const direction = String(args.direction || 'BUY').toUpperCase().includes('SELL') ? 'SELL' : 'BUY';
+    const lots = Number(args.lots || 0.1);
+    const timeframe = String(args.timeframe || '15M').toUpperCase().trim();
+    const marketOpen = isServerMarketOpen(symbol);
+    if (!marketOpen) {
+      return {
+        status: 'rejected',
+        reason: `${symbol} market is currently closed for the weekend. Crypto and Deriv Synthetics remain active 24/7.`,
+      };
+    }
+    const quotes = await withServerTimeout(fetchLiveTradingViewQuotes(), 2500, {} as Record<string, TradingViewQuote>);
+    const q = lookupQuoteInMap(quotes, symbol);
+    const spot = q?.price ?? 0;
+    const clean = symbol.replace(/[/_\s-]/g, '');
+    const market = clean.includes('XAU') || clean.includes('XAG')
+      ? 'METALS'
+      : clean.includes('BTC') || clean.includes('ETH')
+      ? 'CRYPTO'
+      : clean.includes('NAS') || clean.includes('US30') || clean.includes('SPX')
+      ? 'INDICES'
+      : 'FOREX';
+    const levels = spot > 0
+      ? computeTimeframeSignalLevels({
+          symbol,
+          spotPrice: spot,
+          timeframe: getTimeframeProfile(timeframe).normalized,
+          quote: q,
+          market,
+          preferredDirection: direction,
+        })
+      : null;
+
+    queuedActions.push({
+      type: 'executePaperTrade',
+      payload: {
+        symbol,
+        direction,
+        lots: Number.isFinite(lots) && lots > 0 ? Math.min(20, lots) : 0.1,
+        entryPrice: spot,
+        sl: levels?.sl,
+        tp1: levels?.tp1,
+        tp2: levels?.tp2,
+      },
+    });
+    return {
+      status: 'queued',
+      symbol,
+      direction,
+      lots: Number.isFinite(lots) && lots > 0 ? lots : 0.1,
+      entryPrice: spot || 'Live spot',
+      sl: levels?.sl ?? 'Auto-calculated',
+      tp1: levels?.tp1 ?? 'Auto-calculated',
+      tp2: levels?.tp2 ?? 'Auto-calculated',
+    };
+  }
+
+  if (name === 'close_paper_positions') {
+    const symbol = String(args.symbol || 'ALL').toUpperCase().trim();
+    queuedActions.push({ type: 'closePaperPositions', payload: { symbol } });
+    return { status: 'queued', symbol };
+  }
+
+  if (name === 'set_price_alert') {
+    const symbol = String(args.symbol || 'XAU/USD').toUpperCase().trim();
+    const targetPrice = Number(args.targetPrice || 0);
+    const direction = String(args.direction || 'AUTO').toUpperCase().trim();
+    if (!Number.isFinite(targetPrice) || targetPrice <= 0) {
+      return { status: 'rejected', reason: 'Target price must be a valid positive number.' };
+    }
+    queuedActions.push({
+      type: 'setPriceAlert',
+      payload: { symbol, targetPrice, direction },
+    });
+    return { status: 'queued', symbol, targetPrice, direction };
+  }
+
+  if (name === 'control_trading_bot') {
+    const target = String(args.target || 'ALL').toUpperCase().trim();
+    const action = String(args.action || 'START').toUpperCase().includes('STOP') ? 'STOP' : 'START';
+    const symbol = args.symbol ? String(args.symbol).toUpperCase().trim() : undefined;
+    queuedActions.push({
+      type: 'controlBot',
+      payload: { target, action, symbol },
+    });
+    return { status: 'queued', target, action, symbol: symbol || null };
   }
 
   if (name === 'log_finance_transaction') {
@@ -4652,22 +4856,7 @@ app.post('/api/jarvis/chat', async (req, res) => {
       parts: [{ text: String(m.text || '').slice(0, 4000) }],
     }));
 
-    const snapshotJson = JSON.stringify(appSnapshot || {}, null, 2).slice(0, 8000);
-    const utcNow = new Date().toISOString();
-
-    const systemInstruction = `You are Mullah, the voice-first AI Tactical Chief Operating Officer embedded inside NjiaFedha & MullahTracker.
-
-AUDIO-ONLY CONVERSATION RULES:
-- Every response you generate is spoken aloud directly to the user. Write in crisp, natural spoken English — NO markdown symbols, NO asterisks, NO bullet characters, NO raw emojis.
-- Keep responses tight and decisive (2 to 4 clear spoken sentences, under 75 words unless a detailed briefing is explicitly asked for).
-- Address the user calmly and naturally ("Sir" sparingly or direct clear address), like an intelligent British-inspired AI copilot.
-- Never invent prices, news events, or balances. Ground all statements in LIVE CLIENT TELEMETRY SNAPSHOT or call \`inspect_market_asset\` / \`check_economic_calendar\`.
-- Always respect platform rules: TradFi & Forex freeze on weekends (Crypto & Deriv synthetics stay open 24/7), signal R:R never exceeds 1:5.0, and alert immediately on high-impact red-folder news or stacked USD exposure.
-- Proactively call UI tools (\`navigate_to_view\`, \`focus_trading_radar\`, \`log_finance_transaction\`, \`switch_currency\`, \`broadcast_tracked_signal\`) whenever the user wants to open a screen, chart a pair, log income/expenses, change currency, or send an alert.
-
-CURRENT SERVER UTC TIME: ${utcNow}
-LIVE CLIENT TELEMETRY SNAPSHOT:
-${snapshotJson}`;
+    const systemInstruction = buildMullahSystemPrompt(appSnapshot);
 
     const queuedActions: JarvisClientAction[] = [];
     const toolsUsed: string[] = [];
@@ -4872,9 +5061,202 @@ app.post('/api/jarvis/transcribe', async (req, res) => {
   }
 });
 
+// Build Mullah Voice System Prompt
+function buildMullahSystemPrompt(appSnapshot: unknown): string {
+  const snapshotJson = JSON.stringify(appSnapshot || {}, null, 2).slice(0, 8000);
+  const utcNow = new Date().toISOString();
+  return `You are Mullah, the voice-first AI Tactical Chief Operating Officer embedded inside NjiaFedha & MullahTracker.
+
+AUDIO-ONLY CONVERSATION RULES:
+- Every response you generate is spoken aloud directly to the user. Write in crisp, natural spoken English — NO markdown symbols, NO asterisks, NO bullet characters, NO raw emojis.
+- Keep responses tight and decisive (2 to 4 clear spoken sentences, under 75 words unless a detailed briefing is explicitly asked for).
+- Address the user calmly and naturally, like an intelligent British-inspired AI copilot.
+- Never invent prices, news events, or balances. Ground all statements in LIVE CLIENT TELEMETRY SNAPSHOT or call \`inspect_market_asset\` / \`check_economic_calendar\`.
+- Always respect platform rules: TradFi & Forex freeze on weekends (Crypto & Deriv synthetics stay open 24/7), signal R:R never exceeds 1:5.0, and alert immediately on high-impact red-folder news or stacked USD exposure.
+- Proactively call UI tools (\`navigate_to_view\`, \`focus_trading_radar\`, \`execute_paper_trade\`, \`close_paper_positions\`, \`set_price_alert\`, \`control_trading_bot\`, \`log_finance_transaction\`, \`switch_currency\`, \`broadcast_tracked_signal\`) whenever the user wants to open a screen, chart a pair, place or close a paper trade, set a price alert, start/stop bots, log income/expenses, change currency, or send an alert.
+
+CURRENT SERVER UTC TIME: ${utcNow}
+LIVE CLIENT TELEMETRY SNAPSHOT:
+${snapshotJson}`;
+}
+
+function attachMullahLiveWebSocket(httpServer: ReturnType<typeof createServer>) {
+  const wss = new WebSocketServer({ noServer: true });
+
+  httpServer.on('upgrade', (request, socket, head) => {
+    try {
+      const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+      if (url.pathname === '/ws/mullah-live') {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit('connection', ws, request);
+        });
+      }
+    } catch {
+      socket.destroy();
+    }
+  });
+
+  wss.on('connection', (clientWs: WebSocket) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let liveSession: any = null;
+    let isClosed = false;
+
+    const sendJson = (payload: Record<string, unknown>) => {
+      if (!isClosed && clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify(payload));
+      }
+    };
+
+    clientWs.on('message', async (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+
+        if (msg.type === 'init') {
+          const ai = getAiClient();
+          if (!ai) {
+            sendJson({
+              type: 'error',
+              code: 'GEMINI_KEY_MISSING',
+              message: 'Gemini API key is not configured on the server.',
+            });
+            return;
+          }
+
+          if (liveSession) {
+            try {
+              liveSession.close();
+            } catch {}
+            liveSession = null;
+          }
+
+          const systemInstruction = buildMullahSystemPrompt(msg.appSnapshot || {});
+          liveSession = await ai.live.connect({
+            model: 'gemini-3.8-live',
+            config: {
+              responseModalities: [Modality.AUDIO],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: 'Charon' },
+                },
+              },
+              systemInstruction,
+              tools: [{ functionDeclarations: JARVIS_TOOLS }],
+            },
+            callbacks: {
+              onopen: () => {
+                sendJson({ type: 'ready' });
+              },
+              onmessage: async (message: LiveServerMessage) => {
+                if (isClosed) return;
+
+                if (message.serverContent?.interrupted) {
+                  sendJson({ type: 'interrupted' });
+                }
+
+                const inputTx = message.serverContent?.inputTranscription?.text;
+                if (inputTx) {
+                  sendJson({ type: 'input_transcript', text: inputTx });
+                }
+
+                const outputTx = message.serverContent?.outputTranscription?.text;
+                if (outputTx) {
+                  sendJson({ type: 'output_transcript', text: outputTx });
+                }
+
+                const parts = message.serverContent?.modelTurn?.parts || [];
+                for (const part of parts) {
+                  if (part.inlineData?.data) {
+                    sendJson({
+                      type: 'audio',
+                      data: part.inlineData.data,
+                      mimeType: part.inlineData.mimeType || 'audio/pcm;rate=24000',
+                    });
+                  }
+                  if (part.text) {
+                    sendJson({ type: 'output_transcript', text: part.text });
+                  }
+                }
+
+                if (message.toolCall?.functionCalls && message.toolCall.functionCalls.length > 0 && liveSession) {
+                  const queuedActions: JarvisClientAction[] = [];
+                  const functionResponses = [];
+                  for (const fc of message.toolCall.functionCalls) {
+                    const fnName = fc.name || 'unknown';
+                    const result = await executeJarvisServerTool(
+                      fnName,
+                      (fc.args as Record<string, unknown>) || {},
+                      queuedActions
+                    );
+                    functionResponses.push({
+                      id: fc.id,
+                      name: fnName,
+                      response: result,
+                    });
+                  }
+                  if (queuedActions.length > 0) {
+                    sendJson({ type: 'actions', actions: queuedActions });
+                  }
+                  try {
+                    liveSession.sendToolResponse({ functionResponses });
+                  } catch {}
+                }
+
+                if (message.serverContent?.turnComplete) {
+                  sendJson({ type: 'turn_complete' });
+                }
+              },
+              onerror: (err: unknown) => {
+                console.error('Mullah Live API error:', err);
+                const { message } = formatReadableGeminiError(err);
+                sendJson({ type: 'error', message });
+              },
+              onclose: () => {
+                if (!isClosed) {
+                  sendJson({ type: 'closed' });
+                }
+              },
+            },
+          });
+        } else if (msg.type === 'audio' && liveSession && typeof msg.data === 'string') {
+          liveSession.sendRealtimeInput({
+            audio: {
+              data: msg.data,
+              mimeType: 'audio/pcm;rate=16000',
+            },
+          });
+        } else if (msg.type === 'text' && liveSession && typeof msg.text === 'string') {
+          liveSession.sendClientContent({
+            turns: [{ role: 'user', parts: [{ text: msg.text }] }],
+            turnComplete: true,
+          });
+        }
+      } catch (err) {
+        console.error('Mullah WebSocket message handling error:', err);
+        const { message } = formatReadableGeminiError(err);
+        sendJson({ type: 'error', message });
+      }
+    });
+
+    clientWs.on('close', () => {
+      isClosed = true;
+      if (liveSession) {
+        try {
+          liveSession.close();
+        } catch {}
+        liveSession = null;
+      }
+    });
+  });
+}
+
 // Vite Middleware for development
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
+
+  // Ensure unmatched /api/* routes ALWAYS return JSON and NEVER leak HTML <!doctype>
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+  });
 
   if (!isProd && !process.env.VERCEL) {
     try {
@@ -4901,7 +5283,9 @@ async function startServer() {
 
   if (!process.env.VERCEL) {
     startTradingViewWebSocketStream();
-    app.listen(PORT, '0.0.0.0', () => {
+    const httpServer = createServer(app);
+    attachMullahLiveWebSocket(httpServer);
+    httpServer.listen(PORT, '0.0.0.0', () => {
       console.log(`Server listening on http://0.0.0.0:${PORT}`);
     });
   }

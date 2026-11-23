@@ -81,6 +81,7 @@ import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../
 import { useNewsGuard } from '../../utils/newsGuard.ts';
 import { scheduleTradingCloudPush, CLOUD_TRADING_HYDRATED_EVENT } from '../../utils/tradingCloudSync.ts';
 import { generateCandles } from '../../utils/stockCandles.ts';
+import { evaluatePropTradeBlock, PROP_GUARD_EVENT } from '../../utils/propGuardian.ts';
 
 // =========================================================================
 // COMPREHENSIVE CURRENCIES & TRADING INSTRUMENTS CATALOG
@@ -297,6 +298,7 @@ export const BotStudioView: React.FC = () => {
 
   // Institutional Guardian & Execution Controls
   const [autoPilotActive, setAutoPilotActive] = useState<boolean>(false);
+  const [propGuardBlock, setPropGuardBlock] = useState(() => evaluatePropTradeBlock());
   const [breakEvenFeatureEnabled, setBreakEvenFeatureEnabled] = useState<boolean>(true);
   const [autoRearmEnabled, setAutoRearmEnabled] = useState<boolean>(false);
   const [autoRearmCountdown, setAutoRearmCountdown] = useState<number | null>(null);
@@ -378,6 +380,46 @@ export const BotStudioView: React.FC = () => {
     };
     window.addEventListener(CLOUD_TRADING_HYDRATED_EVENT, onHydrated);
     return () => window.removeEventListener(CLOUD_TRADING_HYDRATED_EVENT, onHydrated);
+  }, []);
+
+  // Listen to Prop Firm Hard Lockout + Mullah Voice Bot Control
+  useEffect(() => {
+    const refreshProp = () => {
+      const next = evaluatePropTradeBlock();
+      setPropGuardBlock(next);
+      if (next.blocked) {
+        setAutoPilotActive(false);
+      }
+    };
+    const onBotControl = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { target?: string; action?: string; symbol?: string } | undefined;
+      if (!detail) return;
+      const target = String(detail.target || 'ALL').toUpperCase();
+      if (target !== 'ALL' && target !== 'BOT_STUDIO') return;
+      if (detail.symbol) {
+        const clean = String(detail.symbol).replace('/', '').toUpperCase();
+        const found = ALL_ASSETS.find((a) => a.symbol === clean);
+        if (found) setSelectedCurrency(found.symbol);
+      }
+      if (detail.action === 'STOP') {
+        setAutoPilotActive(false);
+      } else if (detail.action === 'START') {
+        const guard = evaluatePropTradeBlock();
+        setPropGuardBlock(guard);
+        if (!guard.blocked) {
+          setAutoPilotActive(true);
+        } else {
+          setRearmNotice(`Prop Guardian Lockout: ${guard.reason}`);
+          setTimeout(() => setRearmNotice(null), 5000);
+        }
+      }
+    };
+    window.addEventListener(PROP_GUARD_EVENT, refreshProp);
+    window.addEventListener('njia-bot-control', onBotControl);
+    return () => {
+      window.removeEventListener(PROP_GUARD_EVENT, refreshProp);
+      window.removeEventListener('njia-bot-control', onBotControl);
+    };
   }, []);
 
   // Live streaming price & refs for decoupled rock-solid execution (no simulated random ticks)
@@ -1682,16 +1724,43 @@ export const BotStudioView: React.FC = () => {
 
                 {/* Autonomous Auto-Pilot Toggle */}
                 <button
-                  onClick={() => setAutoPilotActive(!autoPilotActive)}
+                  onClick={() => {
+                    if (!autoPilotActive) {
+                      const guard = evaluatePropTradeBlock();
+                      setPropGuardBlock(guard);
+                      if (guard.blocked) {
+                        setRearmNotice(`Prop Guardian Lockout: ${guard.reason}`);
+                        setTimeout(() => setRearmNotice(null), 5000);
+                        return;
+                      }
+                    }
+                    setAutoPilotActive(!autoPilotActive);
+                  }}
                   className={`px-3 py-1.5 rounded-xl border text-xs font-mono font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                    autoPilotActive
+                    propGuardBlock.blocked
+                      ? 'bg-rose-950/60 text-rose-300 border-rose-500/50 cursor-not-allowed'
+                      : autoPilotActive
                       ? 'bg-gradient-to-r from-emerald-500 to-teal-400 text-slate-950 shadow-md shadow-emerald-500/30 font-black animate-pulse'
                       : 'bg-[#070e1b] text-slate-400 border-slate-800'
                   }`}
-                  title="When active, the bot automatically executes trades, moves to break-even, takes profit, and re-arms continuously"
+                  title={
+                    propGuardBlock.blocked
+                      ? `Blocked by Prop Guardian: ${propGuardBlock.reason}`
+                      : 'When active, the bot automatically executes trades, moves to break-even, takes profit, and re-arms continuously'
+                  }
                 >
-                  {autoPilotActive ? <PlayCircle className="w-3.5 h-3.5" /> : <StopCircle className="w-3.5 h-3.5" />}
-                  <span>Auto-Pilot: {autoPilotActive ? 'ENGAGED' : 'OFF'}</span>
+                  {propGuardBlock.blocked ? (
+                    <Lock className="w-3.5 h-3.5" />
+                  ) : autoPilotActive ? (
+                    <PlayCircle className="w-3.5 h-3.5" />
+                  ) : (
+                    <StopCircle className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    {propGuardBlock.blocked
+                      ? 'PROP LOCKED'
+                      : `Auto-Pilot: ${autoPilotActive ? 'ENGAGED' : 'OFF'}`}
+                  </span>
                 </button>
 
                 {/* Break-Even Shield Toggle */}

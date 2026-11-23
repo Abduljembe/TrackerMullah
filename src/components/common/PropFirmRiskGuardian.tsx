@@ -16,6 +16,11 @@ import {
   Clock,
   Sparkles,
 } from 'lucide-react';
+import {
+  loadPropConfig,
+  savePropConfig,
+  PROP_GUARD_EVENT,
+} from '../../utils/propGuardian.ts';
 
 interface PropFirmRiskGuardianProps {
   currentTicker?: string;
@@ -26,57 +31,16 @@ export const PropFirmRiskGuardian: React.FC<PropFirmRiskGuardianProps> = ({
   currentTicker = 'EUR/USD',
   onAlertTriggered,
 }) => {
-  // Account settings
-  const [accountSize, setAccountSize] = useState<number>(() => {
-    try {
-      const s = localStorage.getItem('prop_account_size');
-      return s ? parseFloat(s) : 10000;
-    } catch {
-      return 10000;
-    }
-  });
-
-  const [currentEquity, setCurrentEquity] = useState<number>(() => {
-    try {
-      const s = localStorage.getItem('prop_current_equity');
-      return s ? parseFloat(s) : 10000;
-    } catch {
-      return 10000;
-    }
-  });
-
-  const [dailyStartingEquity, setDailyStartingEquity] = useState<number>(() => {
-    try {
-      const s = localStorage.getItem('prop_daily_start_equity');
-      return s ? parseFloat(s) : 10000;
-    } catch {
-      return 10000;
-    }
-  });
-
-  // Limits
-  const [maxDailyLossPercent, setMaxDailyLossPercent] = useState<number>(4.0); // FTMO style 4-5%
-  const [maxTotalLossPercent, setMaxTotalLossPercent] = useState<number>(8.0); // 8-10% total max loss
-  const [riskPerTradeLimitPercent, setRiskPerTradeLimitPercent] = useState<number>(1.5);
-
-  // Consecutive losses & Tilt state
-  const [consecutiveLosses, setConsecutiveLosses] = useState<number>(() => {
-    try {
-      const s = localStorage.getItem('prop_consecutive_losses');
-      return s ? parseInt(s, 10) : 0;
-    } catch {
-      return 0;
-    }
-  });
-
-  const [tiltLockExpiresAt, setTiltLockExpiresAt] = useState<number | null>(() => {
-    try {
-      const s = localStorage.getItem('prop_tilt_expires');
-      return s ? parseInt(s, 10) : null;
-    } catch {
-      return null;
-    }
-  });
+  const initialCfg = loadPropConfig();
+  const [accountSize, setAccountSize] = useState<number>(initialCfg.accountSize);
+  const [currentEquity, setCurrentEquity] = useState<number>(initialCfg.currentEquity);
+  const [dailyStartingEquity, setDailyStartingEquity] = useState<number>(initialCfg.dailyStartingEquity);
+  const [maxDailyLossPercent, setMaxDailyLossPercent] = useState<number>(initialCfg.maxDailyLossPercent);
+  const [maxTotalLossPercent, setMaxTotalLossPercent] = useState<number>(initialCfg.maxTotalLossPercent);
+  const [riskPerTradeLimitPercent, setRiskPerTradeLimitPercent] = useState<number>(initialCfg.riskPerTradeLimitPercent);
+  const [consecutiveLosses, setConsecutiveLosses] = useState<number>(initialCfg.consecutiveLosses);
+  const [tiltLockExpiresAt, setTiltLockExpiresAt] = useState<number | null>(initialCfg.tiltLockExpiresAt);
+  const [hardLockoutEnabled, setHardLockoutEnabled] = useState<boolean>(initialCfg.hardLockoutEnabled);
 
   const [timeRemainingSeconds, setTimeRemainingSeconds] = useState<number>(0);
 
@@ -90,18 +54,48 @@ export const PropFirmRiskGuardian: React.FC<PropFirmRiskGuardianProps> = ({
     hardStopLossPlaced: false,
   });
 
-  // Save to localStorage
+  // Sync external realized paper trade PnL into PropFirmRiskGuardian
   useEffect(() => {
-    localStorage.setItem('prop_account_size', String(accountSize));
-    localStorage.setItem('prop_current_equity', String(currentEquity));
-    localStorage.setItem('prop_daily_start_equity', String(dailyStartingEquity));
-    localStorage.setItem('prop_consecutive_losses', String(consecutiveLosses));
-    if (tiltLockExpiresAt) {
-      localStorage.setItem('prop_tilt_expires', String(tiltLockExpiresAt));
-    } else {
-      localStorage.removeItem('prop_tilt_expires');
-    }
-  }, [accountSize, currentEquity, dailyStartingEquity, consecutiveLosses, tiltLockExpiresAt]);
+    const syncFromStore = () => {
+      const latest = loadPropConfig();
+      setAccountSize(latest.accountSize);
+      setCurrentEquity(latest.currentEquity);
+      setDailyStartingEquity(latest.dailyStartingEquity);
+      setMaxDailyLossPercent(latest.maxDailyLossPercent);
+      setMaxTotalLossPercent(latest.maxTotalLossPercent);
+      setRiskPerTradeLimitPercent(latest.riskPerTradeLimitPercent);
+      setConsecutiveLosses(latest.consecutiveLosses);
+      setTiltLockExpiresAt(latest.tiltLockExpiresAt);
+      setHardLockoutEnabled(latest.hardLockoutEnabled);
+    };
+    window.addEventListener(PROP_GUARD_EVENT, syncFromStore);
+    return () => window.removeEventListener(PROP_GUARD_EVENT, syncFromStore);
+  }, []);
+
+  // Persist changes back to shared propGuardian store
+  useEffect(() => {
+    savePropConfig({
+      accountSize,
+      currentEquity,
+      dailyStartingEquity,
+      maxDailyLossPercent,
+      maxTotalLossPercent,
+      riskPerTradeLimitPercent,
+      consecutiveLosses,
+      tiltLockExpiresAt,
+      hardLockoutEnabled,
+    });
+  }, [
+    accountSize,
+    currentEquity,
+    dailyStartingEquity,
+    maxDailyLossPercent,
+    maxTotalLossPercent,
+    riskPerTradeLimitPercent,
+    consecutiveLosses,
+    tiltLockExpiresAt,
+    hardLockoutEnabled,
+  ]);
 
   // Countdown timer for tilt lockout
   useEffect(() => {
@@ -187,8 +181,20 @@ export const PropFirmRiskGuardian: React.FC<PropFirmRiskGuardianProps> = ({
           </h3>
         </div>
 
-        {/* Status Indicator */}
-        <div className="flex items-center gap-2">
+        {/* Status & Hard Pre-Trade Lockout Toggle */}
+        <div className="flex items-center flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setHardLockoutEnabled((v) => !v)}
+            className={`px-2.5 py-1.5 rounded-xl border text-[10px] font-mono font-bold cursor-pointer transition-colors ${
+              hardLockoutEnabled
+                ? 'bg-teal-500/15 border-teal-500/40 text-teal-300'
+                : 'bg-[#101c30] border-[#1f314f] text-slate-400'
+            }`}
+          >
+            {hardLockoutEnabled ? 'HARD LOCKOUT: ON' : 'HARD LOCKOUT: OFF'}
+          </button>
+
           {isLocked ? (
             <span className="px-3 py-1.5 rounded-xl bg-rose-500/20 border border-rose-500/50 text-rose-300 text-xs font-black font-mono flex items-center gap-1.5 animate-pulse">
               <Lock className="w-3.5 h-3.5 text-rose-400" />

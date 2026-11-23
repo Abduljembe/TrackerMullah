@@ -88,6 +88,7 @@ import { LiveMarketTickerTape } from '../trading/LiveMarketTickerTape.tsx';
 import { BotArsenalHub } from '../trading/BotArsenalHub.tsx';
 import { BotDefinition, getBotById } from '../../utils/eaCatalog.ts';
 import { getAssetMarketSession } from '../../utils/marketHours.ts';
+import { evaluatePropTradeBlock, PROP_GUARD_EVENT } from '../../utils/propGuardian.ts';
 import { computeTimeframeSignalLevels, resolveQuoteForTimeframe, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
 import { lookupTradingViewQuote, LiveTvQuote } from '../../utils/tradingViewSync.ts';
 import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../utils/signalScorecard.ts';
@@ -1480,10 +1481,29 @@ export const Mt5EaScalperStudio: React.FC = () => {
 
   // Master START / STOP Controller
   const handleToggleBotRunning = (targetState: boolean) => {
+    const timeStr = new Date().toLocaleTimeString();
+    if (targetState) {
+      const propBlock = evaluatePropTradeBlock();
+      if (propBlock.blocked) {
+        sessionMt5BotRunning = false;
+        setIsBotRunning(false);
+        setTerminalLogs((prev) => [
+          {
+            id: `log-${Date.now()}`,
+            time: timeStr,
+            text: `LOCKOUT BLOCKED START: ${propBlock.reason}`,
+            type: 'alert',
+          },
+          ...prev.slice(0, 40),
+        ]);
+        playChime('alert');
+        return;
+      }
+    }
+
     sessionMt5BotRunning = targetState;
     setIsBotRunning(targetState);
 
-    const timeStr = new Date().toLocaleTimeString();
     if (targetState) {
       syncServerControl('START');
       setTerminalLogs((prev) => [
@@ -1510,6 +1530,30 @@ export const Mt5EaScalperStudio: React.FC = () => {
       playChime('stop');
     }
   };
+
+  useEffect(() => {
+    const onPropGuard = () => {
+      const guard = evaluatePropTradeBlock();
+      if (guard.blocked && sessionMt5BotRunning) {
+        sessionMt5BotRunning = false;
+        setIsBotRunning(false);
+        syncServerControl('STOP');
+      }
+    };
+    const onBotControl = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { target?: string; action?: string } | undefined;
+      if (!detail) return;
+      const target = String(detail.target || 'ALL').toUpperCase();
+      if (target !== 'ALL' && target !== 'MT5_EA') return;
+      handleToggleBotRunning(detail.action === 'START');
+    };
+    window.addEventListener(PROP_GUARD_EVENT, onPropGuard);
+    window.addEventListener('njia-bot-control', onBotControl);
+    return () => {
+      window.removeEventListener(PROP_GUARD_EVENT, onPropGuard);
+      window.removeEventListener('njia-bot-control', onBotControl);
+    };
+  });
 
   // Panic Button: Close All Open Positions Immediately
   const handleEmergencyPanicCloseAll = () => {

@@ -364,9 +364,75 @@ export const MtfConfluenceMatrixDesk: React.FC<MtfConfluenceMatrixDeskProps> = (
   const liveQuotes = useTradingViewQuotes(3500);
 
   const filteredData = useMemo(() => {
+    const tfs: Array<{ key: 'h4' | 'h1' | 'm30' | 'm15' | 'm5' | 'm1'; tvKey: string }> = [
+      { key: 'h4', tvKey: '4H' },
+      { key: 'h1', tvKey: '1H' },
+      { key: 'm30', tvKey: '30M' },
+      { key: 'm15', tvKey: '15M' },
+      { key: 'm5', tvKey: '5M' },
+      { key: 'm1', tvKey: '1M' },
+    ];
+
     return ALL_MTF_DATA.map((row) => {
       const q = lookupTradingViewQuote(liveQuotes, row.symbol);
-      return q && q.price > 0 ? { ...row, price: q.price } : row;
+      if (!q || q.price <= 0) return row;
+
+      const biases = {} as Record<'h4' | 'h1' | 'm30' | 'm15' | 'm5' | 'm1', 'BULLISH' | 'BEARISH'>;
+      let bullCount = 0;
+
+      for (const tf of tfs) {
+        const tfData = q.timeframeSignals?.[tf.tvKey];
+        const score =
+          tfData?.recommendAll ??
+          tfData?.recommendMa ??
+          (tfData?.rsi !== undefined ? (tfData.rsi - 50) / 50 : undefined) ??
+          q.recommendAll ??
+          q.recommendMa ??
+          (q.rsi !== undefined ? (q.rsi - 50) / 50 : undefined) ??
+          (q.changePercent ?? 0) * 0.15;
+
+        const isBull =
+          score > 0.03
+            ? true
+            : score < -0.03
+            ? false
+            : q.ema20 && q.ema50
+            ? q.ema20 >= q.ema50
+            : row[tf.key] === 'BULLISH';
+        biases[tf.key] = isBull ? 'BULLISH' : 'BEARISH';
+        if (isBull) bullCount += 1;
+      }
+
+      const alignedBull = Math.round((bullCount / 6) * 100);
+      const alignedBear = Math.round(((6 - bullCount) / 6) * 100);
+      const alignmentScore = Math.max(alignedBull, alignedBear);
+      const dominantBull = bullCount >= 3;
+
+      let overallBias: MtfRowData['overallBias'] = 'CONFLICTED / CHOP';
+      if (alignmentScore === 100) {
+        overallBias = dominantBull ? 'STRONG BUY (100% ALIGNED)' : 'STRONG SELL (100% ALIGNED)';
+      } else if (alignmentScore >= 67) {
+        overallBias = dominantBull ? 'PARTIAL BUY' : 'PARTIAL SELL';
+      }
+
+      const rsiVal = q.rsi !== undefined ? `RSI ${q.rsi.toFixed(1)}` : 'Live momentum tracked';
+      const emaNote =
+        q.ema20 && q.ema50
+          ? q.ema20 >= q.ema50
+            ? `EMA20 (${q.ema20.toFixed(row.decimals)}) above EMA50 (${q.ema50.toFixed(row.decimals)})`
+            : `EMA20 (${q.ema20.toFixed(row.decimals)}) below EMA50 (${q.ema50.toFixed(row.decimals)})`
+          : `24h delta ${(q.changePercent ?? 0) >= 0 ? '+' : ''}${(q.changePercent ?? 0).toFixed(2)}%`;
+
+      return {
+        ...row,
+        price: q.price,
+        ...biases,
+        alignmentScore,
+        overallBias,
+        technicalNotes: `Live TV Feed @ ${q.price.toFixed(row.decimals)} · ${rsiVal} · ${emaNote}. ${
+          alignmentScore === 100 ? 'Full 6/6 multi-timeframe confluence.' : `${Math.max(bullCount, 6 - bullCount)}/6 frames aligned.`
+        }`,
+      };
     }).filter((row) => {
       const matchSearch =
         row.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||

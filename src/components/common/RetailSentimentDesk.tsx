@@ -301,13 +301,36 @@ export const RetailSentimentDesk: React.FC<RetailSentimentDeskProps> = ({
       ) || ALL_SENTIMENT_ASSETS[0];
     const q = lookupTradingViewQuote(liveQuotes, base.symbol);
     if (!q || q.price <= 0) return base;
-    const shift = q.price - base.currentPrice;
+
+    // Derive dynamic retail crowding from live RSI + 24h momentum (retail typically chases extremes/fades moves)
+    const rsi = q.rsi ?? 50;
+    const chg = q.changePercent ?? base.change24h;
+    const derivedLong = Math.min(89, Math.max(11, Math.round(50 + (rsi - 50) * 0.72 + chg * 3.5)));
+    const derivedShort = 100 - derivedLong;
+    const rangeHalf =
+      q.high && q.low && q.high > q.low
+        ? (q.high - q.low) * 0.65
+        : q.atr
+        ? q.atr * 1.4
+        : q.price * 0.0055;
+
+    const clusterHigh = Number(Math.max(q.high || q.price + rangeHalf, q.price + rangeHalf * 0.45).toFixed(base.decimals));
+    const clusterLow = Number(Math.min(q.low || q.price - rangeHalf, q.price - rangeHalf * 0.45).toFixed(base.decimals));
+
     return {
       ...base,
       currentPrice: q.price,
-      change24h: q.changePercent ?? base.change24h,
-      stopLossClusterHigh: Number((base.stopLossClusterHigh + shift).toFixed(base.decimals)),
-      stopLossClusterLow: Number((base.stopLossClusterLow + shift).toFixed(base.decimals)),
+      change24h: chg,
+      retailLongPct: derivedLong,
+      retailShortPct: derivedShort,
+      stopLossClusterHigh: clusterHigh,
+      stopLossClusterLow: clusterLow,
+      institutionalBias:
+        derivedLong >= 70
+          ? ('STRONG FADE (SHORT)' as const)
+          : derivedShort >= 70
+          ? ('STRONG FADE (BUY)' as const)
+          : ('BALANCED / NEUTRAL' as const),
     };
   }, [selectedSymbol, liveQuotes]);
 

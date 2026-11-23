@@ -27,8 +27,9 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { getAssetMarketSession } from '../../utils/marketHours.ts';
-import { evaluatePortfolioExposure, emitPaperPositionsUpdated } from '../../utils/portfolioGuard.ts';
+import { evaluatePortfolioExposure, emitPaperPositionsUpdated, PAPER_POSITIONS_EVENT } from '../../utils/portfolioGuard.ts';
 import { scheduleTradingCloudPush, CLOUD_TRADING_HYDRATED_EVENT } from '../../utils/tradingCloudSync.ts';
+import { evaluatePropTradeBlock, syncRealizedTradePnlToProp, PROP_GUARD_EVENT, PropBlockStatus } from '../../utils/propGuardian.ts';
 
 export interface Position {
   id: string;
@@ -183,9 +184,11 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
     }
   }, [prefillOrder]);
 
-  // Reload from localStorage whenever cloud state hydrates
+  const [propBlock, setPropBlock] = useState<PropBlockStatus>(() => evaluatePropTradeBlock());
+
+  // Reload from localStorage whenever cloud state hydrates or background watchdog updates positions
   useEffect(() => {
-    const onHydrated = () => {
+    const syncStorage = () => {
       try {
         const bal = localStorage.getItem('njia_paper_balance');
         if (bal) setBalance(parseFloat(bal));
@@ -197,8 +200,15 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
         // ignore storage parse failure
       }
     };
-    window.addEventListener(CLOUD_TRADING_HYDRATED_EVENT, onHydrated);
-    return () => window.removeEventListener(CLOUD_TRADING_HYDRATED_EVENT, onHydrated);
+    const syncProp = () => setPropBlock(evaluatePropTradeBlock());
+    window.addEventListener(CLOUD_TRADING_HYDRATED_EVENT, syncStorage);
+    window.addEventListener(PAPER_POSITIONS_EVENT, syncStorage);
+    window.addEventListener(PROP_GUARD_EVENT, syncProp);
+    return () => {
+      window.removeEventListener(CLOUD_TRADING_HYDRATED_EVENT, syncStorage);
+      window.removeEventListener(PAPER_POSITIONS_EVENT, syncStorage);
+      window.removeEventListener(PROP_GUARD_EVENT, syncProp);
+    };
   }, []);
 
   // Sync to localStorage, notify Portfolio Guard & schedule Firestore sync
@@ -256,6 +266,9 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
   // Handle open real-style MT5 trade
   const handleExecuteOrder = (dir: 'LONG' | 'SHORT') => {
     if (!getAssetMarketSession(ticker, market).isOpen) {
+      return;
+    }
+    if (evaluatePropTradeBlock().blocked) {
       return;
     }
     const sl = parseFloat(customSl) || (defaultSl ? parseFloat(defaultSl.replace(/[^0-9.]/g, '')) : undefined);
@@ -348,6 +361,7 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
     const realizedPortionPnl = Math.round(pos.pnl * (closeLots / pos.lots) * 100) / 100;
 
     setBalance((prev) => Math.round((prev + realizedPortionPnl) * 100) / 100);
+    syncRealizedTradePnlToProp(realizedPortionPnl);
     playTradeSound('win');
     confetti({ particleCount: 30, spread: 50, origin: { y: 0.8 } });
 
@@ -385,6 +399,7 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
 
     const newBalance = Math.round((balance + pos.pnl) * 100) / 100;
     setBalance(newBalance);
+    syncRealizedTradePnlToProp(pos.pnl);
 
     const isWin = pos.pnl >= 0;
     if (isWin) {
@@ -625,13 +640,25 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
             );
           })()}
 
+          {propBlock.blocked && (
+            <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/45 flex items-center justify-between gap-2 text-xs font-mono text-rose-200">
+              <span className="flex items-center gap-2">
+                <Lock className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>{propBlock.reason}</span>
+              </span>
+              <span className="text-[10px] font-black px-2 py-0.5 rounded bg-rose-500/25 text-rose-300 shrink-0">
+                LOCKED
+              </span>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* 1-Click BUY Button (Executes at live Ask) */}
             <button
               onClick={() => handleExecuteOrder('LONG')}
-              disabled={!assetSession.isOpen}
+              disabled={!assetSession.isOpen || propBlock.blocked}
               className={`p-3.5 rounded-xl bg-gradient-to-br from-emerald-600/30 to-emerald-950/60 border border-emerald-500/50 text-left transition-all group ${
-                assetSession.isOpen
+                assetSession.isOpen && !propBlock.blocked
                   ? 'hover:border-emerald-400 cursor-pointer hover:shadow-lg hover:shadow-emerald-500/10'
                   : 'opacity-45 cursor-not-allowed'
               }`}
@@ -642,7 +669,7 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
                   BUY / LONG (Ask)
                 </span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold">
-                  {assetSession.isOpen ? 'Instant MT5 Fill' : 'Market Closed'}
+                  {propBlock.blocked ? 'Prop Locked' : assetSession.isOpen ? 'Instant MT5 Fill' : 'Market Closed'}
                 </span>
               </div>
               <div className="text-xl font-extrabold font-mono text-white group-hover:text-emerald-300 transition-colors">
@@ -657,9 +684,9 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
             {/* 1-Click SELL Button (Executes at live Bid) */}
             <button
               onClick={() => handleExecuteOrder('SHORT')}
-              disabled={!assetSession.isOpen}
+              disabled={!assetSession.isOpen || propBlock.blocked}
               className={`p-3.5 rounded-xl bg-gradient-to-br from-rose-600/30 to-rose-950/60 border border-rose-500/50 text-left transition-all group ${
-                assetSession.isOpen
+                assetSession.isOpen && !propBlock.blocked
                   ? 'hover:border-rose-400 cursor-pointer hover:shadow-lg hover:shadow-rose-500/10'
                   : 'opacity-45 cursor-not-allowed'
               }`}
@@ -670,7 +697,7 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
                   SELL / SHORT (Bid)
                 </span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold">
-                  {assetSession.isOpen ? 'Instant MT5 Fill' : 'Market Closed'}
+                  {propBlock.blocked ? 'Prop Locked' : assetSession.isOpen ? 'Instant MT5 Fill' : 'Market Closed'}
                 </span>
               </div>
               <div className="text-xl font-extrabold font-mono text-white group-hover:text-rose-300 transition-colors">
