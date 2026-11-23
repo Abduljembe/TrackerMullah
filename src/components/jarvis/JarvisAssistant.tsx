@@ -133,24 +133,27 @@ async function parseJsonSafely<T = Record<string, unknown>>(res: Response): Prom
 
 async function fetchJsonWithRetry<T = Record<string, unknown>>(
   url: string,
-  init: RequestInit
+  init: RequestInit,
+  options?: { timeoutMs?: number; retries?: number }
 ): Promise<{ res: Response; data: T }> {
+  const timeoutMs = options?.timeoutMs ?? 24000;
+  const maxAttempts = (options?.retries ?? 1) + 1;
   let lastErr: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 24000);
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       const res = await fetch(url, { ...init, signal: controller.signal });
       clearTimeout(timer);
       const data = await parseJsonSafely<T>(res);
-      if (attempt === 0 && (res.status === 502 || res.status === 503 || res.status === 504)) {
+      if (attempt < maxAttempts - 1 && (res.status === 502 || res.status === 503 || res.status === 504)) {
         await new Promise((r) => setTimeout(r, 850));
         continue;
       }
       return { res, data };
     } catch (err) {
       lastErr = err;
-      if (attempt === 0) {
+      if (attempt < maxAttempts - 1) {
         await new Promise((r) => setTimeout(r, 850));
         continue;
       }
@@ -676,7 +679,13 @@ export const JarvisAssistant: React.FC = () => {
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const speechKeepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pendingWelcomeAudioRef = useRef<{ base64: string; mimeType: string } | null>(null);
+  const pendingSpeechRef = useRef<{ text: string; triggerAutoListenAfter: boolean } | null>(null);
+  const hasUserGestureRef = useRef<boolean>(false);
+  const justFlushedAudioAtRef = useRef<number>(0);
+  const availableVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const clientTtsCacheRef = useRef<Map<string, { base64: string; mimeType: string }>>(new Map());
   const cloudTtsCooldownUntilRef = useRef<number>(
     (() => {
@@ -782,6 +791,11 @@ export const JarvisAssistant: React.FC = () => {
   useEffect(() => {
     return () => {
       activeAudioRef.current?.pause();
+      if (speechKeepAliveRef.current) {
+        clearInterval(speechKeepAliveRef.current);
+        speechKeepAliveRef.current = null;
+      }
+      activeUtteranceRef.current = null;
       stopLiveAudioStream();
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach((t) => t.stop());
@@ -795,13 +809,55 @@ export const JarvisAssistant: React.FC = () => {
     };
   }, [stopLiveAudioStream]);
 
+  // Preload browser speech voices & check backend capability cleanly (prevents stale hangs on Vercel)
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      const refreshVoices = () => {
+        try {
+          const list = window.speechSynthesis.getVoices();
+          if (list && list.length > 0) {
+            availableVoicesRef.current = list;
+          }
+        } catch {}
+      };
+      refreshVoices();
+      window.speechSynthesis.addEventListener?.('voiceschanged', refreshVoices);
+    }
+
+    // Fast capability probe so deployments without GEMINI_API_KEY skip cloud TTS latency immediately
+    const probeController = new AbortController();
+    const probeTimer = setTimeout(() => probeController.abort(), 3000);
+    fetch('/api/health', { signal: probeController.signal })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((info) => {
+        clearTimeout(probeTimer);
+        if (info && info.geminiConfigured === false) {
+          const until = Date.now() + 30 * 60 * 1000;
+          cloudTtsCooldownUntilRef.current = until;
+          try {
+            localStorage.setItem('njia_cloud_tts_cooldown_until', String(until));
+          } catch {}
+        }
+      })
+      .catch(() => {
+        clearTimeout(probeTimer);
+      });
+  }, []);
+
   const stopSpeaking = useCallback(() => {
     if (activeAudioRef.current) {
       activeAudioRef.current.pause();
       activeAudioRef.current = null;
     }
+    if (speechKeepAliveRef.current) {
+      clearInterval(speechKeepAliveRef.current);
+      speechKeepAliveRef.current = null;
+    }
+    activeUtteranceRef.current = null;
     try {
-      window.speechSynthesis?.cancel();
+      if (window.speechSynthesis && (window.speechSynthesis.speaking || window.speechSynthesis.pending)) {
+        window.speechSynthesis.cancel();
+      }
     } catch {}
     liveActiveSourcesRef.current.forEach((src) => {
       try {
@@ -820,23 +876,76 @@ export const JarvisAssistant: React.FC = () => {
       setJarvisState('idle');
       return false;
     }
+    const cleanText = text
+      .replace(/[*_`#>]/g, '')
+      .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!cleanText) {
+      setJarvisState('idle');
+      return false;
+    }
+
     try {
-      window.speechSynthesis.cancel();
-      const utter = new SpeechSynthesisUtterance(
-        text
-          .replace(/[*_`#>]/g, '')
-          .replace(/\s+/g, ' ')
-          .trim()
-      );
-      const voices = window.speechSynthesis.getVoices();
+      const synth = window.speechSynthesis;
+      if (speechKeepAliveRef.current) {
+        clearInterval(speechKeepAliveRef.current);
+        speechKeepAliveRef.current = null;
+      }
+
+      const utter = new SpeechSynthesisUtterance(cleanText);
+      activeUtteranceRef.current = utter;
+
+      const voices = availableVoicesRef.current.length > 0 ? availableVoicesRef.current : synth.getVoices();
+      const localEnglish = voices.filter((v) => v.lang.toLowerCase().startsWith('en') && v.localService !== false);
+      const anyEnglish = voices.filter((v) => v.lang.toLowerCase().startsWith('en'));
       const preferred =
-        voices.find((v) => /google uk english male|daniel|george|ryan|mark|david/i.test(v.name)) ||
-        voices.find((v) => v.lang.toLowerCase().startsWith('en'));
-      if (preferred) utter.voice = preferred;
-      utter.rate = 1.03;
+        localEnglish.find((v) => /daniel|samantha|alex|arthur|george|ryan|mark|david|karen|google/i.test(v.name)) ||
+        localEnglish.find((v) => v.default) ||
+        localEnglish[0] ||
+        anyEnglish.find((v) => v.default) ||
+        anyEnglish[0];
+      if (preferred) {
+        utter.voice = preferred;
+        utter.lang = preferred.lang;
+      } else {
+        utter.lang = 'en-US';
+      }
+      utter.rate = 1.02;
       utter.pitch = 0.96;
+      utter.volume = 1;
+
+      let didStart = false;
+      let didFinish = false;
+
+      const clearUtterTimers = () => {
+        if (speechKeepAliveRef.current) {
+          clearInterval(speechKeepAliveRef.current);
+          speechKeepAliveRef.current = null;
+        }
+      };
+
+      utter.onstart = () => {
+        didStart = true;
+        pendingSpeechRef.current = null;
+        setAutoplayBlocked(false);
+        setJarvisState('speaking');
+        // Keep Chrome desktop/Android SpeechSynthesis active on longer spoken replies
+        clearUtterTimers();
+        speechKeepAliveRef.current = setInterval(() => {
+          try {
+            if (synth.paused) synth.resume();
+          } catch {}
+        }, 7000);
+      };
 
       utter.onend = () => {
+        if (didFinish) return;
+        didFinish = true;
+        clearUtterTimers();
+        if (activeUtteranceRef.current === utter) {
+          activeUtteranceRef.current = null;
+        }
         setJarvisState('idle');
         if (triggerAutoListenAfter && handsFreeLoopRef.current) {
           setTimeout(() => {
@@ -844,14 +953,61 @@ export const JarvisAssistant: React.FC = () => {
           }, 260);
         }
       };
-      utter.onerror = () => {
+
+      utter.onerror = (event: SpeechSynthesisErrorEvent) => {
+        if (didFinish) return;
+        didFinish = true;
+        clearUtterTimers();
+        if (activeUtteranceRef.current === utter) {
+          activeUtteranceRef.current = null;
+        }
+        const errType = String(event?.error || '').toLowerCase();
+        if (errType === 'not-allowed' || (!hasUserGestureRef.current && !didStart)) {
+          pendingSpeechRef.current = { text: cleanText, triggerAutoListenAfter };
+          setAutoplayBlocked(true);
+        }
         setJarvisState('idle');
       };
 
-      setJarvisState('speaking');
-      window.speechSynthesis.speak(utter);
+      const dispatchSpeak = () => {
+        try {
+          if (synth.paused) synth.resume();
+          setJarvisState('speaking');
+          synth.speak(utter);
+
+          // Watchdog: Safari/iOS/Chrome silently drop un-gestured boot speech without always firing onerror
+          setTimeout(() => {
+            if (!didStart && !didFinish && activeUtteranceRef.current === utter) {
+              const active = synth.speaking || synth.pending;
+              if (!active) {
+                clearUtterTimers();
+                activeUtteranceRef.current = null;
+                pendingSpeechRef.current = { text: cleanText, triggerAutoListenAfter };
+                setAutoplayBlocked(true);
+                setJarvisState('idle');
+              }
+            }
+          }, 450);
+        } catch {
+          clearUtterTimers();
+          activeUtteranceRef.current = null;
+          pendingSpeechRef.current = { text: cleanText, triggerAutoListenAfter };
+          setAutoplayBlocked(true);
+          setJarvisState('idle');
+        }
+      };
+
+      // Only cancel if already speaking/queued; synchronous speak() preserves mobile Safari user gesture
+      if (synth.speaking || synth.pending) {
+        synth.cancel();
+        setTimeout(dispatchSpeak, 45);
+      } else {
+        dispatchSpeak();
+      }
       return true;
     } catch {
+      pendingSpeechRef.current = { text: cleanText, triggerAutoListenAfter };
+      setAutoplayBlocked(true);
       setJarvisState('idle');
       return false;
     }
@@ -881,13 +1037,19 @@ export const JarvisAssistant: React.FC = () => {
 
       try {
         await audio.play();
+        pendingWelcomeAudioRef.current = null;
         setAutoplayBlocked(false);
         return true;
       } catch (err: unknown) {
         activeAudioRef.current = null;
         setJarvisState('idle');
         const msg = err instanceof Error ? err.message : String(err || '');
-        if (msg.toLowerCase().includes('notallowed') || msg.toLowerCase().includes('gesture') || msg.toLowerCase().includes('interact')) {
+        if (
+          msg.toLowerCase().includes('notallowed') ||
+          msg.toLowerCase().includes('gesture') ||
+          msg.toLowerCase().includes('interact') ||
+          !hasUserGestureRef.current
+        ) {
           pendingWelcomeAudioRef.current = { base64: audioBase64, mimeType };
           setAutoplayBlocked(true);
           return false;
@@ -897,6 +1059,49 @@ export const JarvisAssistant: React.FC = () => {
     },
     [stopSpeaking]
   );
+
+  const flushPendingSpeechOnGesture = useCallback(() => {
+    hasUserGestureRef.current = true;
+    try {
+      window.speechSynthesis?.resume();
+    } catch {}
+
+    if (pendingWelcomeAudioRef.current) {
+      const pendingAudio = pendingWelcomeAudioRef.current;
+      pendingWelcomeAudioRef.current = null;
+      justFlushedAudioAtRef.current = Date.now();
+      setAutoplayBlocked(false);
+      playAudioPayload(pendingAudio.base64, pendingAudio.mimeType, true);
+      return true;
+    }
+
+    if (pendingSpeechRef.current) {
+      const pendingText = pendingSpeechRef.current;
+      pendingSpeechRef.current = null;
+      justFlushedAudioAtRef.current = Date.now();
+      setAutoplayBlocked(false);
+      speakWithBrowserSynthesis(pendingText.text, pendingText.triggerAutoListenAfter);
+      return true;
+    }
+
+    return false;
+  }, [playAudioPayload, speakWithBrowserSynthesis]);
+
+  // First user tap/click/key anywhere unlocks browser audio on HTTPS/Vercel immediately
+  useEffect(() => {
+    const onFirstUserGesture = () => {
+      hasUserGestureRef.current = true;
+      if (pendingWelcomeAudioRef.current || pendingSpeechRef.current) {
+        flushPendingSpeechOnGesture();
+      }
+    };
+    window.addEventListener('pointerdown', onFirstUserGesture, { passive: true });
+    window.addEventListener('keydown', onFirstUserGesture, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', onFirstUserGesture);
+      window.removeEventListener('keydown', onFirstUserGesture);
+    };
+  }, [flushPendingSpeechOnGesture]);
 
   const speakText = useCallback(
     async (text: string, triggerAutoListenAfter = true) => {
@@ -925,11 +1130,15 @@ export const JarvisAssistant: React.FC = () => {
           fallbackLocalTts?: boolean;
           cooldownRemainingMs?: number;
           error?: string;
-        }>('/api/jarvis/speak', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
-        });
+        }>(
+          '/api/jarvis/speak',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+          },
+          { timeoutMs: 4500, retries: 0 }
+        );
 
         if (!res.ok || data.fallbackLocalTts || !data.audioBase64) {
           const cooldownMs = Number(data.cooldownRemainingMs || 300000);
@@ -950,7 +1159,7 @@ export const JarvisAssistant: React.FC = () => {
         }
         await playAudioPayload(data.audioBase64, data.mimeType || 'audio/wav', triggerAutoListenAfter);
       } catch {
-        const until = Date.now() + 120000;
+        const until = Date.now() + 180000;
         cloudTtsCooldownUntilRef.current = until;
         try {
           localStorage.setItem('njia_cloud_tts_cooldown_until', String(until));
@@ -2064,11 +2273,10 @@ export const JarvisAssistant: React.FC = () => {
 
   const startListening = useCallback(async () => {
     if (jarvisState === 'listening' || jarvisState === 'thinking') return;
+    hasUserGestureRef.current = true;
 
-    if (pendingWelcomeAudioRef.current) {
-      const pending = pendingWelcomeAudioRef.current;
-      pendingWelcomeAudioRef.current = null;
-      await playAudioPayload(pending.base64, pending.mimeType, true);
+    if (pendingWelcomeAudioRef.current || pendingSpeechRef.current) {
+      flushPendingSpeechOnGesture();
       return;
     }
 
@@ -2187,7 +2395,7 @@ export const JarvisAssistant: React.FC = () => {
       setJarvisState('idle');
       setVoiceError('Microphone access is required for voice commands.');
     }
-  }, [jarvisState, liveStreamMode, playAudioPayload, sendSpokenCommand, startLiveAudioSession, stopSpeaking]);
+  }, [flushPendingSpeechOnGesture, jarvisState, liveStreamMode, sendSpokenCommand, startLiveAudioSession, stopSpeaking]);
 
   useEffect(() => {
     startListeningRef.current = startListening;
@@ -2254,6 +2462,10 @@ export const JarvisAssistant: React.FC = () => {
   }, [jarvisState, liveStreamMode, sendSpokenCommand, wakeWordEnabled]);
 
   const handleReactorTap = () => {
+    // Ignore the synthetic click event if the preceding pointerdown just unlocked & started pending audio
+    if (Date.now() - justFlushedAudioAtRef.current < 450) {
+      return;
+    }
     if (jarvisState === 'listening') {
       stopListening();
     } else if (jarvisState === 'speaking') {
@@ -2264,6 +2476,7 @@ export const JarvisAssistant: React.FC = () => {
   };
 
   const handleResetSession = () => {
+    hasUserGestureRef.current = true;
     stopSpeaking();
     stopListening();
     const greeting = buildWelcomeGreeting();
@@ -2287,11 +2500,7 @@ export const JarvisAssistant: React.FC = () => {
           type="button"
           onClick={() => {
             setIsOpen(true);
-            if (pendingWelcomeAudioRef.current) {
-              const pending = pendingWelcomeAudioRef.current;
-              pendingWelcomeAudioRef.current = null;
-              playAudioPayload(pending.base64, pending.mimeType, true);
-            }
+            flushPendingSpeechOnGesture();
           }}
           title="Open Mullah Voice Copilot (Ctrl/Cmd + J)"
           className="fixed bottom-5 right-5 z-40 group flex items-center gap-2.5 pl-2.5 pr-4 py-2 rounded-full bg-[#07111e]/95 hover:bg-[#0b1a2d] border border-[#0df2c9]/50 hover:border-[#0df2c9] shadow-[0_0_26px_rgba(13,242,201,0.3)] backdrop-blur-md transition-all cursor-pointer active:scale-95"
@@ -2501,7 +2710,7 @@ export const JarvisAssistant: React.FC = () => {
             <div className="space-y-1">
               <div className="text-xs font-mono font-bold text-white">
                 {autoplayBlocked
-                  ? 'Tap the Reactor to Hear Mullah'
+                  ? 'Tap to Enable Mullah Audio'
                   : jarvisState === 'listening'
                   ? liveStreamMode
                     ? 'Live Audio Link Active — Speak freely...'
@@ -2516,6 +2725,17 @@ export const JarvisAssistant: React.FC = () => {
                 Try: &ldquo;Switch Live TV to Sky News &amp; volume 80%&rdquo;, &ldquo;Add 45 USD coffee expense&rdquo;, &ldquo;Ask me anything&rdquo;, or &ldquo;Scan Gold 15M&rdquo;
               </div>
             </div>
+
+            {autoplayBlocked && (
+              <button
+                type="button"
+                onClick={() => flushPendingSpeechOnGesture()}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-[#0df2c9]/20 border border-[#0df2c9]/60 text-[10px] font-mono font-bold text-[#0df2c9] hover:bg-[#0df2c9]/30 animate-pulse cursor-pointer"
+              >
+                <Volume2 className="w-3 h-3" />
+                Tap to Hear Mullah Speak
+              </button>
+            )}
 
             {jarvisState === 'speaking' && (
               <button
