@@ -62,6 +62,23 @@ const MainContent: React.FC = () => {
   const { user, loading } = useAuth();
   const { activeTab, appRefreshKey } = useFinance();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('njia_sidebar_collapsed') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleSidebar = () => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('njia_sidebar_collapsed', String(next));
+      } catch {}
+      return next;
+    });
+  };
 
   if (loading) {
     return (
@@ -141,14 +158,25 @@ const MainContent: React.FC = () => {
   };
 
   return (
-    <div className="flex min-h-screen bg-[#070b14] text-slate-100 w-full overflow-x-hidden">
-      <Sidebar mobileOpen={mobileMenuOpen} setMobileOpen={setMobileMenuOpen} />
+    <div className="flex min-h-dvh bg-[#070b14] text-slate-100 w-full overflow-x-clip">
+      <Sidebar
+        mobileOpen={mobileMenuOpen}
+        setMobileOpen={setMobileMenuOpen}
+        collapsed={sidebarCollapsed}
+        setCollapsed={setSidebarCollapsed}
+      />
 
       <div className="flex-1 flex flex-col min-w-0 w-full fintech-grid-bg transition-all duration-300">
-        <Header onOpenMobileMenu={() => setMobileMenuOpen(true)} />
+        <Header
+          onOpenMobileMenu={() => setMobileMenuOpen(true)}
+          sidebarCollapsed={sidebarCollapsed}
+          onToggleSidebar={handleToggleSidebar}
+        />
 
-        <main key={appRefreshKey} className="flex-1 p-3 sm:p-5 md:p-6 lg:p-8 w-full min-w-0 pb-24 md:pb-16">
-          <Suspense fallback={<ViewFallback />}>{renderActiveView()}</Suspense>
+        <main key={appRefreshKey} className="flex-1 p-3 sm:p-4 md:p-5 lg:p-6 w-full min-w-0 pb-24 md:pb-12">
+          <div className="w-full max-w-[1680px] mx-auto min-w-0">
+            <Suspense fallback={<ViewFallback />}>{renderActiveView()}</Suspense>
+          </div>
         </main>
       </div>
 

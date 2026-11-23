@@ -1120,7 +1120,7 @@ export const LiveMarketsTVDesk: React.FC<LiveMarketsTVDeskProps> = ({ onSelectTi
 
           {/* Embedded World Monitor Interactive Iframe */}
           <div className={`relative w-full rounded-2xl overflow-hidden border border-[#182946] bg-black shadow-2xl transition-all ${
-            isTheaterMode ? 'h-[85vh]' : 'h-[640px]'
+            isTheaterMode ? 'h-[82dvh]' : 'h-[clamp(360px,60dvh,700px)]'
           }`}>
             <iframe
               src="https://www.worldmonitor.app/embed"
@@ -1202,8 +1202,8 @@ export const LiveMarketsTVDesk: React.FC<LiveMarketsTVDeskProps> = ({ onSelectTi
             ref={playerContainerRef}
             className={`relative w-full overflow-hidden bg-black transition-all ${
               isCinemaMode
-                ? 'fixed inset-0 z-[99999] w-screen h-screen flex flex-col justify-between m-0 p-0 rounded-none border-0'
-                : 'rounded-2xl border border-[#192b4a] shadow-2xl h-[540px] sm:h-[620px] lg:h-[720px] flex items-center justify-center'
+                ? 'fixed inset-0 z-[99999] w-screen h-dvh flex flex-col justify-between m-0 p-0 rounded-none border-0'
+                : 'rounded-2xl border border-[#192b4a] shadow-2xl h-[clamp(320px,56dvh,680px)] flex items-center justify-center'
             }`}
           >
             {isHlsLoading && (

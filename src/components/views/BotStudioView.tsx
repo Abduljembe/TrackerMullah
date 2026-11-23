@@ -1434,7 +1434,7 @@ export const BotStudioView: React.FC = () => {
           </div>
 
           {/* Quick Active Asset HUD Tile */}
-          <div className="p-4 rounded-2xl bg-[#08101e] border border-teal-500/40 shadow-xl flex items-center justify-between gap-6 min-w-[320px]">
+          <div className="p-4 rounded-2xl bg-[#08101e] border border-teal-500/40 shadow-xl flex items-center justify-between gap-4 sm:gap-6 w-full xl:w-auto min-w-0 sm:min-w-[290px]">
             <div>
               <div className="text-[10px] uppercase font-mono text-slate-400 flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />

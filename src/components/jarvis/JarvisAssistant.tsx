@@ -3347,7 +3347,7 @@ export const JarvisAssistant: React.FC = () => {
         <div
           role="dialog"
           aria-label="Mullah Audio Copilot"
-          className="fixed bottom-4 right-4 z-50 w-[calc(100vw-2rem)] sm:w-[420px] max-h-[86vh] h-[630px] flex flex-col rounded-2xl bg-[#050c17]/96 border border-[#0df2c9]/50 shadow-[0_0_55px_rgba(13,242,201,0.24)] backdrop-blur-xl overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-200"
+          className="fixed bottom-4 right-3 sm:right-4 z-50 w-[calc(100vw-1.5rem)] sm:w-[410px] h-[min(620px,calc(100dvh-5.5rem))] sm:h-[min(630px,calc(100dvh-2rem))] flex flex-col rounded-2xl bg-[#050c17]/96 border border-[#0df2c9]/50 shadow-[0_0_55px_rgba(13,242,201,0.24)] backdrop-blur-xl overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-200"
         >
           {/* Clean Mullah Header */}
           <div className="px-4 py-3 bg-[#071526] border-b border-[#0df2c9]/20 flex items-center justify-between gap-3">

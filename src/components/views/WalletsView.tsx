@@ -408,13 +408,13 @@ export const WalletsView: React.FC = () => {
             Recent Inter-Wallet Transfers
           </h3>
 
-          <div className="divide-y divide-[#141f33] overflow-x-auto">
+          <div className="divide-y divide-[#141f33]">
             {transfers.slice(0, 10).map((t) => {
               const fromW = wallets.find((w) => w.id === t.fromWalletId);
               const toW = wallets.find((w) => w.id === t.toWalletId);
 
               return (
-                <div key={t.id} className="py-3 flex items-center justify-between text-xs min-w-[500px]">
+                <div key={t.id} className="py-3 flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 text-xs">
                   <div className="flex items-center gap-3">
                     <div className="w-7 h-7 rounded-lg bg-teal-500/10 text-teal-400 flex items-center justify-center shrink-0">
                       <ArrowRightLeft className="w-3.5 h-3.5" />

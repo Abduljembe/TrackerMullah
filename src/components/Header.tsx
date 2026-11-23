@@ -17,6 +17,8 @@ import {
   X,
   Database,
   Search,
+  PanelLeftOpen,
+  PanelLeftClose,
 } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
@@ -26,10 +28,14 @@ import { OPEN_COMMAND_PALETTE_EVENT } from './common/CommandPaletteModal.tsx';
 
 interface HeaderProps {
   onOpenMobileMenu: () => void;
+  sidebarCollapsed?: boolean;
+  onToggleSidebar?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   onOpenMobileMenu,
+  sidebarCollapsed = false,
+  onToggleSidebar,
 }) => {
   const {
     activeTab,
@@ -163,30 +169,42 @@ export const Header: React.FC<HeaderProps> = ({
   const healthBadge = getHealthBadge();
 
   return (
-    <header className="sticky top-0 z-20 backdrop-blur-md bg-[#080d17]/90 border-b border-[#141e30] px-4 md:px-8 py-3 flex flex-col gap-2">
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-        {/* Top Left: Title, Subtitle, and Health Pill matching screenshot */}
-        <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
+    <header className="sticky top-0 z-20 backdrop-blur-md bg-[#080d17]/90 border-b border-[#141e30] px-3 sm:px-5 lg:px-6 py-2.5 flex flex-col gap-2">
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2.5 lg:gap-3 min-w-0">
+        {/* Top Left: Menu/Sidebar Toggle, Title, Subtitle, and Health Pill */}
+        <div className="flex items-center justify-between gap-2 min-w-0">
+        <div className="flex items-center gap-2.5 min-w-0">
           <button
             onClick={onOpenMobileMenu}
-            className="md:hidden p-2 -ml-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/60 flex items-center gap-2"
+            className="lg:hidden p-1.5 -ml-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/60 flex items-center gap-1.5 shrink-0 cursor-pointer"
             aria-label="Open navigation menu"
           >
             <Menu className="w-5 h-5" />
-            <AppLogoIcon sizePx={24} />
+            <AppLogoIcon sizePx={22} />
           </button>
 
-          <div>
-            <div className="flex items-center gap-3">
-              <h1 className="text-xl md:text-2xl font-bold tracking-tight text-white">
+          {onToggleSidebar && (
+            <button
+              type="button"
+              onClick={onToggleSidebar}
+              className="hidden lg:inline-flex p-1.5 text-slate-400 hover:text-[#0df2c9] rounded-lg bg-[#0d1524] border border-[#1a273e] hover:border-teal-500/40 transition-colors shrink-0 cursor-pointer"
+              title={sidebarCollapsed ? 'Show navigation sidebar' : 'Hide navigation sidebar'}
+              aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
+            </button>
+          )}
+
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <h1 className="text-base sm:text-lg lg:text-xl font-bold tracking-tight text-white truncate max-w-[180px] sm:max-w-[260px] xl:max-w-[340px] 2xl:max-w-none">
                 {getTabTitle()}
               </h1>
 
-              {/* Health pill matching screenshot */}
+              {/* Health pill */}
               <button
                 onClick={() => setIsHealthModalOpen(true)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-semibold cursor-pointer transition-transform hover:scale-105 ${healthBadge.bg}`}
+                className={`hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-lg border text-[11px] font-semibold cursor-pointer transition-transform hover:scale-105 shrink-0 whitespace-nowrap ${healthBadge.bg}`}
                 title="Click to view Financial Health breakdown"
               >
                 {healthBadge.icon}
@@ -194,7 +212,7 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             </div>
 
-            <p className="text-xs text-slate-400 mt-0.5">
+            <p className="text-[11px] text-slate-400 mt-0.5 truncate">
               <span>{currentPeriod}</span>
               <span className="mx-1.5 text-slate-500">·</span>
               <button
@@ -208,10 +226,11 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Mobile quick add button */}
-        <div className="flex md:hidden items-center gap-2">
+        <div className="flex md:hidden items-center gap-2 shrink-0">
           <button
             onClick={() => setIsQuickAddOpen(true)}
             className="p-2 rounded-xl bg-gradient-to-r from-teal-500 to-cyan-500 text-slate-950 font-bold shadow-md shadow-teal-500/20"
+            aria-label="Add Transaction"
           >
             <Plus className="w-5 h-5" />
           </button>
@@ -219,7 +238,7 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       {/* Top Right: Actions & Tools */}
-      <div className="flex items-center flex-wrap gap-2.5 self-end md:self-auto text-xs">
+      <div className="flex items-center flex-wrap gap-1.5 lg:gap-2 justify-end text-xs min-w-0">
         {/* Currency Switcher & Real-time Rates */}
         <div className="flex items-center gap-1.5">
           <div className="flex items-center bg-[#0d1524] border border-[#1a273e] rounded-lg p-0.5 text-slate-300">
@@ -251,16 +270,16 @@ export const Header: React.FC<HeaderProps> = ({
               title="Open Live Currency Converter (convert any amount between USD, KES, EUR, GBP)"
             >
               <ArrowRightLeft className="w-3 h-3 text-[#0df2c9] group-hover:scale-110 transition-transform" />
-              <span className="hidden sm:inline font-medium text-teal-400">1 USD =</span>
-              <span className="font-mono text-slate-200 font-semibold">
+              <span className="hidden 2xl:inline font-medium text-teal-400">1 USD =</span>
+              <span className="font-mono text-slate-200 font-semibold whitespace-nowrap">
                 {exchangeRates.KES ? `${exchangeRates.KES.toFixed(2)} KES` : '129.86 KES'}
               </span>
-              <span className="hidden xl:inline text-slate-600">·</span>
-              <span className="hidden xl:inline font-mono text-slate-300">
+              <span className="hidden 2xl:inline text-slate-600">·</span>
+              <span className="hidden 2xl:inline font-mono text-slate-300 whitespace-nowrap">
                 {exchangeRates.EUR ? `${exchangeRates.EUR.toFixed(2)} EUR` : '0.91 EUR'}
               </span>
               <span className="px-1.5 py-0.5 rounded text-[10px] bg-teal-500/15 text-[#0df2c9] font-semibold border border-teal-500/30 ml-0.5">
-                Convert
+                FX
               </span>
             </button>
             <div className="relative">
@@ -298,11 +317,11 @@ export const Header: React.FC<HeaderProps> = ({
         <button
           type="button"
           onClick={() => window.dispatchEvent(new CustomEvent(OPEN_COMMAND_PALETTE_EVENT))}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0d1524] hover:bg-[#142036] border border-[#1a273e] hover:border-teal-500/40 text-slate-300 hover:text-white transition-colors cursor-pointer text-xs"
+          className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-[#0d1524] hover:bg-[#142036] border border-[#1a273e] hover:border-teal-500/40 text-slate-300 hover:text-white transition-colors cursor-pointer text-xs whitespace-nowrap"
           title="Quick Search & Command Palette (Cmd/Ctrl + K)"
         >
           <Search className="w-3.5 h-3.5 text-[#0df2c9] shrink-0" />
-          <span className="hidden lg:inline font-medium">Search</span>
+          <span className="hidden 2xl:inline font-medium">Search</span>
           <kbd className="hidden sm:inline px-1.5 py-0.5 rounded bg-[#070e1a] border border-[#1a2c48] text-[9px] font-mono text-slate-400">
             ⌘K
           </kbd>
@@ -311,11 +330,11 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Backup & Restore Data */}
         <button
           onClick={() => setIsBackupRestoreOpen(true)}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0e1626] hover:bg-[#142036] border border-[#17253c] hover:border-teal-500/40 text-slate-300 hover:text-teal-300 transition-colors cursor-pointer text-xs"
+          className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-[#0e1626] hover:bg-[#142036] border border-[#17253c] hover:border-teal-500/40 text-slate-300 hover:text-teal-300 transition-colors cursor-pointer text-xs whitespace-nowrap"
           title="Backup or restore financial data in JSON"
         >
           <Database className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-          <span className="hidden sm:inline font-medium">Backup</span>
+          <span className="hidden 2xl:inline font-medium">Backup</span>
         </button>
 
         {/* PWA Install Button */}
@@ -324,7 +343,7 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Reset / Clear Data */}
         <button
           onClick={() => setIsClearDataModalOpen(true)}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition-colors cursor-pointer ${
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-colors cursor-pointer whitespace-nowrap ${
             hasAnyData
               ? 'bg-[#111929] hover:bg-rose-950/40 border-[#1d2d48] hover:border-rose-500/40 text-slate-300 hover:text-rose-300'
               : 'bg-[#0a1220] hover:bg-[#101b2d] border-[#15233c] text-slate-400 hover:text-slate-200'
@@ -332,14 +351,14 @@ export const Header: React.FC<HeaderProps> = ({
           title="Reset or clear recorded financial data"
         >
           <RotateCcw className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-          <span className="font-medium">Clear Data</span>
+          <span className="hidden xl:inline font-medium">Clear Data</span>
         </button>
 
         {/* Period Selector */}
         <select
           value={currentPeriod}
           onChange={(e) => setCurrentPeriod(e.target.value)}
-          className="bg-[#0e1626] border border-[#1d2c47] rounded-lg px-2.5 py-1.5 text-slate-300 focus:outline-none focus:border-teal-400 cursor-pointer"
+          className="bg-[#0e1626] border border-[#1d2c47] rounded-lg px-2 py-1.5 text-slate-300 focus:outline-none focus:border-teal-400 cursor-pointer max-w-[125px] sm:max-w-none"
         >
           <option value="October 2026">October 2026</option>
           <option value="September 2026">September 2026</option>
@@ -354,7 +373,7 @@ export const Header: React.FC<HeaderProps> = ({
           type="button"
           onClick={() => window.dispatchEvent(new CustomEvent('njia-toggle-jarvis'))}
           title="Summon Mullah AI Voice Copilot (Ctrl/Cmd + J)"
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#081929] hover:bg-[#0d243b] border border-[#0df2c9]/45 hover:border-[#0df2c9] text-[#0df2c9] font-mono font-bold text-xs shadow-[0_0_12px_rgba(13,242,201,0.18)] transition-all cursor-pointer"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#081929] hover:bg-[#0d243b] border border-[#0df2c9]/45 hover:border-[#0df2c9] text-[#0df2c9] font-mono font-bold text-xs shadow-[0_0_12px_rgba(13,242,201,0.18)] transition-all cursor-pointer whitespace-nowrap"
         >
           <span className="w-2 h-2 rounded-full bg-[#0df2c9] animate-pulse shrink-0" />
           <span>Mullah</span>
@@ -363,10 +382,10 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Quick Add modal trigger */}
         <button
           onClick={() => setIsQuickAddOpen(true)}
-          className="hidden md:flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-teal-400 to-[#00d2b4] text-[#071317] font-semibold tracking-tight shadow-md shadow-teal-500/20 hover:brightness-110 active:scale-95 transition-all"
+          className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-teal-400 to-[#00d2b4] text-[#071317] font-semibold tracking-tight shadow-md shadow-teal-500/20 hover:brightness-110 active:scale-95 transition-all whitespace-nowrap cursor-pointer"
         >
-          <Plus className="w-4 h-4 stroke-[2.5]" />
-          <span>Add Transaction</span>
+          <Plus className="w-4 h-4 stroke-[2.5] shrink-0" />
+          <span>Add<span className="hidden 2xl:inline"> Transaction</span></span>
         </button>
 
         {/* Auth / Security Login Button */}

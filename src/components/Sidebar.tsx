@@ -32,6 +32,7 @@ import {
   Zap,
   Cpu,
   Flame,
+  PanelLeftClose,
 } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
@@ -167,17 +168,33 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   const sidebarContent = (
-    <div className="flex flex-col h-full bg-[#0b111c] border-r border-[#152033] text-slate-300 w-64 select-none">
+    <div className="flex flex-col h-full bg-[#0b111c] border-r border-[#152033] text-slate-300 w-64 lg:w-60 xl:w-64 select-none">
       {/* Brand Header */}
-      <div className="p-5 pb-4 flex items-center justify-between border-b border-[#141e30]/80">
+      <div className="px-4 py-3.5 flex items-center justify-between gap-2 border-b border-[#141e30]/80">
         <AppLogo size="md" subtext="Your financial journey" />
         {mobileOpen && (
           <button
             onClick={() => setMobileOpen(false)}
-            className="md:hidden p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/60"
+            className="lg:hidden p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/60 cursor-pointer"
             aria-label="Close menu"
           >
             <X className="w-5 h-5" />
+          </button>
+        )}
+        {!mobileOpen && setCollapsed && (
+          <button
+            type="button"
+            onClick={() => {
+              setCollapsed(true);
+              try {
+                localStorage.setItem('njia_sidebar_collapsed', 'true');
+              } catch {}
+            }}
+            className="hidden lg:inline-flex p-1.5 text-slate-400 hover:text-[#0df2c9] rounded-lg hover:bg-slate-800/60 transition-colors cursor-pointer"
+            title="Collapse sidebar for full-screen workspace"
+            aria-label="Collapse sidebar"
+          >
+            <PanelLeftClose className="w-4 h-4" />
           </button>
         )}
       </div>
@@ -359,23 +376,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <>
-      {/* Desktop collapsible sidebar */}
+      {/* Laptop & Monitor collapsible sidebar */}
       <aside
-        className={`hidden md:block shrink-0 sticky top-0 h-screen z-30 transition-all duration-300 ease-in-out ${
-          collapsed ? 'w-0 -translate-x-full overflow-hidden opacity-0 pointer-events-none' : 'w-64 opacity-100'
+        className={`hidden lg:block shrink-0 sticky top-0 h-dvh z-30 transition-all duration-300 ease-in-out ${
+          collapsed
+            ? 'w-0 -translate-x-full overflow-hidden opacity-0 pointer-events-none'
+            : 'w-60 xl:w-64 opacity-100'
         }`}
       >
         {sidebarContent}
       </aside>
 
-      {/* Mobile Drawer Overlay */}
+      {/* Mobile & Tablet Drawer Overlay */}
       {mobileOpen && (
-        <div className="fixed inset-0 z-50 md:hidden flex">
+        <div className="fixed inset-0 z-50 lg:hidden flex">
           <div
             className="fixed inset-0 bg-black/70 backdrop-blur-sm transition-opacity"
             onClick={() => setMobileOpen(false)}
           />
-          <div className="relative z-10 w-64 max-w-[85vw] h-full shadow-2xl">
+          <div className="relative z-10 w-64 max-w-[85vw] h-dvh shadow-2xl">
             {sidebarContent}
           </div>
         </div>

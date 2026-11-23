@@ -125,7 +125,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onEnterApp, initialMod
   };
 
   return (
-    <div className="min-h-screen bg-[#070b14] text-slate-100 selection:bg-teal-500 selection:text-black">
+    <div className="min-h-dvh bg-[#070b14] text-slate-100 selection:bg-teal-500 selection:text-black overflow-x-clip">
       {/* Background ambient mesh */}
       <div className="fixed inset-0 pointer-events-none fintech-grid-bg opacity-70 z-0" />
       <div className="fixed top-0 left-1/4 w-[600px] h-[400px] bg-teal-500/10 rounded-full blur-[140px] pointer-events-none z-0" />
@@ -226,7 +226,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onEnterApp, initialMod
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-start">
           
           {/* Left Column: Mission, Value Props, and Interactive HUD Previews */}
-          <div className="lg:col-span-7 space-y-6 text-left">
+          <div className="lg:col-span-7 min-w-0 space-y-6 text-left">
             
             {/* Live System Pip */}
             <div className="inline-flex items-center gap-2.5 px-3.5 py-1.5 rounded-full bg-[#0d1829] border border-teal-500/30 text-xs font-medium">
@@ -422,7 +422,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onEnterApp, initialMod
           </div>
 
           {/* Right Column: Direct Sign In / Create Account Card */}
-          <div id="signup-section" className="lg:col-span-5 scroll-mt-20">
+          <div id="signup-section" className="lg:col-span-5 min-w-0 scroll-mt-20">
             <div className="p-6 sm:p-7 rounded-3xl bg-[#0a1120]/95 border border-teal-500/30 backdrop-blur-2xl shadow-2xl shadow-teal-950/40 relative overflow-hidden">
               {/* Top ambient spotlight */}
               <div className="absolute -top-24 -right-24 w-48 h-48 bg-teal-500/20 rounded-full blur-3xl pointer-events-none" />
