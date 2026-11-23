@@ -41,6 +41,7 @@ import { CurrencyConverterModal } from './components/modals/CurrencyConverterMod
 import { BackupRestoreModal } from './components/modals/BackupRestoreModal.tsx';
 import { OfflineIndicator } from './components/pwa/OfflineIndicator.tsx';
 import { GlobalSignalToast } from './components/common/GlobalSignalToast.tsx';
+import { JarvisAssistant } from './components/jarvis/JarvisAssistant.tsx';
 import { AuthModal } from './components/auth/AuthModal.tsx';
 import { useAuth } from './context/AuthContext.tsx';
 import { LandingPage } from './components/landing/LandingPage.tsx';
@@ -159,6 +160,9 @@ const MainContent: React.FC = () => {
 
       {/* Global Signal Hit Notifications */}
       <GlobalSignalToast />
+
+      {/* J.A.R.V.I.S. Tactical AI Copilot */}
+      <JarvisAssistant />
 
       {/* PWA Network Status Alert */}
       <OfflineIndicator />

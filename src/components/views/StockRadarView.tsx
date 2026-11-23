@@ -1721,6 +1721,89 @@ export const StockRadarView: React.FC = () => {
     }
   }, [liveTvQuotes]);
 
+  // J.A.R.V.I.S. focus command bridge: switch asset, timeframe, and optional lower desk
+  useEffect(() => {
+    const applyFocus = (detail: { symbol?: string; timeframe?: string; bottomTab?: string }) => {
+      if (!detail) return;
+      if (detail.symbol) {
+        const cleanQuery = detail.symbol.toUpperCase().replace(/[/_\s-]/g, '');
+        const aliasMap: Record<string, string> = {
+          GOLD: 'XAUUSD',
+          XAU: 'XAUUSD',
+          SILVER: 'XAGUSD',
+          XAG: 'XAGUSD',
+          BITCOIN: 'BTCUSD',
+          BTC: 'BTCUSD',
+          ETHEREUM: 'ETHUSD',
+          ETH: 'ETHUSD',
+          NAS100: 'NAS100',
+          US100: 'NAS100',
+        };
+        const resolvedClean = aliasMap[cleanQuery] || cleanQuery;
+        const found = FEATURED_ASSETS.find((a) => {
+          const tClean = a.ticker.toUpperCase().replace(/[/_\s-]/g, '');
+          return tClean === resolvedClean || a.name.toUpperCase().includes(detail.symbol!.toUpperCase());
+        });
+        if (found) {
+          setSelectedStock(found);
+        }
+      }
+      if (detail.timeframe) {
+        const tfUp = detail.timeframe.toUpperCase().trim();
+        const tfMap: Record<string, Timeframe> = {
+          '1M': '1m',
+          'M1': '1m',
+          '3M': '3m',
+          '5M': '5m',
+          'M5': '5m',
+          '15M': '15m',
+          'M15': '15m',
+          '30M': '30m',
+          'M30': '30m',
+          '45M': '45m',
+          '1H': '1H',
+          'H1': '1H',
+          '2H': '2H',
+          '4H': '4H',
+          'H4': '4H',
+          '1D': '1D',
+          'D1': '1D',
+          '1W': '1W',
+        };
+        const mapped = tfMap[tfUp];
+        if (mapped) {
+          setTimeframe(mapped);
+        }
+      }
+      if (detail.bottomTab) {
+        const allowedTabs = new Set([
+          'paper', 'scorecard', 'orderflow', 'livetv', 'journal', 'risk-calc',
+          'sessions', 'prop-guard', 'correlation', 'broker-arbiter', 'strength',
+          'backtest', 'calendar', 'news', 'sentiment', 'dispatcher', 'intermarket',
+          'adr', 'mtf-matrix', 'cot', 'camarilla',
+        ]);
+        if (allowedTabs.has(detail.bottomTab)) {
+          setBottomTab(detail.bottomTab as typeof bottomTab);
+        }
+      }
+    };
+
+    try {
+      const pendingRaw = sessionStorage.getItem('njia_jarvis_pending_focus');
+      if (pendingRaw) {
+        sessionStorage.removeItem('njia_jarvis_pending_focus');
+        applyFocus(JSON.parse(pendingRaw));
+      }
+    } catch {}
+
+    const handler = (evt: Event) => {
+      const custom = evt as CustomEvent<{ symbol?: string; timeframe?: string; bottomTab?: string }>;
+      applyFocus(custom.detail);
+    };
+    window.addEventListener('njia-jarvis-focus-asset', handler);
+    return () => window.removeEventListener('njia-jarvis-focus-asset', handler);
+  }, []);
+
   // Price Alerts Modal & Notification State
   const [isAlertsModalOpen, setIsAlertsModalOpen] = useState(false);
   const [triggeredAlertBanner, setTriggeredAlertBanner] = useState<PriceAlert | null>(null);

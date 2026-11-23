@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, FunctionDeclaration, Type, ThinkingLevel } from '@google/genai';
 import dotenv from 'dotenv';
 import {
   MAX_RISK_REWARD,
@@ -4230,6 +4230,645 @@ Respond strictly in valid JSON format:
   } catch (err) {
     console.error('Chart screenshot analysis error:', err);
     return res.status(500).json({ error: 'Failed to analyze chart screenshot.' });
+  }
+});
+
+// ==========================================
+// J.A.R.V.I.S. AI COMMAND COPILOT ENDPOINTS
+// ==========================================
+
+export interface JarvisClientAction {
+  type: 'navigate' | 'focusAsset' | 'logTransaction' | 'setCurrency' | 'broadcastSignal';
+  payload: Record<string, unknown>;
+}
+
+const JARVIS_TOOLS: FunctionDeclaration[] = [
+  {
+    name: 'inspect_market_asset',
+    description:
+      'Fetch live market price, TradingView technical ratings (RSI, MACD, EMA20/50/200), weekend market-open status, timeframe-calibrated signal levels (max 1:5.0 R:R), and active red-folder news hazards for any Forex pair, Gold/Silver, Index, Crypto, or Stock.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        symbol: {
+          type: Type.STRING,
+          description: 'Ticker or pair symbol such as XAU/USD, EUR/USD, GBP/USD, USD/JPY, USD/KES, BTC/USD, NAS100, AAPL, or SCOM.',
+        },
+        timeframe: {
+          type: Type.STRING,
+          description: 'Optional chart timeframe: 1M, 5M, 15M, 30M, 1H, 4H, or 1D. Defaults to 15M.',
+        },
+      },
+      required: ['symbol'],
+    },
+  },
+  {
+    name: 'check_economic_calendar',
+    description:
+      'Retrieve upcoming and today’s high-impact (Red) and medium-impact ForexFactory macroeconomic events, optionally filtered by currency code (USD, EUR, GBP, JPY, CAD, AUD, CHF, KES) or pair symbol.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        filter: {
+          type: Type.STRING,
+          description: 'Currency code or pair (e.g. USD, EUR, XAU/USD, ALL). Defaults to ALL.',
+        },
+      },
+    },
+  },
+  {
+    name: 'navigate_to_view',
+    description:
+      'Switch the active screen in NjiaFedha / MullahTracker to a specific terminal view or personal finance tab.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        tab: {
+          type: Type.STRING,
+          description:
+            'Target view ID: dashboard, insights, income, expenses, budget, wallets, bills, savings, emergency, investments, stocks, orderflow, livetv, mt5-ea, forex-suite, bot-studio, gold-scalper, sacco-mmf, debt, mpesa, tax, chama, cashflow, milestones, calculator, or reports.',
+        },
+      },
+      required: ['tab'],
+    },
+  },
+  {
+    name: 'focus_trading_radar',
+    description:
+      'Open the AI Stock & Forex Radar view focused on a specific symbol and timeframe, optionally switching the sub-desk tab (paper, scorecard, orderflow, calendar, correlation, prop-guard, risk-calc, journal, backtest).',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        symbol: {
+          type: Type.STRING,
+          description: 'Pair or asset symbol to load, e.g. XAU/USD, EUR/USD, GBP/USD, USD/JPY, BTC/USD, AAPL, SCOM.',
+        },
+        timeframe: {
+          type: Type.STRING,
+          description: 'Timeframe: 1M, 5M, 15M, 30M, 1H, 4H, or 1D.',
+        },
+        bottomTab: {
+          type: Type.STRING,
+          description: 'Optional lower desk tab: paper, scorecard, orderflow, calendar, correlation, prop-guard, risk-calc, journal, backtest.',
+        },
+      },
+      required: ['symbol'],
+    },
+  },
+  {
+    name: 'log_finance_transaction',
+    description:
+      'Record a personal income or expense entry directly into the user’s NjiaFedha financial ledger.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        transactionType: {
+          type: Type.STRING,
+          description: 'Either "expense" or "income".',
+        },
+        title: {
+          type: Type.STRING,
+          description: 'Clear description or source name, e.g. "Fuel", "Groceries", "Client Retainer".',
+        },
+        amount: {
+          type: Type.NUMBER,
+          description: 'Numeric monetary amount in the user’s active currency.',
+        },
+        category: {
+          type: Type.STRING,
+          description: 'Optional category matching expense or income categories.',
+        },
+        paymentMethod: {
+          type: Type.STRING,
+          description: 'Optional payment method: M-Pesa, Card, Cash, Bank, Bank Transfer, SACCO, or Other.',
+        },
+      },
+      required: ['transactionType', 'title', 'amount'],
+    },
+  },
+  {
+    name: 'switch_currency',
+    description: 'Change the active display currency in NjiaFedha (KES, USD, EUR, GBP).',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        currency: {
+          type: Type.STRING,
+          description: 'Target currency code: KES, USD, EUR, or GBP.',
+        },
+      },
+      required: ['currency'],
+    },
+  },
+  {
+    name: 'broadcast_tracked_signal',
+    description: 'Dispatch the latest tracked signal for a symbol (or the most recent signal) to the user’s configured Telegram/Discord webhook.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        symbol: {
+          type: Type.STRING,
+          description: 'Symbol to broadcast (e.g. XAU/USD, EUR/USD) or "LATEST".',
+        },
+      },
+    },
+  },
+];
+
+function lookupQuoteInMap(quotes: Record<string, TradingViewQuote>, rawSymbol: string): TradingViewQuote | undefined {
+  const upper = rawSymbol.toUpperCase().trim();
+  const clean = upper.replace(/[/_\s-]/g, '');
+  const aliases = [upper, clean];
+  if (clean === 'GOLD' || clean === 'XAU') aliases.push('XAUUSD', 'XAU/USD');
+  if (clean === 'SILVER' || clean === 'XAG') aliases.push('XAGUSD', 'XAG/USD');
+  if (clean === 'NAS100' || clean === 'US100') aliases.push('US_TECH', 'NAS100', 'QQQ');
+  if (clean === 'SPX500' || clean === 'US500') aliases.push('US_500', 'SPY');
+  if (clean === 'US30') aliases.push('WALL_ST');
+  if (clean === 'BITCOIN' || clean === 'BTC') aliases.push('BTCUSD', 'BTC/USD');
+  if (clean === 'ETHEREUM' || clean === 'ETH') aliases.push('ETHUSD', 'ETH/USD');
+
+  for (const key of aliases) {
+    if (quotes[key]) return quotes[key];
+  }
+  return undefined;
+}
+
+async function executeJarvisServerTool(
+  name: string,
+  args: Record<string, unknown>,
+  queuedActions: JarvisClientAction[]
+): Promise<Record<string, unknown>> {
+  if (name === 'inspect_market_asset') {
+    const rawSym = String(args.symbol || 'XAU/USD').toUpperCase().trim();
+    const tfRaw = String(args.timeframe || '15M').toUpperCase().trim();
+    const tfProfile = getTimeframeProfile(tfRaw);
+    const quotes = await fetchLiveTradingViewQuotes();
+    const q = lookupQuoteInMap(quotes, rawSym);
+    const marketOpen = isServerMarketOpen(rawSym);
+    const clean = rawSym.replace(/[/_\s-]/g, '');
+    const isMetal = clean.includes('XAU') || clean.includes('XAG');
+    const isIndex = clean.includes('NAS') || clean.includes('US500') || clean.includes('WALL') || clean.includes('SPX') || clean.includes('GER');
+    const isCrypto = clean.startsWith('BTC') || clean.startsWith('ETH') || clean.startsWith('SOL') || clean.startsWith('XRP');
+    const market = isMetal ? 'METALS' : isIndex ? 'INDICES' : isCrypto ? 'CRYPTO' : 'FOREX';
+
+    const spot = q?.price ?? 0;
+    const computed =
+      spot > 0
+        ? computeTimeframeSignalLevels({
+            symbol: rawSym,
+            spotPrice: spot,
+            timeframe: tfProfile.normalized,
+            quote: q,
+            market,
+          })
+        : null;
+
+    const tfQuote = resolveQuoteForTimeframe(q, tfProfile.normalized);
+    const events = await getLiveForexFactoryEvents();
+    const currencies = rawSym.includes('/')
+      ? rawSym.split('/').map((c) => c.trim())
+      : [clean.slice(0, 3), clean.slice(3, 6) || 'USD'];
+    const nowMs = Date.now();
+    const redHazards = events
+      .filter((e) => {
+        const imp = String(e.impact || '').toLowerCase();
+        const c = String(e.country || '').toUpperCase();
+        const t = new Date(e.date).getTime();
+        return imp === 'high' && currencies.includes(c) && Math.abs(t - nowMs) <= 12 * 3600 * 1000;
+      })
+      .slice(0, 4)
+      .map((e) => ({
+        title: e.title,
+        currency: e.country,
+        timeIso: e.date,
+        forecast: e.forecast || 'N/A',
+        previous: e.previous || 'N/A',
+      }));
+
+    return {
+      symbol: rawSym,
+      timeframe: tfProfile.label,
+      timeframeCategory: tfProfile.category,
+      marketOpen,
+      weekendFrozen: !marketOpen,
+      livePrice: spot || 'Unavailable',
+      changePercent: q?.changePercent ?? null,
+      rsi: tfQuote.rsi ?? q?.rsi ?? null,
+      recommendAll: tfQuote.recommendAll ?? q?.recommendAll ?? null,
+      ema20: tfQuote.ema20 ?? q?.ema20 ?? null,
+      ema50: tfQuote.ema50 ?? q?.ema50 ?? null,
+      signal: computed
+        ? {
+            action: computed.action,
+            direction: computed.direction,
+            setup: computed.setupLabel,
+            entryZone: computed.entryZone,
+            stopLoss: computed.sl,
+            takeProfit1: computed.tp1,
+            takeProfit2: computed.tp2,
+            riskReward: computed.riskReward,
+            confidenceScore: computed.confidenceScore,
+          }
+        : null,
+      upcomingRedNewsHazards: redHazards,
+    };
+  }
+
+  if (name === 'check_economic_calendar') {
+    const filter = String(args.filter || 'ALL').toUpperCase().trim();
+    const events = await getLiveForexFactoryEvents();
+    const cleanFilter = filter.replace(/[/_\s-]/g, '');
+    const tokens =
+      filter === 'ALL' || !filter
+        ? []
+        : filter.includes('/')
+        ? filter.split('/').map((s) => s.trim())
+        : cleanFilter.length === 6
+        ? [cleanFilter.slice(0, 3), cleanFilter.slice(3, 6)]
+        : [cleanFilter];
+
+    const nowMs = Date.now();
+    const matched = events
+      .filter((e) => {
+        const c = String(e.country || '').toUpperCase();
+        if (tokens.length > 0 && !tokens.includes(c)) return false;
+        const t = new Date(e.date).getTime();
+        return t >= nowMs - 4 * 3600 * 1000 && t <= nowMs + 48 * 3600 * 1000;
+      })
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+      .slice(0, 10)
+      .map((e) => ({
+        title: e.title,
+        currency: e.country,
+        impact: e.impact,
+        timeIso: e.date,
+        minutesAway: Math.round((new Date(e.date).getTime() - nowMs) / 60000),
+        forecast: e.forecast || 'N/A',
+        previous: e.previous || 'N/A',
+      }));
+
+    return {
+      filter,
+      serverUtcNow: new Date().toISOString(),
+      eventCount: matched.length,
+      events: matched,
+    };
+  }
+
+  if (name === 'navigate_to_view') {
+    const tab = String(args.tab || 'dashboard').trim();
+    queuedActions.push({ type: 'navigate', payload: { tab } });
+    return { status: 'queued', tab };
+  }
+
+  if (name === 'focus_trading_radar') {
+    const symbol = String(args.symbol || 'XAU/USD').toUpperCase().trim();
+    const timeframe = args.timeframe ? String(args.timeframe).toUpperCase().trim() : '15M';
+    const bottomTab = args.bottomTab ? String(args.bottomTab).trim() : undefined;
+    queuedActions.push({
+      type: 'focusAsset',
+      payload: { symbol, timeframe, bottomTab },
+    });
+    return { status: 'queued', symbol, timeframe, bottomTab: bottomTab || null };
+  }
+
+  if (name === 'log_finance_transaction') {
+    const transactionType = String(args.transactionType || 'expense').toLowerCase() === 'income' ? 'income' : 'expense';
+    const title = String(args.title || 'Recorded via Mullah AI').trim();
+    const amount = Number(args.amount || 0);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return { status: 'rejected', reason: 'Amount must be a positive number.' };
+    }
+    const category = args.category ? String(args.category) : undefined;
+    const paymentMethod = args.paymentMethod ? String(args.paymentMethod) : undefined;
+    queuedActions.push({
+      type: 'logTransaction',
+      payload: { transactionType, title, amount, category, paymentMethod },
+    });
+    return { status: 'queued', transactionType, title, amount, category: category || 'Other' };
+  }
+
+  if (name === 'switch_currency') {
+    const currency = String(args.currency || 'USD').toUpperCase().trim();
+    queuedActions.push({ type: 'setCurrency', payload: { currency } });
+    return { status: 'queued', currency };
+  }
+
+  if (name === 'broadcast_tracked_signal') {
+    const symbol = String(args.symbol || 'LATEST').toUpperCase().trim();
+    queuedActions.push({ type: 'broadcastSignal', payload: { symbol } });
+    return { status: 'queued', symbol };
+  }
+
+  return { error: `Unknown tool: ${name}` };
+}
+
+function isTransientUpstreamError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err || '');
+  return (
+    msg.includes('503') ||
+    msg.includes('UNAVAILABLE') ||
+    msg.includes('high demand') ||
+    msg.includes('429') ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('overloaded') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('ETIMEDOUT')
+  );
+}
+
+function formatReadableGeminiError(err: unknown): { status: number; message: string } {
+  const raw = err instanceof Error ? err.message : String(err || 'Unknown Gemini error');
+  if (raw.includes('403') || raw.includes('PERMISSION_DENIED')) {
+    return {
+      status: 403,
+      message: 'API access denied. Please verify your Gemini API key in Settings > Secrets.',
+    };
+  }
+  if (raw.includes('400') || raw.includes('API_KEY_INVALID')) {
+    return {
+      status: 400,
+      message: 'Invalid Gemini API key configuration. Please verify Settings > Secrets.',
+    };
+  }
+  if (raw.includes('429') || raw.includes('RESOURCE_EXHAUSTED')) {
+    return {
+      status: 429,
+      message: 'Voice capacity rate limit reached temporarily. Please wait a few seconds and tap to speak again.',
+    };
+  }
+  if (raw.includes('503') || raw.includes('UNAVAILABLE') || raw.includes('high demand')) {
+    return {
+      status: 503,
+      message: 'Gemini servers are experiencing a brief demand spike. Tap the core again in a moment.',
+    };
+  }
+  return {
+    status: 500,
+    message: 'Unable to reach Mullah voice servers right now. Please try again shortly.',
+  };
+}
+
+async function generateWithResilientModels<T>(
+  candidates: string[],
+  invoke: (model: string) => Promise<T>
+): Promise<{ result: T; modelUsed: string }> {
+  let lastErr: unknown;
+  for (const model of candidates) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const result = await invoke(model);
+        return { result, modelUsed: model };
+      } catch (err) {
+        lastErr = err;
+        if (!isTransientUpstreamError(err)) {
+          throw err;
+        }
+        const delayMs = 450 * Math.pow(2, attempt) + Math.floor(Math.random() * 180);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+app.post('/api/jarvis/chat', async (req, res) => {
+  const ai = getAiClient();
+  if (!ai) {
+    return res.status(503).json({
+      error: 'Gemini API key is not configured on the server. Please attach a GEMINI_API_KEY in Settings > Secrets.',
+      code: 'GEMINI_KEY_MISSING',
+    });
+  }
+
+  try {
+    const { messages, appSnapshot } = req.body || {};
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages array is required.' });
+    }
+
+    const recentMessages = messages.slice(-14).map((m: { role?: string; text?: string }) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: String(m.text || '').slice(0, 4000) }],
+    }));
+
+    const snapshotJson = JSON.stringify(appSnapshot || {}, null, 2).slice(0, 8000);
+    const utcNow = new Date().toISOString();
+
+    const systemInstruction = `You are Mullah, the voice-first AI Tactical Chief Operating Officer embedded inside NjiaFedha & MullahTracker.
+
+AUDIO-ONLY CONVERSATION RULES:
+- Every response you generate is spoken aloud directly to the user. Write in crisp, natural spoken English — NO markdown symbols, NO asterisks, NO bullet characters, NO raw emojis.
+- Keep responses tight and decisive (2 to 4 clear spoken sentences, under 75 words unless a detailed briefing is explicitly asked for).
+- Address the user calmly and naturally ("Sir" sparingly or direct clear address), like an intelligent British-inspired AI copilot.
+- Never invent prices, news events, or balances. Ground all statements in LIVE CLIENT TELEMETRY SNAPSHOT or call \`inspect_market_asset\` / \`check_economic_calendar\`.
+- Always respect platform rules: TradFi & Forex freeze on weekends (Crypto & Deriv synthetics stay open 24/7), signal R:R never exceeds 1:5.0, and alert immediately on high-impact red-folder news or stacked USD exposure.
+- Proactively call UI tools (\`navigate_to_view\`, \`focus_trading_radar\`, \`log_finance_transaction\`, \`switch_currency\`, \`broadcast_tracked_signal\`) whenever the user wants to open a screen, chart a pair, log income/expenses, change currency, or send an alert.
+
+CURRENT SERVER UTC TIME: ${utcNow}
+LIVE CLIENT TELEMETRY SNAPSHOT:
+${snapshotJson}`;
+
+    const queuedActions: JarvisClientAction[] = [];
+    const toolsUsed: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const conversationContents: any[] = [...recentMessages];
+
+    let finalReply = '';
+    let activeModel = 'gemini-4-hydrogen';
+    const chatModelCandidates = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+
+    for (let step = 0; step < 4; step++) {
+      const { result: response, modelUsed } = await generateWithResilientModels(
+        chatModelCandidates,
+        (model) =>
+          ai.models.generateContent({
+            model,
+            contents: conversationContents,
+            config: {
+              systemInstruction,
+              ...(model === 'gemini-4-hydrogen'
+                ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+                : {}),
+              tools: [{ functionDeclarations: JARVIS_TOOLS }],
+            },
+          })
+      );
+      activeModel = modelUsed;
+
+      const functionCalls = response.functionCalls;
+      const modelContent = response.candidates?.[0]?.content;
+
+      if (functionCalls && functionCalls.length > 0 && modelContent) {
+        conversationContents.push(modelContent);
+        const toolResponseParts = [];
+
+        for (const fc of functionCalls) {
+          const fnName = fc.name || 'unknown';
+          toolsUsed.push(fnName);
+          const result = await executeJarvisServerTool(
+            fnName,
+            (fc.args as Record<string, unknown>) || {},
+            queuedActions
+          );
+          toolResponseParts.push({
+            functionResponse: {
+              id: fc.id,
+              name: fnName,
+              response: result,
+            },
+          });
+        }
+
+        conversationContents.push({
+          role: 'user',
+          parts: toolResponseParts,
+        });
+        continue;
+      }
+
+      finalReply = (response.text || '').trim();
+      break;
+    }
+
+    if (!finalReply) {
+      finalReply =
+        queuedActions.length > 0
+          ? 'Done. All requested terminal updates are now in place.'
+          : 'Systems are online, though I did not catch a clear result for that request. Please repeat.';
+    }
+
+    // Clean any accidental markdown for pure spoken delivery
+    const cleanSpokenReply = finalReply
+      .replace(/[*_`#>]/g, '')
+      .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return res.json({
+      reply: cleanSpokenReply,
+      actions: queuedActions,
+      toolsUsed: Array.from(new Set(toolsUsed)),
+      model: activeModel,
+    });
+  } catch (err: unknown) {
+    console.error('J.A.R.V.I.S. /api/jarvis/chat error:', err);
+    const { status, message } = formatReadableGeminiError(err);
+    return res.status(status).json({
+      error: message,
+      code: 'JARVIS_CHAT_FAILED',
+    });
+  }
+});
+
+app.post('/api/jarvis/speak', async (req, res) => {
+  const ai = getAiClient();
+  if (!ai) {
+    return res.status(503).json({
+      error: 'Gemini API key is not configured for voice synthesis.',
+      code: 'GEMINI_KEY_MISSING',
+    });
+  }
+
+  try {
+    const rawText = String(req.body?.text || '').trim();
+    if (!rawText) {
+      return res.status(400).json({ error: 'Text is required for speech synthesis.' });
+    }
+
+    const spokenText = rawText
+      .replace(/[*_`#>]/g, '')
+      .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 900);
+
+    const { result: response } = await generateWithResilientModels(
+      ['gemini-3.8-flash-lite-tts', 'gemini-3.8-flash-tts'],
+      (model) =>
+        ai.models.generateContent({
+          model,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: spokenText,
+                  speechMetadata: {
+                    style: 'Calm, composed, articulate British AI butler speaking clearly and concisely',
+                  },
+                },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: 'Charon' },
+              },
+            },
+          },
+        })
+    );
+
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!base64Audio) {
+      return res.status(502).json({ error: 'Speech synthesis returned empty audio payload.' });
+    }
+
+    return res.json({
+      audioBase64: base64Audio,
+      mimeType: 'audio/wav',
+    });
+  } catch (err: unknown) {
+    console.error('J.A.R.V.I.S. /api/jarvis/speak error:', err);
+    const { status, message } = formatReadableGeminiError(err);
+    return res.status(status).json({ error: message });
+  }
+});
+
+app.post('/api/jarvis/transcribe', async (req, res) => {
+  const ai = getAiClient();
+  if (!ai) {
+    return res.status(503).json({
+      error: 'Gemini API key is not configured for voice transcription.',
+      code: 'GEMINI_KEY_MISSING',
+    });
+  }
+
+  try {
+    const { audioBase64, mimeType } = req.body || {};
+    if (!audioBase64 || typeof audioBase64 !== 'string') {
+      return res.status(400).json({ error: 'audioBase64 is required.' });
+    }
+
+    const { result: response } = await generateWithResilientModels(
+      ['gemini-3.5-transcribe'],
+      (model) =>
+        ai.models.generateContent({
+          model,
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: typeof mimeType === 'string' && mimeType ? mimeType : 'audio/webm',
+                  data: audioBase64,
+                },
+              },
+              { text: 'Transcribe this voice command accurately as plain text. Return only the spoken words.' },
+            ],
+          },
+        })
+    );
+
+    return res.json({
+      transcript: (response.text || '').trim(),
+    });
+  } catch (err: unknown) {
+    console.error('J.A.R.V.I.S. /api/jarvis/transcribe error:', err);
+    const { status, message } = formatReadableGeminiError(err);
+    return res.status(status).json({ error: message });
   }
 });
 

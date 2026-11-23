@@ -91,7 +91,7 @@ export const GlobalSignalToast: React.FC = () => {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2.5 max-w-sm w-[calc(100vw-2rem)] pointer-events-none">
+    <div className="fixed bottom-24 right-4 z-40 flex flex-col gap-2.5 max-w-sm w-[calc(100vw-2rem)] pointer-events-none">
       {toasts.map((item) => {
         const isTp2 = item.status === 'TP2_HIT';
         const isTp1 = item.status === 'TP1_HIT';

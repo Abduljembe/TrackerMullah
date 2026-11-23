@@ -325,6 +325,17 @@ export const Header: React.FC<HeaderProps> = ({
           <option value="Year 2026">Full Year 2026</option>
         </select>
 
+        {/* Mullah AI Voice Copilot Trigger */}
+        <button
+          type="button"
+          onClick={() => window.dispatchEvent(new CustomEvent('njia-toggle-jarvis'))}
+          title="Summon Mullah AI Voice Copilot (Ctrl/Cmd + J)"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#081929] hover:bg-[#0d243b] border border-[#0df2c9]/45 hover:border-[#0df2c9] text-[#0df2c9] font-mono font-bold text-xs shadow-[0_0_12px_rgba(13,242,201,0.18)] transition-all cursor-pointer"
+        >
+          <span className="w-2 h-2 rounded-full bg-[#0df2c9] animate-pulse shrink-0" />
+          <span>Mullah</span>
+        </button>
+
         {/* Quick Add modal trigger */}
         <button
           onClick={() => setIsQuickAddOpen(true)}
