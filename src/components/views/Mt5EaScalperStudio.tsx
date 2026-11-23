@@ -1531,6 +1531,9 @@ export const Mt5EaScalperStudio: React.FC = () => {
     }
   };
 
+  const handleToggleBotRunningRef = useRef(handleToggleBotRunning);
+  handleToggleBotRunningRef.current = handleToggleBotRunning;
+
   useEffect(() => {
     const onPropGuard = () => {
       const guard = evaluatePropTradeBlock();
@@ -1545,7 +1548,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
       if (!detail) return;
       const target = String(detail.target || 'ALL').toUpperCase();
       if (target !== 'ALL' && target !== 'MT5_EA') return;
-      handleToggleBotRunning(detail.action === 'START');
+      handleToggleBotRunningRef.current(detail.action === 'START');
     };
     window.addEventListener(PROP_GUARD_EVENT, onPropGuard);
     window.addEventListener('njia-bot-control', onBotControl);
@@ -1553,7 +1556,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
       window.removeEventListener(PROP_GUARD_EVENT, onPropGuard);
       window.removeEventListener('njia-bot-control', onBotControl);
     };
-  });
+  }, []);
 
   // Panic Button: Close All Open Positions Immediately
   const handleEmergencyPanicCloseAll = () => {

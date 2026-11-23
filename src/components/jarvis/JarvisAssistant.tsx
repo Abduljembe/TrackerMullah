@@ -14,8 +14,12 @@ import {
   Radio,
   RotateCcw,
   Bell,
+  SlidersHorizontal,
+  ClipboardList,
+  Trash2,
 } from 'lucide-react';
 import { useFinance } from '../../context/FinanceContext.tsx';
+import { useAuth } from '../../context/AuthContext.tsx';
 import {
   BillCategory,
   CurrencyCode,
@@ -36,6 +40,14 @@ import {
   closePaperPositionsByQuery,
   MULLAH_PROACTIVE_ALERT_EVENT,
 } from '../../utils/paperTradeManager.ts';
+import { parseMpesaSms } from '../../utils/mpesaParser.ts';
+import { fetchSharedCalendarEvents, CalendarNewsEvent } from '../../utils/newsGuard.ts';
+import {
+  MullahMemoryProfile,
+  loadLocalMullahMemory,
+  hydrateMullahMemoryFromCloud,
+  persistMullahMemoryToCloud,
+} from '../../utils/mullahMemory.ts';
 
 type JarvisState = 'idle' | 'listening' | 'thinking' | 'speaking';
 
@@ -51,7 +63,8 @@ interface JarvisAction {
     | 'setPriceAlert'
     | 'controlBot'
     | 'controlLiveTv'
-    | 'manageFinance';
+    | 'manageFinance'
+    | 'saveMemory';
   payload: Record<string, unknown>;
 }
 
@@ -224,6 +237,9 @@ function parseSpokenFastCommand(
     }
   | {
       kind: 'financeSummary';
+    }
+  | {
+      kind: 'fullReport';
     }
   | null {
   const clean = rawText.trim();
@@ -467,6 +483,13 @@ function parseSpokenFastCommand(
   if (/^(?:view|check|show|review)\s+(?:my\s+)?finances?$/i.test(lower) || /^(?:my\s+)?net\s*worth$/i.test(lower)) {
     return { kind: 'financeSummary' };
   }
+  if (
+    /\b(full\s+report|morning\s+briefing|daily\s+briefing|app\s+report|status\s+report|everything\s+going\s+on|full\s+briefing|brief\s+me)\b/i.test(
+      lower
+    )
+  ) {
+    return { kind: 'fullReport' };
+  }
 
   return null;
 }
@@ -646,7 +669,10 @@ export const JarvisAssistant: React.FC = () => {
     refreshApp,
     setIsQuickAddOpen,
     setIsCurrencyConverterOpen,
+    isCloudSyncing,
   } = useFinance();
+
+  const { user } = useAuth();
 
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
@@ -664,8 +690,14 @@ export const JarvisAssistant: React.FC = () => {
   const [proactiveAlertsEnabled, setProactiveAlertsEnabled] = useState<boolean>(true);
   // 'auto' uses Gemini Neural Voice with automatic Unlimited Local Speech fallback; 'unlimited' always uses 0-quota local speech
   const [voiceEngineMode, setVoiceEngineMode] = useState<'auto' | 'unlimited'>('auto');
+  const [showVoiceSettings, setShowVoiceSettings] = useState<boolean>(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState<boolean>(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [mullahMemory, setMullahMemory] = useState<MullahMemoryProfile>(() => loadLocalMullahMemory(null));
+  const mullahMemoryRef = useRef<MullahMemoryProfile>(mullahMemory);
+  mullahMemoryRef.current = mullahMemory;
+  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const calendarEventsRef = useRef<CalendarNewsEvent[]>([]);
 
   const initialGreetingRef = useRef<string>(buildWelcomeGreeting());
   const [messages, setMessages] = useState<JarvisMessage[]>([
@@ -809,6 +841,34 @@ export const JarvisAssistant: React.FC = () => {
     };
   }, [stopLiveAudioStream]);
 
+  // Hydrate persistent Mullah memory from local storage + Firestore when user signs in
+  useEffect(() => {
+    const uid = user?.uid || null;
+    setMullahMemory(loadLocalMullahMemory(uid));
+    if (uid && user?.provider === 'firebase') {
+      hydrateMullahMemoryFromCloud(uid)
+        .then((profile) => setMullahMemory(profile))
+        .catch(() => {});
+    }
+  }, [user]);
+
+  const updateMullahMemory = useCallback(
+    (updater: (prev: MullahMemoryProfile) => MullahMemoryProfile) => {
+      setMullahMemory((prev) => {
+        const next = updater(prev);
+        persistMullahMemoryToCloud(next, user?.provider === 'firebase' ? user.uid : user?.uid || null).catch(() => {});
+        return next;
+      });
+    },
+    [user]
+  );
+
+  // Duck Live TV / Bloomberg Radio volume automatically while Mullah listens or speaks
+  useEffect(() => {
+    const shouldDuck = jarvisState === 'listening' || jarvisState === 'speaking';
+    window.dispatchEvent(new CustomEvent('njia-livetv-duck', { detail: { duck: shouldDuck } }));
+  }, [jarvisState]);
+
   // Preload browser speech voices & check backend capability cleanly (prevents stale hangs on Vercel)
   useEffect(() => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -817,12 +877,20 @@ export const JarvisAssistant: React.FC = () => {
           const list = window.speechSynthesis.getVoices();
           if (list && list.length > 0) {
             availableVoicesRef.current = list;
+            setAvailableVoices(list);
           }
         } catch {}
       };
       refreshVoices();
       window.speechSynthesis.addEventListener?.('voiceschanged', refreshVoices);
     }
+
+    // Load upcoming economic calendar events in background for full opening briefing
+    fetchSharedCalendarEvents()
+      .then((evs) => {
+        if (Array.isArray(evs)) calendarEventsRef.current = evs;
+      })
+      .catch(() => {});
 
     // Fast capability probe so deployments without GEMINI_API_KEY skip cloud TTS latency immediately
     const probeController = new AbortController();
@@ -897,9 +965,15 @@ export const JarvisAssistant: React.FC = () => {
       activeUtteranceRef.current = utter;
 
       const voices = availableVoicesRef.current.length > 0 ? availableVoicesRef.current : synth.getVoices();
+      const mem = mullahMemoryRef.current;
+      const explicitVoice =
+        mem.voiceName && mem.voiceName !== 'auto'
+          ? voices.find((v) => v.name === mem.voiceName)
+          : undefined;
       const localEnglish = voices.filter((v) => v.lang.toLowerCase().startsWith('en') && v.localService !== false);
       const anyEnglish = voices.filter((v) => v.lang.toLowerCase().startsWith('en'));
       const preferred =
+        explicitVoice ||
         localEnglish.find((v) => /daniel|samantha|alex|arthur|george|ryan|mark|david|karen|google/i.test(v.name)) ||
         localEnglish.find((v) => v.default) ||
         localEnglish[0] ||
@@ -911,7 +985,7 @@ export const JarvisAssistant: React.FC = () => {
       } else {
         utter.lang = 'en-US';
       }
-      utter.rate = 1.02;
+      utter.rate = typeof mem.voiceRate === 'number' ? mem.voiceRate : 1.02;
       utter.pitch = 0.96;
       utter.volume = 1;
 
@@ -1170,12 +1244,162 @@ export const JarvisAssistant: React.FC = () => {
     [playAudioPayload, speakWithBrowserSynthesis, stopSpeaking]
   );
 
-  // Initial welcome greeting automatically when first opening the website
+  // Full Spoken App Report across Personal Finance, Bills, Budgets, Markets, Positions, Prop Guardian & Red News
+  const buildFullAppBriefing = useCallback(() => {
+    const hour = new Date().getHours();
+    const timeOfDay = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+    const parts: string[] = [`${timeOfDay}. Mullah is online with your full app report.`];
+
+    // 1. Personal Finance
+    const nw = Math.round(netWorth).toLocaleString();
+    const liq = Math.round(totalLiquidBalance).toLocaleString();
+    const inc = Math.round(totalMonthlyIncome).toLocaleString();
+    const exp = Math.round(totalMonthlyExpenses).toLocaleString();
+    parts.push(
+      `Finances: net worth is ${nw} ${currency}, liquid cash balance is ${liq}, monthly income is ${inc}, expenses are ${exp}, and your health score is ${financialHealth.score} out of 100.`
+    );
+
+    // 2. Upcoming Bills & Budgets
+    const unpaidBills = bills.filter((b) => b.status !== 'paid');
+    if (unpaidBills.length > 0) {
+      const nextBill = [...unpaidBills].sort((a, b) => a.dueDate.localeCompare(b.dueDate))[0];
+      const unpaidTotal = Math.round(unpaidBills.reduce((s, b) => s + (Number(b.amount) || 0), 0)).toLocaleString();
+      parts.push(
+        `Bills: ${unpaidBills.length} unpaid bill${unpaidBills.length > 1 ? 's' : ''} totaling ${unpaidTotal} ${currency}; next due is ${nextBill.title} on ${nextBill.dueDate}.`
+      );
+    } else {
+      parts.push('Bills: all recorded bills are up to date.');
+    }
+
+    const overBudget = budgets.filter((b) => {
+      if (!b.monthlyLimit || b.monthlyLimit <= 0) return false;
+      const spent = expenses
+        .filter((e) => e.category.toLowerCase() === b.category.toLowerCase())
+        .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      return spent >= b.monthlyLimit * 0.85;
+    });
+    if (overBudget.length > 0) {
+      parts.push(
+        `Budget alert: ${overBudget
+          .slice(0, 2)
+          .map((b) => b.category)
+          .join(' and ')} ${overBudget.length > 1 ? 'are' : 'is'} near or over limit.`
+      );
+    }
+
+    // 3. Investments, Goals & Debt
+    if (totalInvestments > 0 || totalDebt > 0 || savingsGoals.length > 0) {
+      parts.push(
+        `Wealth: ${Math.round(totalInvestments).toLocaleString()} ${currency} in investments, ${savingsGoals.length} active savings goal${savingsGoals.length === 1 ? '' : 's'}, and ${Math.round(totalDebt).toLocaleString()} ${currency} in debt.`
+      );
+    }
+
+    // 4. Trading Desk, Live Quotes, Paper Positions, Tracked Signals & Prop Guardian
+    const fxOpen = getAssetMarketSession('EUR/USD', 'FOREX').isOpen;
+    const goldQ = lookupTradingViewQuote(liveTvQuotesRef.current, 'XAU/USD');
+    const btcQ = lookupTradingViewQuote(liveTvQuotesRef.current, 'BTC/USD');
+    const openPositions = loadOpenPaperPositions();
+    const activeSignals = loadTrackedSignals().filter((s) => s.status === 'ACTIVE' || s.status === 'TP1_HIT');
+    const propGuard = evaluatePropTradeBlock(loadPropConfig());
+
+    const quoteSnips: string[] = [];
+    if (goldQ?.price) quoteSnips.push(`Gold at ${goldQ.price.toFixed(2)}`);
+    if (btcQ?.price) quoteSnips.push(`Bitcoin at ${Math.round(btcQ.price).toLocaleString()}`);
+
+    const marketLine = fxOpen
+      ? `Markets are live${quoteSnips.length ? ` with ${quoteSnips.join(' and ')}` : ''}.`
+      : `Traditional Forex is closed for the weekend while crypto and synthetics run 24/7${quoteSnips.length ? `, with ${quoteSnips.join(' and ')}` : ''}.`;
+    parts.push(marketLine);
+
+    if (openPositions.length > 0 || activeSignals.length > 0) {
+      const floatPnl = openPositions.reduce((s, p) => s + (Number(p.pnl) || 0), 0);
+      parts.push(
+        `Trading desk: ${openPositions.length} open position${openPositions.length === 1 ? '' : 's'} with ${floatPnl >= 0 ? 'profit' : 'drawdown'} ${Math.round(floatPnl)} USD, and ${activeSignals.length} active tracked signal${activeSignals.length === 1 ? '' : 's'}.`
+      );
+    }
+
+    if (propGuard.blocked) {
+      parts.push(`Risk warning: Prop Firm Guardian lockout is active.`);
+    }
+
+    // 5. Upcoming High-Impact Red News
+    const upcomingHigh = calendarEventsRef.current.find(
+      (e) => e.impact === 'HIGH' && e.isUpcoming
+    );
+    if (upcomingHigh) {
+      parts.push(
+        `Macro calendar: next high-impact news is ${upcomingHigh.currency} ${upcomingHigh.title} at ${upcomingHigh.time}.`
+      );
+    }
+
+    // 6. Remembered notes teaser
+    const memNotes = mullahMemoryRef.current.notes || [];
+    if (memNotes.length > 0) {
+      parts.push(`Saved reminder: ${memNotes[0].text}.`);
+    }
+
+    parts.push('Tap the reactor or ask me anything to begin.');
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+  }, [
+    bills,
+    budgets,
+    currency,
+    expenses,
+    financialHealth.score,
+    netWorth,
+    savingsGoals.length,
+    totalDebt,
+    totalInvestments,
+    totalLiquidBalance,
+    totalMonthlyExpenses,
+    totalMonthlyIncome,
+  ]);
+
+  const buildFullAppBriefingRef = useRef(buildFullAppBriefing);
+  buildFullAppBriefingRef.current = buildFullAppBriefing;
+
+  // Opening automatic Full App Report after initial finance/Firestore hydration settles
   useEffect(() => {
-    if (hasBootGreetedRef.current) return;
-    hasBootGreetedRef.current = true;
-    speakText(initialGreetingRef.current, true);
-  }, [speakText]);
+    if (hasBootGreetedRef.current || isCloudSyncing) return;
+
+    const timer = setTimeout(async () => {
+      if (hasBootGreetedRef.current) return;
+      hasBootGreetedRef.current = true;
+
+      try {
+        const evs = await Promise.race([
+          fetchSharedCalendarEvents(),
+          new Promise<CalendarNewsEvent[]>((resolve) => setTimeout(() => resolve([]), 900)),
+        ]);
+        if (Array.isArray(evs) && evs.length > 0) {
+          calendarEventsRef.current = evs;
+        }
+      } catch {}
+
+      const reportText =
+        mullahMemoryRef.current.briefingMode === 'concise'
+          ? buildWelcomeGreeting()
+          : buildFullAppBriefingRef.current();
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === 'jarvis-boot'
+            ? {
+                ...m,
+                text: reportText,
+                actionsExecuted:
+                  mullahMemoryRef.current.briefingMode === 'concise'
+                    ? m.actionsExecuted
+                    : ['Opening App Report'],
+              }
+            : m
+        )
+      );
+      speakText(reportText, true);
+    }, 650);
+
+    return () => clearTimeout(timer);
+  }, [isCloudSyncing, speakText]);
 
   const buildAppSnapshot = useCallback(() => {
     const openPositions = loadOpenPaperPositions();
@@ -1324,6 +1548,12 @@ export const JarvisAssistant: React.FC = () => {
         activeTrackedSignals: activeSignals,
         liveQuotes: liveQuotesSummary,
       },
+      mullahMemory: {
+        briefingMode: mullahMemory.briefingMode,
+        favoriteChannel: mullahMemory.favoriteChannel,
+        preferredRiskPct: mullahMemory.preferredRiskPct,
+        notes: (mullahMemory.notes || []).slice(0, 10).map((n) => n.text),
+      },
     };
   }, [
     activeTab,
@@ -1335,6 +1565,7 @@ export const JarvisAssistant: React.FC = () => {
     financialHealth.score,
     financialHealth.status,
     incomes,
+    mullahMemory,
     netWorth,
     savingsGoals,
     savingsRate,
@@ -1812,6 +2043,21 @@ export const JarvisAssistant: React.FC = () => {
             setIsCurrencyConverterOpen(true);
             executedLabels.push('Currency Converter Opened');
           }
+        } else if (action.type === 'saveMemory') {
+          const noteText = p.note ? String(p.note).trim() : '';
+          const favCh = p.favoriteChannel ? String(p.favoriteChannel).trim() : '';
+          const riskPct = p.preferredRiskPct !== undefined ? Number(p.preferredRiskPct) : undefined;
+          const bMode = p.briefingMode === 'concise' ? 'concise' : p.briefingMode === 'full' ? 'full' : undefined;
+          updateMullahMemory((prev) => ({
+            ...prev,
+            ...(favCh ? { favoriteChannel: favCh } : {}),
+            ...(riskPct !== undefined && Number.isFinite(riskPct) && riskPct > 0 ? { preferredRiskPct: riskPct } : {}),
+            ...(bMode ? { briefingMode: bMode } : {}),
+            notes: noteText
+              ? [{ id: `note-${Date.now()}`, text: noteText, createdAt: new Date().toISOString() }, ...prev.notes].slice(0, 30)
+              : prev.notes,
+          }));
+          executedLabels.push(noteText ? `Remembered: ${noteText.slice(0, 24)}` : 'Preferences Saved');
         }
       }
 
@@ -1844,6 +2090,7 @@ export const JarvisAssistant: React.FC = () => {
       setIsCurrencyConverterOpen,
       setIsQuickAddOpen,
       transferBetweenWallets,
+      updateMullahMemory,
       wallets,
     ]
   );
@@ -1925,8 +2172,21 @@ export const JarvisAssistant: React.FC = () => {
     setJarvisState('thinking');
 
     try {
+      // Probe ephemeral Live API endpoint on serverless hosts (e.g. Vercel) before attempting WebSocket upgrade
+      const tokenProbe = await fetch('/api/jarvis/live-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appSnapshot: buildAppSnapshot() }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null);
+
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/mullah-live`);
+      const ws = new WebSocket(
+        tokenProbe?.token
+          ? `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(tokenProbe.token)}`
+          : `${protocol}//${window.location.host}/ws/mullah-live`
+      );
       liveWsRef.current = ws;
 
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -2131,6 +2391,9 @@ export const JarvisAssistant: React.FC = () => {
         } else if (localFast.kind === 'financeSummary') {
           localActions = [{ type: 'navigate', payload: { tab: 'dashboard' } }];
           replyText = `Your net worth is ${Math.round(netWorth).toLocaleString()} ${currency}. Monthly income is ${Math.round(totalMonthlyIncome).toLocaleString()}, monthly expenses are ${Math.round(totalMonthlyExpenses).toLocaleString()}, liquid balance is ${Math.round(totalLiquidBalance).toLocaleString()}, and your financial health score is ${financialHealth.score} out of 100.`;
+        } else if (localFast.kind === 'fullReport') {
+          localActions = [{ type: 'navigate', payload: { tab: 'dashboard' } }];
+          replyText = buildFullAppBriefing();
         } else if (localFast.kind === 'scan') {
           const spot = resolveTradingViewPrice(liveTvQuotesRef.current, localFast.symbol, 0);
           const q = lookupTradingViewQuote(liveTvQuotesRef.current, localFast.symbol);
@@ -2169,6 +2432,54 @@ export const JarvisAssistant: React.FC = () => {
           await speakText(replyText, true);
           return;
         }
+      }
+
+      // Smart M-Pesa SMS / confirmation auto-parser (logs amount, merchant & tariff fee locally with 0 API calls)
+      const parsedSms = /\b(confirmed|m-?pesa|ksh)\b/i.test(trimmed) ? parseMpesaSms(trimmed) : null;
+      if (parsedSms) {
+        const isInflow = parsedSms.type === 'received';
+        const mpesaActions: JarvisAction[] = [
+          {
+            type: 'logTransaction',
+            payload: {
+              transactionType: isInflow ? 'income' : 'expense',
+              title: parsedSms.counterparty || 'M-Pesa Transaction',
+              amount: parsedSms.amount,
+              category: parsedSms.suggestedCategory || 'Other',
+              paymentMethod: 'M-Pesa',
+            },
+          },
+        ];
+        if (!isInflow && parsedSms.fee && parsedSms.fee > 0) {
+          mpesaActions.push({
+            type: 'logTransaction',
+            payload: {
+              transactionType: 'expense',
+              title: `M-Pesa Fee (${parsedSms.counterparty})`,
+              amount: parsedSms.fee,
+              category: 'Utilities & Bills',
+              paymentMethod: 'M-Pesa',
+            },
+          });
+        }
+        const actionsExecuted = await executeJarvisActions(mpesaActions);
+        const smsReply = `Parsed M-Pesa confirmation ${parsedSms.refCode}. Logged ${parsedSms.amount} KES ${
+          isInflow ? 'received from' : 'paid to'
+        } ${parsedSms.counterparty}${
+          parsedSms.fee ? ` plus ${parsedSms.fee} KES fee` : ''
+        }.`;
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `jrv-mpesa-${Date.now()}`,
+            role: 'assistant',
+            text: smsReply,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            actionsExecuted: [...actionsExecuted, 'M-Pesa Smart Parser'],
+          },
+        ]);
+        await speakText(smsReply, true);
+        return;
       }
 
       setJarvisState('thinking');
@@ -2475,20 +2786,62 @@ export const JarvisAssistant: React.FC = () => {
     }
   };
 
+  const triggerFullAppBriefing = useCallback(() => {
+    hasUserGestureRef.current = true;
+    const reportText = buildFullAppBriefing();
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `jrv-report-${Date.now()}`,
+        role: 'assistant',
+        text: reportText,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        actionsExecuted: ['Full App Report'],
+      },
+    ]);
+    speakText(reportText, true);
+  }, [buildFullAppBriefing, speakText]);
+
+  // Listen to triggers from MobileBottomNav mic button & Cmd+K Command Palette
+  useEffect(() => {
+    const onActivateMic = () => {
+      hasUserGestureRef.current = true;
+      setIsOpen(true);
+      setTimeout(() => startListeningRef.current(), 60);
+    };
+    const onRunCommand = (evt: Event) => {
+      hasUserGestureRef.current = true;
+      const cmd = (evt as CustomEvent<{ command?: string }>).detail?.command?.trim();
+      if (!cmd) return;
+      setIsOpen(true);
+      setTimeout(() => sendSpokenCommand(cmd), 60);
+    };
+    window.addEventListener('njia-mullah-activate-mic', onActivateMic);
+    window.addEventListener('njia-mullah-run-command', onRunCommand);
+    return () => {
+      window.removeEventListener('njia-mullah-activate-mic', onActivateMic);
+      window.removeEventListener('njia-mullah-run-command', onRunCommand);
+    };
+  }, [sendSpokenCommand]);
+
   const handleResetSession = () => {
     hasUserGestureRef.current = true;
     stopSpeaking();
     stopListening();
-    const greeting = buildWelcomeGreeting();
+    const reportText =
+      mullahMemoryRef.current.briefingMode === 'concise'
+        ? buildWelcomeGreeting()
+        : buildFullAppBriefing();
     setMessages([
       {
         id: `jarvis-reset-${Date.now()}`,
         role: 'assistant',
-        text: greeting,
+        text: reportText,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        actionsExecuted: mullahMemoryRef.current.briefingMode === 'concise' ? undefined : ['Full App Report'],
       },
     ]);
-    speakText(greeting, true);
+    speakText(reportText, true);
   };
 
   const isForexOpen = getAssetMarketSession('EUR/USD', 'FOREX').isOpen;
@@ -2503,7 +2856,7 @@ export const JarvisAssistant: React.FC = () => {
             flushPendingSpeechOnGesture();
           }}
           title="Open Mullah Voice Copilot (Ctrl/Cmd + J)"
-          className="fixed bottom-5 right-5 z-40 group flex items-center gap-2.5 pl-2.5 pr-4 py-2 rounded-full bg-[#07111e]/95 hover:bg-[#0b1a2d] border border-[#0df2c9]/50 hover:border-[#0df2c9] shadow-[0_0_26px_rgba(13,242,201,0.3)] backdrop-blur-md transition-all cursor-pointer active:scale-95"
+          className="fixed bottom-20 md:bottom-5 right-4 md:right-5 z-40 group flex items-center gap-2.5 pl-2.5 pr-4 py-2 rounded-full bg-[#07111e]/95 hover:bg-[#0b1a2d] border border-[#0df2c9]/50 hover:border-[#0df2c9] shadow-[0_0_26px_rgba(13,242,201,0.3)] backdrop-blur-md transition-all cursor-pointer active:scale-95"
         >
           <span className="w-3 h-3 rounded-full bg-[#0df2c9] animate-pulse shadow-[0_0_10px_#0df2c9]" />
           <div className="text-left">
@@ -2619,6 +2972,28 @@ export const JarvisAssistant: React.FC = () => {
 
               <button
                 type="button"
+                onClick={triggerFullAppBriefing}
+                title="Speak full live app report across finances, markets & news"
+                className="p-1.5 rounded-lg bg-[#0b1628] border border-[#1b2e4b] text-[#0df2c9] hover:text-white transition-colors cursor-pointer"
+              >
+                <ClipboardList className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowVoiceSettings((v) => !v)}
+                title="Voice settings, speed & saved memory"
+                className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+                  showVoiceSettings
+                    ? 'bg-[#0df2c9]/20 border-[#0df2c9]/50 text-[#0df2c9]'
+                    : 'bg-[#0b1628] border-[#1b2e4b] text-slate-400 hover:text-white'
+                }`}
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setProactiveAlertsEnabled((v) => !v)}
                 title="Proactive spoken alerts for TP/SL fills and 15m red news"
                 className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
@@ -2633,7 +3008,7 @@ export const JarvisAssistant: React.FC = () => {
               <button
                 type="button"
                 onClick={handleResetSession}
-                title="Replay greeting & reset audio session"
+                title="Replay full briefing & reset audio session"
                 className="p-1.5 rounded-lg bg-[#0b1628] border border-[#1b2e4b] text-slate-400 hover:text-white transition-colors cursor-pointer"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
@@ -2678,6 +3053,94 @@ export const JarvisAssistant: React.FC = () => {
               Trades: <strong className="text-white">{loadOpenPaperPositions().length}</strong>
             </span>
           </div>
+
+          {/* Voice Preferences & Persistent Cloud Memory Drawer */}
+          {showVoiceSettings && (
+            <div className="px-3.5 py-3 bg-[#061120] border-b border-[#142642] space-y-2.5 text-[11px] font-mono">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-400">Voice:</span>
+                <select
+                  value={mullahMemory.voiceName}
+                  onChange={(e) => updateMullahMemory((p) => ({ ...p, voiceName: e.target.value }))}
+                  className="flex-1 max-w-[230px] bg-[#0a1628] border border-[#1a2e4a] rounded-lg px-2 py-1 text-slate-200 text-[10px] focus:outline-none focus:border-[#0df2c9]"
+                >
+                  <option value="auto">Auto Best English Voice</option>
+                  {availableVoices
+                    .filter((v) => v.lang.toLowerCase().startsWith('en'))
+                    .slice(0, 20)
+                    .map((v) => (
+                      <option key={`${v.name}-${v.lang}`} value={v.name}>
+                        {v.name} ({v.lang})
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-400">Speed: {mullahMemory.voiceRate.toFixed(2)}x</span>
+                <div className="flex items-center gap-1">
+                  {[0.9, 1.02, 1.15, 1.25].map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => updateMullahMemory((p) => ({ ...p, voiceRate: r }))}
+                      className={`px-2 py-0.5 rounded border text-[10px] cursor-pointer ${
+                        Math.abs(mullahMemory.voiceRate - r) < 0.03
+                          ? 'bg-[#0df2c9]/20 border-[#0df2c9]/50 text-[#0df2c9]'
+                          : 'bg-[#0a1628] border-[#1a2e4a] text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {r}x
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-400">On Launch:</span>
+                <div className="flex items-center gap-1">
+                  {(['full', 'concise'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => updateMullahMemory((p) => ({ ...p, briefingMode: mode }))}
+                      className={`px-2 py-0.5 rounded border text-[10px] capitalize cursor-pointer ${
+                        mullahMemory.briefingMode === mode
+                          ? 'bg-[#0df2c9]/20 border-[#0df2c9]/50 text-[#0df2c9]'
+                          : 'bg-[#0a1628] border-[#1a2e4a] text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {mode === 'full' ? 'Full Report' : 'Quick Hello'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {mullahMemory.notes.length > 0 && (
+                <div className="pt-1.5 border-t border-[#142642] space-y-1 max-h-24 overflow-y-auto">
+                  <div className="text-[10px] text-[#0df2c9]">Saved Cloud Memory ({mullahMemory.notes.length}):</div>
+                  {mullahMemory.notes.slice(0, 4).map((note) => (
+                    <div key={note.id} className="flex items-center justify-between gap-2 text-[10px] text-slate-300">
+                      <span className="truncate">{note.text}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateMullahMemory((p) => ({
+                            ...p,
+                            notes: p.notes.filter((n) => n.id !== note.id),
+                          }))
+                        }
+                        className="text-slate-500 hover:text-rose-400 shrink-0 cursor-pointer"
+                        title="Remove saved note"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Central Audio-Only Voice Core */}
           <div className="px-4 py-4 bg-gradient-to-b from-[#061222] to-[#050c17] border-b border-[#12223b] flex flex-col items-center text-center gap-2.5">

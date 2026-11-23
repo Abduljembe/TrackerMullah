@@ -268,6 +268,7 @@ export const LiveMarketsTVDesk: React.FC<LiveMarketsTVDeskProps> = ({ onSelectTi
   radioVolumeRef.current = radioVolume;
   const selectedChannelRef = useRef(selectedChannel);
   selectedChannelRef.current = selectedChannel;
+  const preDuckVolumesRef = useRef<{ video: number; radio: number } | null>(null);
 
   // Callback ref for guaranteed React video element attachment
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
@@ -740,9 +741,44 @@ export const LiveMarketsTVDesk: React.FC<LiveMarketsTVDeskProps> = ({ onSelectTi
         applyLiveTvControlCommand(detail);
       }
     };
+
+    const onDuckEvent = (evt: Event) => {
+      const duck = Boolean((evt as CustomEvent).detail?.duck);
+      if (duck) {
+        if (!preDuckVolumesRef.current) {
+          preDuckVolumesRef.current = {
+            video: videoVolumeRef.current,
+            radio: radioVolumeRef.current,
+          };
+        }
+        const duckVol = 0.12;
+        if (videoElementRef.current && !videoElementRef.current.muted) {
+          videoElementRef.current.volume = Math.min(videoElementRef.current.volume, duckVol);
+        }
+        if (audioRef.current && audioRef.current.volume > duckVol) {
+          audioRef.current.volume = duckVol;
+        }
+        postYouTubeCommand('setVolume', [12]);
+      } else if (preDuckVolumesRef.current) {
+        const prev = preDuckVolumesRef.current;
+        preDuckVolumesRef.current = null;
+        if (videoElementRef.current && !isVideoMutedRef.current) {
+          videoElementRef.current.volume = prev.video;
+        }
+        if (audioRef.current) {
+          audioRef.current.volume = prev.radio;
+        }
+        postYouTubeCommand('setVolume', [Math.round(prev.video * 100)]);
+      }
+    };
+
     window.addEventListener('njia-livetv-control', onControlEvent);
-    return () => window.removeEventListener('njia-livetv-control', onControlEvent);
-  }, [applyLiveTvControlCommand]);
+    window.addEventListener('njia-livetv-duck', onDuckEvent);
+    return () => {
+      window.removeEventListener('njia-livetv-control', onControlEvent);
+      window.removeEventListener('njia-livetv-duck', onDuckEvent);
+    };
+  }, [applyLiveTvControlCommand, postYouTubeCommand]);
 
   // Parse custom URL into embed or HLS
   const handleApplyCustomUrl = (e: React.FormEvent) => {

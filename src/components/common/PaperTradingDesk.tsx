@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -166,6 +166,12 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
     return saved ? JSON.parse(saved) : [];
   });
 
+  const balanceRef = useRef<number>(balance);
+  balanceRef.current = balance;
+  const positionsJsonRef = useRef<string>(JSON.stringify(positions));
+  const closedTradesJsonRef = useRef<string>(JSON.stringify(closedTrades));
+  const lastExternalSyncPosJsonRef = useRef<string>(positionsJsonRef.current);
+
   // Order inputs
   const [direction, setDirection] = useState<'LONG' | 'SHORT'>('LONG');
   const [orderLots, setOrderLots] = useState<number>(market === 'FOREX' || market === 'METALS' ? 0.1 : 10);
@@ -186,16 +192,28 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
 
   const [propBlock, setPropBlock] = useState<PropBlockStatus>(() => evaluatePropTradeBlock());
 
-  // Reload from localStorage whenever cloud state hydrates or background watchdog updates positions
+  // Reload from localStorage whenever cloud state hydrates or external watchdog updates positions
   useEffect(() => {
     const syncStorage = () => {
       try {
         const bal = localStorage.getItem('njia_paper_balance');
-        if (bal) setBalance(parseFloat(bal));
+        if (bal !== null) {
+          const parsedBal = parseFloat(bal);
+          if (!Number.isNaN(parsedBal) && parsedBal !== balanceRef.current) {
+            setBalance(parsedBal);
+          }
+        }
         const pos = localStorage.getItem('njia_paper_positions');
-        if (pos) setPositions(JSON.parse(pos));
+        if (pos !== null && pos !== positionsJsonRef.current) {
+          lastExternalSyncPosJsonRef.current = pos;
+          positionsJsonRef.current = pos;
+          setPositions(JSON.parse(pos));
+        }
         const tr = localStorage.getItem('njia_paper_trades');
-        if (tr) setClosedTrades(JSON.parse(tr));
+        if (tr !== null && tr !== closedTradesJsonRef.current) {
+          closedTradesJsonRef.current = tr;
+          setClosedTrades(JSON.parse(tr));
+        }
       } catch {
         // ignore storage parse failure
       }
@@ -211,21 +229,36 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
     };
   }, []);
 
-  // Sync to localStorage, notify Portfolio Guard & schedule Firestore sync
+  // Sync to localStorage, notify Portfolio Guard & schedule Firestore sync (strictly skip no-op & self-echo writes)
   useEffect(() => {
-    localStorage.setItem('njia_paper_balance', balance.toString());
-    scheduleTradingCloudPush();
+    const balStr = balance.toString();
+    if (localStorage.getItem('njia_paper_balance') !== balStr) {
+      localStorage.setItem('njia_paper_balance', balStr);
+      scheduleTradingCloudPush();
+    }
   }, [balance]);
 
   useEffect(() => {
-    localStorage.setItem('njia_paper_positions', JSON.stringify(positions));
-    emitPaperPositionsUpdated();
-    scheduleTradingCloudPush();
+    const serialized = JSON.stringify(positions);
+    positionsJsonRef.current = serialized;
+    const isSelfWrite = serialized === lastExternalSyncPosJsonRef.current;
+    if (localStorage.getItem('njia_paper_positions') !== serialized) {
+      localStorage.setItem('njia_paper_positions', serialized);
+      scheduleTradingCloudPush();
+    }
+    if (!isSelfWrite) {
+      lastExternalSyncPosJsonRef.current = serialized;
+      emitPaperPositionsUpdated();
+    }
   }, [positions]);
 
   useEffect(() => {
-    localStorage.setItem('njia_paper_trades', JSON.stringify(closedTrades));
-    scheduleTradingCloudPush();
+    const serialized = JSON.stringify(closedTrades);
+    closedTradesJsonRef.current = serialized;
+    if (localStorage.getItem('njia_paper_trades') !== serialized) {
+      localStorage.setItem('njia_paper_trades', serialized);
+      scheduleTradingCloudPush();
+    }
   }, [closedTrades]);
 
   // Calculate live Ask and Bid with authentic broker spreads
@@ -241,8 +274,10 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
   // Update open positions matching current active ticker when its market is open
   useEffect(() => {
     if (!assetSession.isOpen) return;
-    setPositions((prevPositions) =>
-      prevPositions.map((pos) => {
+    setPositions((prevPositions) => {
+      if (prevPositions.length === 0) return prevPositions;
+      let didChange = false;
+      const next = prevPositions.map((pos) => {
         if (pos.ticker !== ticker) return pos;
         const isPosGold = pos.ticker.includes('XAU');
         const isPosForex = pos.market === 'FOREX' || pos.market === 'METALS';
@@ -250,17 +285,22 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
         const mult = isPosGold ? 100 * pos.lots : (isPosForex ? 100000 * pos.lots : pos.lots);
         const marketExitPrice = pos.direction === 'LONG' ? liveBid : liveAsk;
         const diff = pos.direction === 'LONG' ? marketExitPrice - pos.entryPrice : pos.entryPrice - marketExitPrice;
-        const pnl = diff * mult;
-        const pnlPercent = (diff / pos.entryPrice) * 100;
+        const pnl = Math.round(diff * mult * 100) / 100;
+        const pnlPercent = Math.round((diff / pos.entryPrice) * 100 * 100) / 100;
 
+        if (pos.currentPrice === marketExitPrice && pos.pnl === pnl && pos.pnlPercent === pnlPercent) {
+          return pos;
+        }
+        didChange = true;
         return {
           ...pos,
           currentPrice: marketExitPrice,
-          pnl: Math.round(pnl * 100) / 100,
-          pnlPercent: Math.round(pnlPercent * 100) / 100,
+          pnl,
+          pnlPercent,
         };
-      })
-    );
+      });
+      return didChange ? next : prevPositions;
+    });
   }, [currentPrice, liveAsk, liveBid, ticker, assetSession.isOpen]);
 
   // Handle open real-style MT5 trade

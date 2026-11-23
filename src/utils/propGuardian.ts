@@ -86,6 +86,20 @@ export function loadPropConfig(): PropGuardConfig {
 export function savePropConfig(cfg: PropGuardConfig): void {
   if (typeof window === 'undefined') return;
   try {
+    const prev = loadPropConfig();
+    const normalizedTilt = cfg.tiltLockExpiresAt && cfg.tiltLockExpiresAt > Date.now() ? cfg.tiltLockExpiresAt : null;
+    const prevTilt = prev.tiltLockExpiresAt && prev.tiltLockExpiresAt > Date.now() ? prev.tiltLockExpiresAt : null;
+    const didChange =
+      prev.accountSize !== cfg.accountSize ||
+      prev.currentEquity !== cfg.currentEquity ||
+      prev.dailyStartingEquity !== cfg.dailyStartingEquity ||
+      prev.maxDailyLossPercent !== cfg.maxDailyLossPercent ||
+      prev.maxTotalLossPercent !== cfg.maxTotalLossPercent ||
+      prev.riskPerTradeLimitPercent !== cfg.riskPerTradeLimitPercent ||
+      prev.consecutiveLosses !== cfg.consecutiveLosses ||
+      prev.hardLockoutEnabled !== cfg.hardLockoutEnabled ||
+      prevTilt !== normalizedTilt;
+
     localStorage.setItem('prop_account_size', String(cfg.accountSize));
     localStorage.setItem('prop_current_equity', String(cfg.currentEquity));
     localStorage.setItem('prop_daily_start_equity', String(cfg.dailyStartingEquity));
@@ -94,12 +108,14 @@ export function savePropConfig(cfg: PropGuardConfig): void {
     localStorage.setItem('prop_risk_per_trade_pct', String(cfg.riskPerTradeLimitPercent));
     localStorage.setItem('prop_consecutive_losses', String(cfg.consecutiveLosses));
     localStorage.setItem('prop_hard_lockout', String(cfg.hardLockoutEnabled));
-    if (cfg.tiltLockExpiresAt && cfg.tiltLockExpiresAt > Date.now()) {
-      localStorage.setItem('prop_tilt_expires', String(cfg.tiltLockExpiresAt));
+    if (normalizedTilt) {
+      localStorage.setItem('prop_tilt_expires', String(normalizedTilt));
     } else {
       localStorage.removeItem('prop_tilt_expires');
     }
-    emitPropGuardUpdated();
+    if (didChange) {
+      emitPropGuardUpdated();
+    }
   } catch {
     // ignore storage limits
   }

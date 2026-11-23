@@ -61,7 +61,10 @@ export const SignalScorecardDesk: React.FC<SignalScorecardDeskProps> = ({
 
   // Sync across components & tabs when signals are added or auto-resolved
   useEffect(() => {
-    const refresh = () => setSignals(loadTrackedSignals());
+    const refresh = () => {
+      const next = loadTrackedSignals();
+      setSignals((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+    };
     window.addEventListener(SCORECARD_EVENT, refresh);
     window.addEventListener('storage', refresh);
     return () => {

@@ -4275,7 +4275,8 @@ export interface JarvisClientAction {
     | 'setPriceAlert'
     | 'controlBot'
     | 'controlLiveTv'
-    | 'manageFinance';
+    | 'manageFinance'
+    | 'saveMemory';
   payload: Record<string, unknown>;
 }
 
@@ -4608,6 +4609,32 @@ const JARVIS_TOOLS: FunctionDeclaration[] = [
         },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: 'save_mullah_memory',
+    description:
+      'Persist a personal note, rule, or user preference across sessions in Firestore (e.g., risk per trade, favorite channel, payday reminder, speech rate).',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        note: {
+          type: Type.STRING,
+          description: 'Concise note or preference to remember across future sessions.',
+        },
+        favoriteChannel: {
+          type: Type.STRING,
+          description: 'Optional preferred Live TV channel ID (bloomberg, sky, cnbc, etc.).',
+        },
+        preferredRiskPct: {
+          type: Type.NUMBER,
+          description: 'Optional preferred risk % per trade.',
+        },
+        briefingMode: {
+          type: Type.STRING,
+          description: 'Optional opening briefing preference: full or concise.',
+        },
+      },
     },
   },
 ];
@@ -4955,6 +4982,23 @@ async function executeJarvisServerTool(
     }
   }
 
+  if (name === 'save_mullah_memory') {
+    const note = args.note ? String(args.note).trim() : '';
+    const favoriteChannel = args.favoriteChannel ? String(args.favoriteChannel).trim() : undefined;
+    const preferredRiskPct = args.preferredRiskPct !== undefined ? Number(args.preferredRiskPct) : undefined;
+    const briefingMode = args.briefingMode === 'concise' ? 'concise' : args.briefingMode === 'full' ? 'full' : undefined;
+    queuedActions.push({
+      type: 'saveMemory',
+      payload: {
+        ...(note ? { note } : {}),
+        ...(favoriteChannel ? { favoriteChannel } : {}),
+        ...(preferredRiskPct !== undefined && Number.isFinite(preferredRiskPct) ? { preferredRiskPct } : {}),
+        ...(briefingMode ? { briefingMode } : {}),
+      },
+    });
+    return { status: 'saved', note: note || null, favoriteChannel: favoriteChannel || null };
+  }
+
   return { error: `Unknown tool: ${name}` };
 }
 
@@ -5056,9 +5100,12 @@ async function lookupGeneralKnowledgeFallback(rawQuestion: string): Promise<stri
     .trim();
   if (!cleanQ) return null;
 
-  // 1. Safe Math Evaluator (e.g., "what is 245 * 18", "calculate 1500 / 12")
+  // 1. Safe Math Evaluator (e.g., "what is 245 * 18", "what is 15 percent of 2000", "calculate 1500 / 12")
   const mathExprRaw = cleanQ
+    .replace(/^(?:give me a quick answer|quick answer|answer this)[:,\s]*/i, '')
     .replace(/^(what is|calculate|compute|how much is|solve)\s+/i, '')
+    .replace(/\bpercent\s+of\b/gi, '% *')
+    .replace(/\bof\b/gi, '*')
     .replace(/\bplus\b/gi, '+')
     .replace(/\bminus\b/gi, '-')
     .replace(/\b(times|multiplied by|x)\b/gi, '*')
@@ -5172,7 +5219,7 @@ async function handleFallbackJarvisChat(
     /\b(live\s*tv|tv|channel|stream|bloomberg|sky\s*news|dw(\s+news)?|france\s*24|yahoo(\s+finance)?|cnbc|euronews|world\s*monitor|radio|volume|mute|unmute|fullscreen|cinema)\b/i.test(
       lower
     ) &&
-    !/\b(bot|ea|paper|trade|position|expense|income|bill|budget|goal|debt|wallet)\b/i.test(lower)
+    !/\b(bot|ea|paper|trade|position|expense|income|bill|budget|goal|debt|wallet|remember|save\s+(?:this\s+)?note|what\s+did\s+you\s+remember|my\s+saved\s+notes)\b/i.test(lower)
   ) {
     const channels: Array<[RegExp, string, string]> = [
       [/\bbloomberg\s+radio\b|\bradio\b/, 'radio', 'Bloomberg 24/7 Radio'],
@@ -5408,6 +5455,32 @@ async function handleFallbackJarvisChat(
   if (/\bclose\s+all(\s+paper)?\s+(positions?|trades?)\b/i.test(lower)) {
     await executeJarvisServerTool('close_paper_positions', { symbol: 'ALL' }, actions);
     return { reply: 'Closing all open paper trading positions now.', actions, toolsUsed: ['close_paper_positions'] };
+  }
+
+  // 4b. Persistent Memory Save / Recall
+  const rememberMatch = clean.match(/^(?:please\s+)?(?:remember(?:\s+that)?|save\s+(?:this\s+)?note(?:\s+that)?)\s+(.+)$/i);
+  if (rememberMatch && rememberMatch[1]) {
+    const note = rememberMatch[1].trim();
+    await executeJarvisServerTool('save_mullah_memory', { note }, actions);
+    return {
+      reply: `Saved to your Mullah cloud memory: ${note}`,
+      actions,
+      toolsUsed: ['save_mullah_memory'],
+    };
+  }
+  if (/\b(what\s+did\s+you\s+remember|my\s+saved\s+notes|what\s+do\s+you\s+remember)\b/i.test(lower)) {
+    const rawNotes = (appSnapshot?.mullahMemory?.notes || []) as Array<string | { text?: string }>;
+    const notes = rawNotes
+      .map((n) => (typeof n === 'string' ? n : n?.text || ''))
+      .filter(Boolean);
+    if (notes.length === 0) {
+      return { reply: 'You have no saved memory notes yet. Say remember followed by anything you want me to store.', actions: [], toolsUsed: [] };
+    }
+    return {
+      reply: `Here is what I have saved for you: ${notes.slice(0, 5).join('. ')}.`,
+      actions: [],
+      toolsUsed: [],
+    };
   }
 
   // 5. General Knowledge & Math Q&A Fallback
@@ -5728,6 +5801,71 @@ app.post('/api/jarvis/transcribe', async (req, res) => {
   }
 });
 
+// Ephemeral Gemini Live API token endpoint (enables low-latency direct browser streaming even on Vercel serverless)
+app.post('/api/jarvis/live-token', async (req, res) => {
+  const ai = getAiClient();
+  if (!ai) {
+    return res.json({
+      fallbackResilient: true,
+      reason: 'GEMINI_KEY_MISSING',
+    });
+  }
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const authTokensApi = (ai as any).authTokens;
+    if (!authTokensApi || typeof authTokensApi.create !== 'function') {
+      return res.json({
+        fallbackResilient: true,
+        reason: 'EPHEMERAL_TOKENS_UNSUPPORTED',
+      });
+    }
+
+    const expireTime = new Date(Date.now() + 25 * 60 * 1000).toISOString();
+    const tokenResp = await authTokensApi.create({
+      config: {
+        uses: 1,
+        expireTime,
+        liveConnectConstraints: {
+          model: 'gemini-3.8-live',
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: 'Charon' },
+              },
+            },
+            systemInstruction: buildMullahSystemPrompt(req.body?.appSnapshot || {}),
+          },
+        },
+      },
+    });
+
+    const tokenName = tokenResp?.name || tokenResp?.token;
+    if (!tokenName) {
+      return res.json({ fallbackResilient: true, reason: 'NO_TOKEN_ISSUED' });
+    }
+
+    return res.json({
+      token: tokenName,
+      model: 'gemini-3.8-live',
+      expiresAt: expireTime,
+    });
+  } catch (err: unknown) {
+    const { message } = formatReadableGeminiError(err);
+    console.info(`Mullah /api/jarvis/live-token notice: ${message}`);
+    return res.json({
+      fallbackResilient: true,
+      reason: message,
+    });
+  }
+});
+
+// Ensure unmatched /api/* routes ALWAYS return JSON (both Node & Vercel serverless)
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: 'API endpoint not found.' });
+});
+
 // Build Mullah Voice System Prompt
 function buildMullahSystemPrompt(appSnapshot: unknown): string {
   const snapshotJson = JSON.stringify(appSnapshot || {}, null, 2).slice(0, 12000);
@@ -5737,12 +5875,13 @@ function buildMullahSystemPrompt(appSnapshot: unknown): string {
 FULL CAPABILITIES & AUDIO-ONLY RULES:
 - Answer ANY question the user asks on ANY topic (general knowledge, world news, technology, science, coding, math, history, health, sports, advice, weather, crypto, forex, stocks, or personal finance). If current real-time world info is needed, use Google Search / \`search_live_web\` freely and give clear, accurate answers.
 - Every response is spoken aloud directly to the user. Write in crisp, natural spoken English — NO markdown symbols, NO asterisks, NO bullet characters, NO raw emojis.
-- Keep responses tight and conversational (2 to 5 clear spoken sentences unless the user asks for a detailed explanation).
-- For market prices, portfolio, or finances, ground numbers in LIVE CLIENT TELEMETRY SNAPSHOT or call \`inspect_market_asset\` / \`check_economic_calendar\`. Never invent market prices or balances.
+- Keep responses tight and conversational (2 to 5 clear spoken sentences unless the user asks for a full report or detailed explanation).
+- For market prices, portfolio, or finances, ground numbers in LIVE CLIENT TELEMETRY SNAPSHOT (including \`mullahMemory\` user preferences and saved notes) or call \`inspect_market_asset\` / \`check_economic_calendar\`. Never invent market prices or balances.
 - Respect trading rules: TradFi & Forex freeze on weekends (Crypto & Deriv synthetics stay open 24/7), signal R:R never exceeds 1:5.0, and warn on high-impact red news or Prop Guardian lockouts.
 - You hold FULL COMMAND AUTHORITY over the app. Proactively call tools whenever requested:
   * Live TV control (\`control_live_tv\`): open Live TV, play/resume, stop/pause, mute/unmute, volume up/down/set %, fullscreen, switch channels (Bloomberg, Sky News, DW, France 24, Yahoo Finance, CNBC, Euronews), World Monitor, or Bloomberg Radio.
   * Personal finance (\`log_finance_transaction\` & \`manage_finance_action\`): add or delete expenses/income, add/pay bills, set budgets, create/fund savings goals, track/pay debts, top up emergency fund, add wallets, transfer between wallets, add investments or chamas, switch currency, refresh app.
+  * Persistent Cloud Memory (\`save_mullah_memory\`): save user notes, trading rules, or preferences across sessions whenever the user asks you to remember something.
   * Markets & bots (\`inspect_market_asset\`, \`focus_trading_radar\`, \`execute_paper_trade\`, \`close_paper_positions\`, \`set_price_alert\`, \`control_trading_bot\`, \`navigate_to_view\`, \`broadcast_tracked_signal\`).
 
 CURRENT SERVER UTC TIME: ${utcNow}
@@ -5922,11 +6061,6 @@ function attachMullahLiveWebSocket(httpServer: ReturnType<typeof createServer>) 
 // Vite Middleware for development
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
-
-  // Ensure unmatched /api/* routes ALWAYS return JSON and NEVER leak HTML <!doctype>
-  app.use('/api', (_req, res) => {
-    res.status(404).json({ error: 'API endpoint not found.' });
-  });
 
   if (!isProd && !process.env.VERCEL) {
     try {

@@ -16,11 +16,13 @@ import {
   ArrowRightLeft,
   X,
   Database,
+  Search,
 } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
 import { AppLogoIcon } from './common/AppLogo.tsx';
 import { PWAInstallButton } from './pwa/PWAInstallButton.tsx';
+import { OPEN_COMMAND_PALETTE_EVENT } from './common/CommandPaletteModal.tsx';
 
 interface HeaderProps {
   onOpenMobileMenu: () => void;
@@ -94,11 +96,19 @@ export const Header: React.FC<HeaderProps> = ({
       case 'investments':
         return 'Investments Portfolio';
       case 'stocks':
-        return 'AI Stock Radar & Live Market Charts';
+        return 'AI Stock & Forex Signals Radar';
+      case 'gold-scalper':
+        return 'Gold Scalper Bot (XAU/USD MT5)';
+      case 'bot-studio':
+        return 'Algorithmic Bot Studio (13 EAs)';
+      case 'mt5-ea':
+        return 'MT5 & Deriv Scalper Studio';
+      case 'forex-suite':
+        return 'Forex Quant & Prop Firm Suite';
       case 'orderflow':
         return 'Institutional Order Flow & Liquidity Radar';
       case 'livetv':
-        return 'Bloomberg Live TV & Real-Time Stocks Ticker';
+        return 'Bloomberg Live TV, World Monitor & Markets';
       case 'debt':
         return 'Debt Payoff Tracker';
       case 'mpesa':
@@ -283,6 +293,20 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Command Palette (Cmd+K) Trigger */}
+        <button
+          type="button"
+          onClick={() => window.dispatchEvent(new CustomEvent(OPEN_COMMAND_PALETTE_EVENT))}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0d1524] hover:bg-[#142036] border border-[#1a273e] hover:border-teal-500/40 text-slate-300 hover:text-white transition-colors cursor-pointer text-xs"
+          title="Quick Search & Command Palette (Cmd/Ctrl + K)"
+        >
+          <Search className="w-3.5 h-3.5 text-[#0df2c9] shrink-0" />
+          <span className="hidden lg:inline font-medium">Search</span>
+          <kbd className="hidden sm:inline px-1.5 py-0.5 rounded bg-[#070e1a] border border-[#1a2c48] text-[9px] font-mono text-slate-400">
+            ⌘K
+          </kbd>
+        </button>
 
         {/* Backup & Restore Data */}
         <button

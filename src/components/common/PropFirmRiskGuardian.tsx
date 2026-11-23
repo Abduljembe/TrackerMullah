@@ -58,15 +58,17 @@ export const PropFirmRiskGuardian: React.FC<PropFirmRiskGuardianProps> = ({
   useEffect(() => {
     const syncFromStore = () => {
       const latest = loadPropConfig();
-      setAccountSize(latest.accountSize);
-      setCurrentEquity(latest.currentEquity);
-      setDailyStartingEquity(latest.dailyStartingEquity);
-      setMaxDailyLossPercent(latest.maxDailyLossPercent);
-      setMaxTotalLossPercent(latest.maxTotalLossPercent);
-      setRiskPerTradeLimitPercent(latest.riskPerTradeLimitPercent);
-      setConsecutiveLosses(latest.consecutiveLosses);
-      setTiltLockExpiresAt(latest.tiltLockExpiresAt);
-      setHardLockoutEnabled(latest.hardLockoutEnabled);
+      setAccountSize((p) => (p === latest.accountSize ? p : latest.accountSize));
+      setCurrentEquity((p) => (p === latest.currentEquity ? p : latest.currentEquity));
+      setDailyStartingEquity((p) => (p === latest.dailyStartingEquity ? p : latest.dailyStartingEquity));
+      setMaxDailyLossPercent((p) => (p === latest.maxDailyLossPercent ? p : latest.maxDailyLossPercent));
+      setMaxTotalLossPercent((p) => (p === latest.maxTotalLossPercent ? p : latest.maxTotalLossPercent));
+      setRiskPerTradeLimitPercent((p) =>
+        p === latest.riskPerTradeLimitPercent ? p : latest.riskPerTradeLimitPercent
+      );
+      setConsecutiveLosses((p) => (p === latest.consecutiveLosses ? p : latest.consecutiveLosses));
+      setTiltLockExpiresAt((p) => (p === latest.tiltLockExpiresAt ? p : latest.tiltLockExpiresAt));
+      setHardLockoutEnabled((p) => (p === latest.hardLockoutEnabled ? p : latest.hardLockoutEnabled));
     };
     window.addEventListener(PROP_GUARD_EVENT, syncFromStore);
     return () => window.removeEventListener(PROP_GUARD_EVENT, syncFromStore);

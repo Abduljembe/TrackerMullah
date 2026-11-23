@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   LayoutDashboard,
   Lightbulb,
@@ -75,6 +75,32 @@ export const Sidebar: React.FC<SidebarProps> = ({
   } = useFinance();
   const { user, setIsAuthModalOpen, setAuthMode, logout } = useAuth();
 
+  const [workspaceMode, setWorkspaceMode] = useState<'all' | 'finance' | 'trading'>(() => {
+    try {
+      const saved = localStorage.getItem('njia_workspace_mode');
+      return saved === 'finance' || saved === 'trading' ? saved : 'all';
+    } catch {
+      return 'all';
+    }
+  });
+
+  const handleWorkspaceChange = (mode: 'all' | 'finance' | 'trading') => {
+    setWorkspaceMode(mode);
+    try {
+      localStorage.setItem('njia_workspace_mode', mode);
+    } catch {}
+  };
+
+  const PRO_TRADING_TABS = new Set<TabType>([
+    'gold-scalper',
+    'stocks',
+    'bot-studio',
+    'mt5-ea',
+    'forex-suite',
+    'orderflow',
+    'livetv',
+  ]);
+
   const navGroups: NavGroup[] = [
     {
       group: 'OVERVIEW',
@@ -85,45 +111,55 @@ export const Sidebar: React.FC<SidebarProps> = ({
       ],
     },
     {
-      group: 'MANAGE',
+      group: 'PERSONAL FINANCE',
       items: [
-        { id: 'gold-scalper', label: 'Gold Scalper Bot (MT5)', icon: Flame },
         { id: 'income', label: 'Income', icon: Wallet },
         { id: 'expenses', label: 'Expenses', icon: FileText },
         { id: 'wallets', label: 'Accounts & Wallets', icon: Coins },
         { id: 'bills', label: 'Upcoming Bills & Subs', icon: CalendarClock },
         { id: 'budget', label: 'Budget', icon: SlidersHorizontal },
         { id: 'mpesa', label: 'M-Pesa SMS Parser', icon: Smartphone },
-      ],
-    },
-    {
-      group: 'GOALS & WEALTH',
-      items: [
         { id: 'savings', label: 'Savings Goals', icon: Target },
         { id: 'emergency', label: 'Emergency Fund', icon: Shield },
         { id: 'investments', label: 'Investments', icon: TrendingUp },
-        { id: 'stocks', label: 'Stocks & Forex Signals', icon: BarChart2 },
-        { id: 'bot-studio', label: 'Algorithmic Bot Studio (13 EAs)', icon: Cpu },
-        { id: 'mt5-ea', label: 'MT5 & Deriv Scalper Studio', icon: Bot },
-        { id: 'forex-suite', label: 'Forex Quant & Prop Firm Suite', icon: Zap },
-        { id: 'orderflow', label: 'Order Flow & Liquidity', icon: Layers },
-        { id: 'livetv', label: 'World Monitor & Bloomberg TV', icon: Tv },
         { id: 'debt', label: 'Debt Tracker', icon: CreditCard },
         { id: 'chama', label: 'Chama & Groups', icon: Users },
         { id: 'milestones', label: 'Milestones & Badges', icon: Award },
       ],
     },
     {
+      group: 'PRO TRADING & LIVE TV',
+      items: [
+        { id: 'stocks', label: 'Stocks & Forex Signals', icon: BarChart2 },
+        { id: 'gold-scalper', label: 'Gold Scalper Bot (MT5)', icon: Flame },
+        { id: 'bot-studio', label: 'Algorithmic Bot Studio (13 EAs)', icon: Cpu },
+        { id: 'mt5-ea', label: 'MT5 & Deriv Scalper Studio', icon: Bot },
+        { id: 'forex-suite', label: 'Forex Quant & Prop Firm Suite', icon: Zap },
+        { id: 'orderflow', label: 'Order Flow & Liquidity', icon: Layers },
+        { id: 'livetv', label: 'Live TV & World Monitor', icon: Tv },
+      ],
+    },
+    {
       group: 'TOOLS & REPORTS',
       items: [
         { id: 'sacco-mmf', label: 'SACCO & MMF Yields', icon: TrendingUp },
-        { id: 'cashflow', label: 'Cash Flow Forecast', icon: CalendarDays },
         { id: 'tax', label: 'KRA Tax & PAYE', icon: Calculator },
         { id: 'calculator', label: 'FF Calculator', icon: Compass },
         { id: 'reports', label: 'Reports', icon: BarChart2 },
       ],
     },
   ];
+
+  const visibleNavGroups = navGroups
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => {
+        if (workspaceMode === 'all') return true;
+        if (workspaceMode === 'finance') return !PRO_TRADING_TABS.has(item.id);
+        return PRO_TRADING_TABS.has(item.id) || item.id === 'dashboard' || item.id === 'reports';
+      }),
+    }))
+    .filter((group) => group.items.length > 0);
 
   const handleSelectTab = (tab: TabType) => {
     setActiveTab(tab);
@@ -146,9 +182,35 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
+      {/* Workspace Mode Switcher */}
+      <div className="px-3 pt-3">
+        <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-[#070d16] border border-[#142033] text-[10px] font-mono font-bold">
+          {(
+            [
+              { id: 'all', label: 'All' },
+              { id: 'finance', label: 'Finance' },
+              { id: 'trading', label: 'Pro Desk' },
+            ] as const
+          ).map((mode) => (
+            <button
+              key={mode.id}
+              type="button"
+              onClick={() => handleWorkspaceChange(mode.id)}
+              className={`py-1 rounded-lg transition-colors cursor-pointer ${
+                workspaceMode === mode.id
+                  ? 'bg-[#11263c] text-[#0df2c9] border border-teal-500/35'
+                  : 'text-slate-400 hover:text-slate-200 border border-transparent'
+              }`}
+            >
+              {mode.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Nav List */}
       <div className="flex-1 overflow-y-auto px-3 py-4 space-y-6">
-        {navGroups.map((group) => (
+        {visibleNavGroups.map((group) => (
           <div key={group.group}>
             <div className="px-3 mb-2 text-[11px] font-bold uppercase tracking-wider text-slate-400">
               {group.group}
