@@ -16,7 +16,15 @@ import {
   Bell,
 } from 'lucide-react';
 import { useFinance } from '../../context/FinanceContext.tsx';
-import { CurrencyCode, ExpenseItem, IncomeItem, TabType } from '../../types/finance.ts';
+import {
+  BillCategory,
+  CurrencyCode,
+  ExpenseItem,
+  IncomeItem,
+  SavingsGoal,
+  TabType,
+  WalletType,
+} from '../../types/finance.ts';
 import { useTradingViewQuotes, lookupTradingViewQuote, resolveTradingViewPrice } from '../../utils/tradingViewSync.ts';
 import { loadOpenPaperPositions, evaluatePortfolioExposure } from '../../utils/portfolioGuard.ts';
 import { loadTrackedSignals, dispatchSignalWebhook } from '../../utils/signalScorecard.ts';
@@ -41,7 +49,9 @@ interface JarvisAction {
     | 'executePaperTrade'
     | 'closePaperPositions'
     | 'setPriceAlert'
-    | 'controlBot';
+    | 'controlBot'
+    | 'controlLiveTv'
+    | 'manageFinance';
   payload: Record<string, unknown>;
 }
 
@@ -172,6 +182,292 @@ function base64ToInt16Array(base64: string): Int16Array {
   return new Int16Array(bytes.buffer);
 }
 
+function parseSpokenFastCommand(
+  rawText: string
+):
+  | {
+      kind: 'liveTv';
+      actions: JarvisAction[];
+      spokenReply: string;
+    }
+  | {
+      kind: 'navigate';
+      tab: TabType;
+      label: string;
+    }
+  | {
+      kind: 'transaction';
+      txType: 'expense' | 'income';
+      amount: number;
+      title: string;
+    }
+  | {
+      kind: 'scan';
+      symbol: string;
+      timeframe: string;
+    }
+  | {
+      kind: 'bot';
+      action: 'START' | 'STOP';
+      target: string;
+    }
+  | {
+      kind: 'closeTrades';
+      symbol: string;
+    }
+  | {
+      kind: 'currency';
+      currency: CurrencyCode;
+    }
+  | {
+      kind: 'financeSummary';
+    }
+  | null {
+  const clean = rawText.trim();
+  const lower = clean.toLowerCase().replace(/[?!.,]+$/g, '').trim();
+  if (!lower) return null;
+
+  // Never intercept analytical / open-ended questions — let Gemini AI answer those
+  if (
+    /^(what|why|how|who|when|where|which|explain|tell me about|compare|analyze|should i|can you explain|is it|are there)\b/i.test(
+      lower
+    )
+  ) {
+    return null;
+  }
+
+  // 1. Live TV Direct Voice Controls (0 API calls)
+  const channelAliases: Array<[RegExp, string, string]> = [
+    [/\bbloomberg\s+radio\b|\bradio\b/, 'radio', 'Bloomberg 24/7 Radio'],
+    [/\bworld\s*monitor\b/, 'worldmonitor', 'World Monitor Terminal'],
+    [/\bbloomberg\b/, 'bloomberg', 'Bloomberg TV'],
+    [/\bsky(\s+news)?\b/, 'sky', 'Sky News'],
+    [/\bdw(\s+news)?\b|\bdeutsche\s+welle\b/, 'dw', 'DW News'],
+    [/\bfrance\s*24\b/, 'france24', 'France 24'],
+    [/\byahoo(\s+finance)?\b/, 'yahoo', 'Yahoo Finance'],
+    [/\bcnbc\b/, 'cnbc', 'CNBC TV18'],
+    [/\beuronews\b/, 'euronews', 'Euronews Business'],
+  ];
+
+  const mentionsTvContext =
+    /\b(live\s*tv|tv|channel|stream|broadcast|bloomberg|sky\s*news|france\s*24|euronews|cnbc|dw\s*news|world\s*monitor|radio|volume|mute|unmute|fullscreen|cinema)\b/i.test(
+      lower
+    );
+
+  // Guard against unrelated sentences that happen to say "play" or "stop" with other finance/app objects
+  if (
+    mentionsTvContext ||
+    /^(pause|stop|resume|play|mute|unmute|louder|quieter|volume\s+up|volume\s+down|turn\s+(up|down)(\s+the)?\s+(volume|sound)|next\s+channel)\b/i.test(
+      lower
+    )
+  ) {
+    // Only fast-path Live TV if it doesn't mention non-TV domains like "bot", "trade", "expense", "savings", "bill"
+    if (!/\b(bot|ea|paper|trade|position|expense|income|bill|budget|goal|debt|wallet)\b/i.test(lower)) {
+      const actions: JarvisAction[] = [];
+      const summaries: string[] = [];
+
+      for (const [re, chId, chLabel] of channelAliases) {
+        if (re.test(lower) && /\b(switch|change|open|watch|play|put|show|turn|live\s*tv|tv|channel)\b/i.test(lower)) {
+          actions.push({ type: 'controlLiveTv', payload: { action: 'SWITCH_CHANNEL', channel: chId } });
+          summaries.push(`switched to ${chLabel}`);
+          break;
+        }
+      }
+
+      const volMatch = lower.match(/\bvolume\s*(?:to|at)?\s*(\d{1,3})\s*%?/i);
+      if (volMatch) {
+        const vol = Math.min(100, Math.max(0, Number(volMatch[1])));
+        actions.push({ type: 'controlLiveTv', payload: { action: 'SET_VOLUME', volume: vol } });
+        summaries.push(`volume set to ${vol} percent`);
+      } else if (/\b(volume\s+up|increase\s+(?:the\s+)?volume|turn\s+(?:up\s+(?:the\s+)?volume|(?:the\s+)?volume\s+up)|raise\s+(?:the\s+)?volume|louder)\b/i.test(lower)) {
+        actions.push({ type: 'controlLiveTv', payload: { action: 'VOLUME_UP' } });
+        summaries.push('increased volume');
+      } else if (/\b(volume\s+down|decrease\s+(?:the\s+)?volume|turn\s+(?:down\s+(?:the\s+)?volume|(?:the\s+)?volume\s+down)|lower\s+(?:the\s+)?volume|quieter)\b/i.test(lower)) {
+        actions.push({ type: 'controlLiveTv', payload: { action: 'VOLUME_DOWN' } });
+        summaries.push('lowered volume');
+      }
+
+      if (/\bunmute\b/i.test(lower)) {
+        actions.push({ type: 'controlLiveTv', payload: { action: 'UNMUTE' } });
+        summaries.push('unmuted audio');
+      } else if (/\bmute\b/i.test(lower)) {
+        actions.push({ type: 'controlLiveTv', payload: { action: 'MUTE' } });
+        summaries.push('muted audio');
+      }
+
+      if (/\b(exit|close|leave)\s+(fullscreen|cinema)\b/i.test(lower)) {
+        actions.push({ type: 'controlLiveTv', payload: { action: 'EXIT_FULLSCREEN' } });
+        summaries.push('exited fullscreen');
+      } else if (/\b(fullscreen|cinema\s*mode)\b/i.test(lower)) {
+        actions.push({ type: 'controlLiveTv', payload: { action: 'FULLSCREEN' } });
+        summaries.push('entered fullscreen');
+      }
+
+      if (/\bnext\s+channel\b/i.test(lower)) {
+        actions.push({ type: 'controlLiveTv', payload: { action: 'NEXT_CHANNEL' } });
+        summaries.push('switched to next channel');
+      } else if (/\b(pause|stop)\b/i.test(lower)) {
+        actions.push({ type: 'controlLiveTv', payload: { action: 'PAUSE' } });
+        summaries.push('paused Live TV');
+      } else if (/\b(resume|play)\b/i.test(lower) && actions.length === 0) {
+        actions.push({ type: 'controlLiveTv', payload: { action: 'RESUME' } });
+        summaries.push('resumed Live TV');
+      } else if (/^(open|show|go\s+to|view)\s+(live\s*)?tv$/i.test(lower) && actions.length === 0) {
+        actions.push({ type: 'controlLiveTv', payload: { action: 'OPEN_TV' } });
+        summaries.push('opened Live TV');
+      }
+
+      if (actions.length > 0) {
+        return {
+          kind: 'liveTv',
+          actions,
+          spokenReply: `Done. Live TV ${summaries.join(' and ')}.`,
+        };
+      }
+    }
+  }
+
+  // 2. Direct Navigation Fast-Path
+  const navMatch = lower.match(/^(?:open|show|go\s+to|view|switch\s+to)\s+(?:my\s+)?(.+)$/i);
+  if (navMatch) {
+    const dest = navMatch[1].trim();
+    const tabAliases: Array<[RegExp, TabType, string]> = [
+      [/^dashboard|home|overview$/, 'dashboard', 'Dashboard'],
+      [/^expenses?|spending$/, 'expenses', 'Expenses'],
+      [/^incomes?|earnings$/, 'income', 'Income'],
+      [/^bills?$/, 'bills', 'Bills'],
+      [/^wallets?|accounts?$/, 'wallets', 'Wallets'],
+      [/^budgets?$/, 'budget', 'Budgets'],
+      [/^savings?(\s+goals?)?|goals?$/, 'savings', 'Savings Goals'],
+      [/^emergency(\s+fund)?$/, 'emergency', 'Emergency Fund'],
+      [/^investments?|portfolio$/, 'investments', 'Investments'],
+      [/^debts?|loans?$/, 'debt', 'Debt Tracker'],
+      [/^chamas?$/, 'chama', 'Chamas'],
+      [/^m-?pesa(\s+auditor)?$/, 'mpesa', 'M-Pesa Auditor'],
+      [/^tax(\s+planner)?$/, 'tax', 'Tax'],
+      [/^reports?|statements?$/, 'reports', 'Reports'],
+      [/^cashflow$/, 'cashflow', 'Cashflow'],
+      [/^insights?|analytics$/, 'insights', 'Insights'],
+      [/^stocks?|markets?|radar|charts?$/, 'stocks', 'Markets Radar'],
+      [/^order\s*flow$/, 'orderflow', 'Order Flow'],
+      [/^live\s*tv|tv$/, 'livetv', 'Live TV'],
+      [/^bot\s*studio|bots?$/, 'bot-studio', 'Bot Studio'],
+      [/^mt5(\s*ea)?|ea$/, 'mt5-ea', 'MT5 EA Studio'],
+      [/^gold\s*scalper$/, 'gold-scalper', 'Gold Scalper'],
+      [/^forex(\s*suite)?$/, 'forex-suite', 'Forex Suite'],
+    ];
+    for (const [re, tab, label] of tabAliases) {
+      if (re.test(dest)) {
+        return { kind: 'navigate', tab, label };
+      }
+    }
+  }
+
+  // 3. Direct Market Scan Fast-Path (e.g., "scan gold 15m", "scan eur usd 1h")
+  const scanMatch = lower.match(
+    /^scan\s+([a-z0-9/ ]+?)(?:\s+(?:on\s+)?(1m|5m|15m|30m|1h|4h|1d|1\s*minute|5\s*minutes?|15\s*minutes?|30\s*minutes?|1\s*hour|4\s*hours?|daily))?$/i
+  );
+  if (scanMatch) {
+    const rawAsset = scanMatch[1].trim();
+    const rawTf = (scanMatch[2] || '15M').toUpperCase().replace(/\s+/g, '');
+    const tfMap: Record<string, string> = {
+      '1MINUTE': '1M',
+      '5MINUTE': '5M',
+      '5MINUTES': '5M',
+      '15MINUTE': '15M',
+      '15MINUTES': '15M',
+      '30MINUTE': '30M',
+      '30MINUTES': '30M',
+      '1HOUR': '1H',
+      '4HOUR': '4H',
+      '4HOURS': '4H',
+      DAILY: '1D',
+    };
+    const tf = tfMap[rawTf] || rawTf;
+    const symNorm = rawAsset.toUpperCase().replace(/\s+/g, '');
+    const symMap: Record<string, string> = {
+      GOLD: 'XAU/USD',
+      XAUUSD: 'XAU/USD',
+      SILVER: 'XAG/USD',
+      XAGUSD: 'XAG/USD',
+      BITCOIN: 'BTC/USD',
+      BTC: 'BTC/USD',
+      BTCUSD: 'BTC/USD',
+      ETHEREUM: 'ETH/USD',
+      ETH: 'ETH/USD',
+      ETHUSD: 'ETH/USD',
+      EURUSD: 'EUR/USD',
+      GBPUSD: 'GBP/USD',
+      USDJPY: 'USD/JPY',
+      USDKES: 'USD/KES',
+      NAS100: 'NAS100',
+      NASDAQ: 'NAS100',
+      US30: 'US30',
+      SP500: 'US500',
+    };
+    const symbol = symMap[symNorm] || (symNorm.length === 6 ? `${symNorm.slice(0, 3)}/${symNorm.slice(3)}` : symNorm);
+    return { kind: 'scan', symbol, timeframe: tf };
+  }
+
+  // 4. Direct Single Expense / Income Logging Fast-Path
+  if (!/\band\b/i.test(lower)) {
+    const expMatch =
+      lower.match(
+        /^(?:add|log|record)\s+(?:an?\s+)?expense\s+(?:of\s+)?(?:[$€£]|kes|usd|eur|gbp)?\s*(\d+(?:\.\d+)?)\s*(?:dollars?|usd|kes|shillings?|euros?|eur|pounds?|gbp)?\s*(?:for|on)?\s+(.+)$/i
+      ) ||
+      lower.match(
+        /^(?:i\s+)?spent\s+(?:[$€£]|kes|usd)?\s*(\d+(?:\.\d+)?)\s*(?:dollars?|usd|kes|shillings?)?\s*(?:on|for)\s+(.+)$/i
+      );
+    if (expMatch) {
+      const amount = Number(expMatch[1]);
+      const title = expMatch[2].trim();
+      if (amount > 0 && title.length >= 2) {
+        return {
+          kind: 'transaction',
+          txType: 'expense',
+          amount,
+          title: title.charAt(0).toUpperCase() + title.slice(1),
+        };
+      }
+    }
+
+    const incMatch = lower.match(
+      /^(?:add|log|record)\s+(?:an?\s+)?income\s+(?:of\s+)?(?:[$€£]|kes|usd|eur|gbp)?\s*(\d+(?:\.\d+)?)\s*(?:dollars?|usd|kes|shillings?|euros?|eur|pounds?|gbp)?\s*(?:from|for)?\s+(.+)$/i
+    );
+    if (incMatch) {
+      const amount = Number(incMatch[1]);
+      const title = incMatch[2].trim();
+      if (amount > 0 && title.length >= 2) {
+        return {
+          kind: 'transaction',
+          txType: 'income',
+          amount,
+          title: title.charAt(0).toUpperCase() + title.slice(1),
+        };
+      }
+    }
+  }
+
+  // 5. Bot & Position & Currency Fast-Path
+  if (/^stop\s+all\s+bots?$/i.test(lower)) return { kind: 'bot', action: 'STOP', target: 'ALL' };
+  if (/^start\s+bot\s*studio$/i.test(lower)) return { kind: 'bot', action: 'START', target: 'BOT_STUDIO' };
+  if (/^stop\s+bot\s*studio$/i.test(lower)) return { kind: 'bot', action: 'STOP', target: 'BOT_STUDIO' };
+  if (/^start\s+mt5(\s*ea)?$/i.test(lower)) return { kind: 'bot', action: 'START', target: 'MT5_EA' };
+  if (/^stop\s+mt5(\s*ea)?$/i.test(lower)) return { kind: 'bot', action: 'STOP', target: 'MT5_EA' };
+  if (/^close\s+all(\s+paper)?\s+(positions?|trades?)$/i.test(lower)) {
+    return { kind: 'closeTrades', symbol: 'ALL' };
+  }
+  const curMatch = lower.match(/^(?:switch|set|change)\s+currency\s+(?:to\s+)?(kes|usd|eur|gbp)$/i);
+  if (curMatch) {
+    return { kind: 'currency', currency: curMatch[1].toUpperCase() as CurrencyCode };
+  }
+  if (/^(?:view|check|show|review)\s+(?:my\s+)?finances?$/i.test(lower) || /^(?:my\s+)?net\s*worth$/i.test(lower)) {
+    return { kind: 'financeSummary' };
+  }
+
+  return null;
+}
+
 function buildWelcomeGreeting(): string {
   const hour = new Date().getHours();
   const timeOfDay = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
@@ -183,7 +479,7 @@ function buildWelcomeGreeting(): string {
     : 'Traditional Forex markets are closed for the weekend, while crypto and synthetics remain active.';
   const posNote = openCount > 0 ? `You have ${openCount} open position${openCount > 1 ? 's' : ''} monitored.` : '';
   const propNote = propGuard.blocked ? 'Warning: Prop Firm Risk Guardian lockout is currently active.' : '';
-  return `${timeOfDay}. Mullah is online. ${marketNote} ${posNote} ${propNote} Tell me what you want to do — scan Gold 15M, place a paper trade, control your bots, or review your finances.`
+  return `${timeOfDay}. Mullah is online with full command. ${marketNote} ${posNote} ${propNote} Ask me any question, add an expense, control Live TV, scan markets, or manage your bots.`
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -321,9 +617,36 @@ export const JarvisAssistant: React.FC = () => {
     totalEmergencyFund,
     totalDebt,
     financialHealth,
+    incomes,
+    expenses,
+    budgets,
+    savingsGoals,
+    debts,
+    bills,
+    wallets,
     addExpense,
+    deleteExpense,
     addIncome,
+    deleteIncome,
+    setCategoryBudget,
+    addSavingsGoal,
+    depositToGoal,
+    addInvestment,
+    addDebt,
+    recordDebtPayment,
+    depositToEmergencyFund,
+    addChama,
+    addBill,
+    markBillPaid,
+    addWallet,
+    transferBetweenWallets,
+    refreshApp,
+    setIsQuickAddOpen,
+    setIsCurrencyConverterOpen,
   } = useFinance();
+
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
 
   const liveTvQuotes = useTradingViewQuotes(5000);
   const liveTvQuotesRef = useRef(liveTvQuotes);
@@ -336,6 +659,8 @@ export const JarvisAssistant: React.FC = () => {
   const [liveStreamMode, setLiveStreamMode] = useState<boolean>(false);
   const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(false);
   const [proactiveAlertsEnabled, setProactiveAlertsEnabled] = useState<boolean>(true);
+  // 'auto' uses Gemini Neural Voice with automatic Unlimited Local Speech fallback; 'unlimited' always uses 0-quota local speech
+  const [voiceEngineMode, setVoiceEngineMode] = useState<'auto' | 'unlimited'>('auto');
   const [autoplayBlocked, setAutoplayBlocked] = useState<boolean>(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
 
@@ -352,6 +677,18 @@ export const JarvisAssistant: React.FC = () => {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
   const pendingWelcomeAudioRef = useRef<{ base64: string; mimeType: string } | null>(null);
+  const clientTtsCacheRef = useRef<Map<string, { base64: string; mimeType: string }>>(new Map());
+  const cloudTtsCooldownUntilRef = useRef<number>(
+    (() => {
+      try {
+        return Number(localStorage.getItem('njia_cloud_tts_cooldown_until') || '0') || 0;
+      } catch {
+        return 0;
+      }
+    })()
+  );
+  const voiceEngineModeRef = useRef<'auto' | 'unlimited'>(voiceEngineMode);
+  voiceEngineModeRef.current = voiceEngineMode;
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -463,6 +800,9 @@ export const JarvisAssistant: React.FC = () => {
       activeAudioRef.current.pause();
       activeAudioRef.current = null;
     }
+    try {
+      window.speechSynthesis?.cancel();
+    } catch {}
     liveActiveSourcesRef.current.forEach((src) => {
       try {
         src.stop();
@@ -473,6 +813,48 @@ export const JarvisAssistant: React.FC = () => {
       liveNextStartTimeRef.current = liveOutputCtxRef.current.currentTime;
     }
     setJarvisState((prev) => (prev === 'speaking' ? 'idle' : prev));
+  }, []);
+
+  const speakWithBrowserSynthesis = useCallback((text: string, triggerAutoListenAfter = true): boolean => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      setJarvisState('idle');
+      return false;
+    }
+    try {
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(
+        text
+          .replace(/[*_`#>]/g, '')
+          .replace(/\s+/g, ' ')
+          .trim()
+      );
+      const voices = window.speechSynthesis.getVoices();
+      const preferred =
+        voices.find((v) => /google uk english male|daniel|george|ryan|mark|david/i.test(v.name)) ||
+        voices.find((v) => v.lang.toLowerCase().startsWith('en'));
+      if (preferred) utter.voice = preferred;
+      utter.rate = 1.03;
+      utter.pitch = 0.96;
+
+      utter.onend = () => {
+        setJarvisState('idle');
+        if (triggerAutoListenAfter && handsFreeLoopRef.current) {
+          setTimeout(() => {
+            startListeningRef.current();
+          }, 260);
+        }
+      };
+      utter.onerror = () => {
+        setJarvisState('idle');
+      };
+
+      setJarvisState('speaking');
+      window.speechSynthesis.speak(utter);
+      return true;
+    } catch {
+      setJarvisState('idle');
+      return false;
+    }
   }, []);
 
   const playAudioPayload = useCallback(
@@ -520,26 +902,63 @@ export const JarvisAssistant: React.FC = () => {
     async (text: string, triggerAutoListenAfter = true) => {
       stopSpeaking();
       setVoiceError(null);
+      const normalizedKey = text.trim().toLowerCase();
+
+      // Use instant Unlimited Browser Speech when selected OR during cloud TTS cooldown
+      if (voiceEngineModeRef.current === 'unlimited' || Date.now() < cloudTtsCooldownUntilRef.current) {
+        speakWithBrowserSynthesis(text, triggerAutoListenAfter);
+        return;
+      }
+
+      // Check client cache first (0 API calls)
+      const cachedClient = clientTtsCacheRef.current.get(normalizedKey);
+      if (cachedClient) {
+        await playAudioPayload(cachedClient.base64, cachedClient.mimeType, triggerAutoListenAfter);
+        return;
+      }
+
       setJarvisState('speaking');
       try {
-        const { res, data } = await fetchJsonWithRetry<{ audioBase64?: string; mimeType?: string; error?: string }>(
-          '/api/jarvis/speak',
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text }),
-          }
-        );
-        if (!res.ok || !data.audioBase64) {
-          throw new Error(data.error || 'Voice synthesis unavailable right now.');
+        const { res, data } = await fetchJsonWithRetry<{
+          audioBase64?: string;
+          mimeType?: string;
+          fallbackLocalTts?: boolean;
+          cooldownRemainingMs?: number;
+          error?: string;
+        }>('/api/jarvis/speak', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+
+        if (!res.ok || data.fallbackLocalTts || !data.audioBase64) {
+          const cooldownMs = Number(data.cooldownRemainingMs || 300000);
+          const until = Date.now() + cooldownMs;
+          cloudTtsCooldownUntilRef.current = until;
+          try {
+            localStorage.setItem('njia_cloud_tts_cooldown_until', String(until));
+          } catch {}
+          speakWithBrowserSynthesis(text, triggerAutoListenAfter);
+          return;
+        }
+
+        if (clientTtsCacheRef.current.size < 40) {
+          clientTtsCacheRef.current.set(normalizedKey, {
+            base64: data.audioBase64,
+            mimeType: data.mimeType || 'audio/wav',
+          });
         }
         await playAudioPayload(data.audioBase64, data.mimeType || 'audio/wav', triggerAutoListenAfter);
-      } catch (err: unknown) {
-        setJarvisState('idle');
-        setVoiceError(err instanceof Error ? err.message : 'Voice playback failed.');
+      } catch {
+        const until = Date.now() + 120000;
+        cloudTtsCooldownUntilRef.current = until;
+        try {
+          localStorage.setItem('njia_cloud_tts_cooldown_until', String(until));
+        } catch {}
+        speakWithBrowserSynthesis(text, triggerAutoListenAfter);
       }
     },
-    [playAudioPayload, stopSpeaking]
+    [playAudioPayload, speakWithBrowserSynthesis, stopSpeaking]
   );
 
   // Initial welcome greeting automatically when first opening the website
@@ -623,6 +1042,47 @@ export const JarvisAssistant: React.FC = () => {
         debt: Math.round(totalDebt),
         healthScore: financialHealth.score,
         healthStatus: financialHealth.status,
+        wallets: wallets.slice(0, 10).map((w) => ({
+          id: w.id,
+          name: w.name,
+          type: w.type,
+          balance: Math.round(w.balance),
+        })),
+        bills: bills.slice(0, 10).map((b) => ({
+          id: b.id,
+          title: b.title,
+          amount: b.amount,
+          dueDate: b.dueDate,
+          status: b.status,
+        })),
+        savingsGoals: savingsGoals.slice(0, 8).map((g) => ({
+          id: g.id,
+          title: g.title,
+          current: g.currentAmount,
+          target: g.targetAmount,
+        })),
+        debts: debts.slice(0, 8).map((d) => ({
+          id: d.id,
+          name: d.name,
+          remaining: d.remainingAmount,
+        })),
+        budgets: budgets.slice(0, 10).map((b) => ({
+          category: b.category,
+          monthlyLimit: b.monthlyLimit,
+        })),
+        recentExpenses: expenses.slice(0, 8).map((e) => ({
+          id: e.id,
+          title: e.title,
+          amount: e.amount,
+          category: e.category,
+          date: e.date,
+        })),
+        recentIncomes: incomes.slice(0, 5).map((i) => ({
+          id: i.id,
+          source: i.source,
+          amount: i.amount,
+          date: i.date,
+        })),
       },
       tradingDesk: {
         forexTradFiMarketOpen: getAssetMarketSession('EUR/USD', 'FOREX').isOpen,
@@ -658,10 +1118,16 @@ export const JarvisAssistant: React.FC = () => {
     };
   }, [
     activeTab,
+    bills,
+    budgets,
     currency,
+    debts,
+    expenses,
     financialHealth.score,
     financialHealth.status,
+    incomes,
     netWorth,
+    savingsGoals,
     savingsRate,
     totalDebt,
     totalEmergencyFund,
@@ -669,6 +1135,7 @@ export const JarvisAssistant: React.FC = () => {
     totalLiquidBalance,
     totalMonthlyExpenses,
     totalMonthlyIncome,
+    wallets,
   ]);
 
   const executeJarvisActions = useCallback(
@@ -787,16 +1254,28 @@ export const JarvisAssistant: React.FC = () => {
           if (amount > 0) {
             const today = new Date().toISOString().split('T')[0];
             if (txType === 'income') {
-              const cat = INCOME_CATEGORIES.has(p.category as IncomeItem['category'])
+              const rawIncCat = String(p.category || title || '').toLowerCase();
+              let cat: IncomeItem['category'] = INCOME_CATEGORIES.has(p.category as IncomeItem['category'])
                 ? (p.category as IncomeItem['category'])
                 : 'Other';
-              const pm: IncomeItem['paymentMethod'] =
-                p.paymentMethod === 'M-Pesa' ||
-                p.paymentMethod === 'Bank Transfer' ||
-                p.paymentMethod === 'Cash' ||
-                p.paymentMethod === 'SACCO'
-                  ? p.paymentMethod
-                  : 'M-Pesa';
+              if (cat === 'Other') {
+                if (rawIncCat.includes('salar') || rawIncCat.includes('pay') || rawIncCat.includes('wage')) cat = 'Salary';
+                else if (rawIncCat.includes('bus') || rawIncCat.includes('profit') || rawIncCat.includes('trade')) cat = 'Business';
+                else if (rawIncCat.includes('free') || rawIncCat.includes('consult') || rawIncCat.includes('gig')) cat = 'Freelance';
+                else if (rawIncCat.includes('side') || rawIncCat.includes('hustle')) cat = 'Side Hustle';
+                else if (rawIncCat.includes('divid') || rawIncCat.includes('interest')) cat = 'Dividends';
+                else if (rawIncCat.includes('rent')) cat = 'Rental';
+              }
+              const rawPm = String(p.paymentMethod || '').toLowerCase();
+              const pm: IncomeItem['paymentMethod'] = rawPm.includes('bank')
+                ? 'Bank Transfer'
+                : rawPm.includes('cash')
+                ? 'Cash'
+                : rawPm.includes('sacco')
+                ? 'SACCO'
+                : rawPm.includes('other')
+                ? 'Other'
+                : 'M-Pesa';
               addIncome({
                 source: title,
                 amount,
@@ -808,16 +1287,31 @@ export const JarvisAssistant: React.FC = () => {
               });
               executedLabels.push(`Income +${amount} (${title})`);
             } else {
-              const cat = EXPENSE_CATEGORIES.has(p.category as ExpenseItem['category'])
+              const rawExpCat = `${String(p.category || '')} ${title}`.toLowerCase();
+              let cat: ExpenseItem['category'] = EXPENSE_CATEGORIES.has(p.category as ExpenseItem['category'])
                 ? (p.category as ExpenseItem['category'])
                 : 'Other';
-              const pm: ExpenseItem['paymentMethod'] =
-                p.paymentMethod === 'M-Pesa' ||
-                p.paymentMethod === 'Card' ||
-                p.paymentMethod === 'Cash' ||
-                p.paymentMethod === 'Bank'
-                  ? p.paymentMethod
-                  : 'M-Pesa';
+              if (cat === 'Other') {
+                if (rawExpCat.includes('rent') || rawExpCat.includes('hous') || rawExpCat.includes('mort')) cat = 'Rent & Housing';
+                else if (rawExpCat.includes('food') || rawExpCat.includes('grocer') || rawExpCat.includes('coffee') || rawExpCat.includes('drink') || rawExpCat.includes('lunch') || rawExpCat.includes('breakfast')) cat = 'Food & Groceries';
+                else if (rawExpCat.includes('transport') || rawExpCat.includes('fuel') || rawExpCat.includes('uber') || rawExpCat.includes('bolt') || rawExpCat.includes('taxi') || rawExpCat.includes('matatu')) cat = 'Transport & Fuel';
+                else if (rawExpCat.includes('util') || rawExpCat.includes('bill') || rawExpCat.includes('power') || rawExpCat.includes('water') || rawExpCat.includes('wifi') || rawExpCat.includes('internet')) cat = 'Utilities & Bills';
+                else if (rawExpCat.includes('entertain') || rawExpCat.includes('dining') || rawExpCat.includes('dinner') || rawExpCat.includes('movie') || rawExpCat.includes('club')) cat = 'Entertainment & Dining';
+                else if (rawExpCat.includes('health') || rawExpCat.includes('med') || rawExpCat.includes('hosp') || rawExpCat.includes('pharm')) cat = 'Healthcare';
+                else if (rawExpCat.includes('edu') || rawExpCat.includes('school') || rawExpCat.includes('tuition') || rawExpCat.includes('book')) cat = 'Education';
+                else if (rawExpCat.includes('family') || rawExpCat.includes('support') || rawExpCat.includes('gift')) cat = 'Family & Support';
+                else if (rawExpCat.includes('shop') || rawExpCat.includes('cloth') || rawExpCat.includes('mall')) cat = 'Shopping';
+              }
+              const rawPm = String(p.paymentMethod || '').toLowerCase();
+              const pm: ExpenseItem['paymentMethod'] = rawPm.includes('card')
+                ? 'Card'
+                : rawPm.includes('cash')
+                ? 'Cash'
+                : rawPm.includes('bank')
+                ? 'Bank'
+                : rawPm.includes('other')
+                ? 'Other'
+                : 'M-Pesa';
               addExpense({
                 title,
                 amount,
@@ -861,12 +1355,288 @@ export const JarvisAssistant: React.FC = () => {
           } else {
             executedLabels.push('No tracked signal to broadcast');
           }
+        } else if (action.type === 'controlLiveTv') {
+          const tvAct = String(p.action || 'OPEN_TV').toUpperCase().trim();
+          const tvPayload = {
+            action: tvAct,
+            ...(p.channel ? { channel: String(p.channel) } : {}),
+            ...(p.volume !== undefined ? { volume: Number(p.volume) } : {}),
+            ...(p.mode ? { mode: String(p.mode).toLowerCase() } : {}),
+          };
+
+          if (tvAct === 'OPEN_TV' && !p.channel && !p.mode && p.volume === undefined) {
+            setActiveTab('livetv');
+            executedLabels.push('Live TV Opened');
+          } else {
+            if (activeTabRef.current === 'livetv') {
+              window.dispatchEvent(new CustomEvent('njia-livetv-control', { detail: tvPayload }));
+            } else {
+              try {
+                const existingRaw = sessionStorage.getItem('njia_pending_livetv_control');
+                const existing = existingRaw ? JSON.parse(existingRaw) : [];
+                const queue = Array.isArray(existing) ? existing : existing ? [existing] : [];
+                queue.push(tvPayload);
+                sessionStorage.setItem('njia_pending_livetv_control', JSON.stringify(queue));
+              } catch {}
+              setActiveTab('livetv');
+              setTimeout(() => {
+                try {
+                  const stillPending = sessionStorage.getItem('njia_pending_livetv_control');
+                  if (stillPending) {
+                    sessionStorage.removeItem('njia_pending_livetv_control');
+                    const parsed = JSON.parse(stillPending);
+                    const items = Array.isArray(parsed) ? parsed : [parsed];
+                    for (const item of items) {
+                      if (item) window.dispatchEvent(new CustomEvent('njia-livetv-control', { detail: item }));
+                    }
+                  }
+                } catch {}
+              }, 220);
+            }
+            const labelParts = [tvAct];
+            if (p.channel) labelParts.push(String(p.channel));
+            if (p.volume !== undefined) labelParts.push(`${p.volume}%`);
+            if (p.mode) labelParts.push(String(p.mode));
+            executedLabels.push(`Live TV: ${labelParts.join(' · ')}`);
+          }
+        } else if (action.type === 'manageFinance') {
+          const op = String(p.operation || '').toUpperCase().trim();
+          const today = new Date().toISOString().split('T')[0];
+          const amount = Number(p.amount || 0);
+          const targetAmount = Number(p.targetAmount || p.amount || 0);
+          const title = String(p.title || p.targetName || 'Mullah Entry').trim();
+          const query = String(p.targetName || p.title || '').toLowerCase().trim();
+
+          const resolveExpensePm = (raw?: unknown): ExpenseItem['paymentMethod'] => {
+            const s = String(raw || '').toLowerCase();
+            if (s.includes('card')) return 'Card';
+            if (s.includes('cash')) return 'Cash';
+            if (s.includes('bank')) return 'Bank';
+            if (s.includes('mpesa') || s.includes('m-pesa')) return 'M-Pesa';
+            return 'M-Pesa';
+          };
+
+          if (op === 'ADD_BILL' && amount > 0) {
+            const rawCat = String(p.category || '').toLowerCase();
+            let billCat: BillCategory = 'Other';
+            if (rawCat.includes('power') || rawCat.includes('kplc') || rawCat.includes('electr')) billCat = 'Utilities & Power (KPLC)';
+            else if (rawCat.includes('water')) billCat = 'Water & Sanitation';
+            else if (rawCat.includes('wifi') || rawCat.includes('internet') || rawCat.includes('data')) billCat = 'Internet & WiFi';
+            else if (rawCat.includes('rent') || rawCat.includes('hous')) billCat = 'Rent & Housing';
+            else if (rawCat.includes('stream') || rawCat.includes('sub') || rawCat.includes('netflix')) billCat = 'Subscriptions & Streaming';
+            else if (rawCat.includes('insur')) billCat = 'Insurance';
+            else if (rawCat.includes('chama')) billCat = 'Chama & Welfare';
+
+            const freq = p.frequency === 'weekly' || p.frequency === 'yearly' || p.frequency === 'one-time' ? p.frequency : 'monthly';
+            const dueDate = p.dueDate ? String(p.dueDate) : new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0];
+            addBill({
+              title,
+              amount,
+              dueDate,
+              category: billCat,
+              frequency: freq,
+              notes: 'Added via Mullah Voice',
+            });
+            executedLabels.push(`Bill Added: ${title} (${amount})`);
+          } else if (op === 'PAY_BILL') {
+            const unpaid = bills.filter((b) => b.status !== 'paid');
+            const match =
+              (query && query !== 'last'
+                ? unpaid.find((b) => b.id === query || b.title.toLowerCase().includes(query))
+                : unpaid[0]) || unpaid[0];
+            if (match) {
+              markBillPaid(match.id, resolveExpensePm(p.paymentMethod));
+              executedLabels.push(`Bill Paid: ${match.title}`);
+            } else {
+              executedLabels.push('No unpaid bill matched');
+            }
+          } else if (op === 'DELETE_EXPENSE') {
+            const match =
+              !query || query === 'last'
+                ? expenses[0]
+                : expenses.find((e) => e.id === query || e.title.toLowerCase().includes(query));
+            if (match) {
+              deleteExpense(match.id);
+              executedLabels.push(`Deleted Expense: ${match.title}`);
+            } else {
+              executedLabels.push('No matching expense found');
+            }
+          } else if (op === 'DELETE_INCOME') {
+            const match =
+              !query || query === 'last'
+                ? incomes[0]
+                : incomes.find((i) => i.id === query || i.source.toLowerCase().includes(query));
+            if (match) {
+              deleteIncome(match.id);
+              executedLabels.push(`Deleted Income: ${match.source}`);
+            } else {
+              executedLabels.push('No matching income found');
+            }
+          } else if (op === 'SET_BUDGET' && (amount > 0 || targetAmount > 0)) {
+            const cat = String(p.category || title || 'Other');
+            setCategoryBudget(cat, amount > 0 ? amount : targetAmount);
+            executedLabels.push(`Budget Set: ${cat} (${amount > 0 ? amount : targetAmount})`);
+          } else if (op === 'ADD_SAVINGS_GOAL' && (targetAmount > 0 || amount > 0)) {
+            const goalTarget = targetAmount > 0 ? targetAmount : amount;
+            const rawCat = String(p.category || '').toLowerCase();
+            let goalCat: SavingsGoal['category'] = 'Other';
+            if (rawCat.includes('land') || rawCat.includes('prop') || rawCat.includes('house')) goalCat = 'Land & Property';
+            else if (rawCat.includes('car') || rawCat.includes('vehic')) goalCat = 'Vehicle';
+            else if (rawCat.includes('wed')) goalCat = 'Wedding';
+            else if (rawCat.includes('bus') || rawCat.includes('cap')) goalCat = 'Business Capital';
+            else if (rawCat.includes('trav') || rawCat.includes('trip')) goalCat = 'Travel';
+            else if (rawCat.includes('edu') || rawCat.includes('school')) goalCat = 'Education';
+            else if (rawCat.includes('tech') || rawCat.includes('gadg') || rawCat.includes('phone') || rawCat.includes('laptop')) goalCat = 'Gadget / Tech';
+            else if (rawCat.includes('emerg')) goalCat = 'Emergency';
+
+            addSavingsGoal({
+              title,
+              targetAmount: goalTarget,
+              deadline: p.dueDate ? String(p.dueDate) : new Date(Date.now() + 180 * 86400000).toISOString().split('T')[0],
+              category: goalCat,
+              color: '#0df2c9',
+            });
+            executedLabels.push(`Goal Added: ${title} (${goalTarget})`);
+          } else if (op === 'DEPOSIT_SAVINGS_GOAL' && amount > 0) {
+            const match =
+              query && query !== 'last'
+                ? savingsGoals.find((g) => g.id === query || g.title.toLowerCase().includes(query))
+                : savingsGoals[0];
+            if (match) {
+              depositToGoal(match.id, amount);
+              executedLabels.push(`Goal +${amount}: ${match.title}`);
+            } else {
+              executedLabels.push('No matching savings goal found');
+            }
+          } else if (op === 'ADD_DEBT' && (targetAmount > 0 || amount > 0)) {
+            const principal = targetAmount > 0 ? targetAmount : amount;
+            addDebt({
+              name: title,
+              lender: String(p.lender || title),
+              principal,
+              remainingAmount: principal,
+              interestRatePercent: Number(p.interestRate || 12),
+              minimumMonthlyPayment: amount > 0 && amount < principal ? amount : Math.max(1, Math.round(principal * 0.1)),
+              dueDate: p.dueDate ? String(p.dueDate) : new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
+              category: 'Personal',
+            });
+            executedLabels.push(`Debt Added: ${title} (${principal})`);
+          } else if (op === 'PAY_DEBT' && amount > 0) {
+            const match =
+              query && query !== 'last'
+                ? debts.find((d) => d.id === query || d.name.toLowerCase().includes(query) || d.lender.toLowerCase().includes(query))
+                : debts[0];
+            if (match) {
+              recordDebtPayment(match.id, amount);
+              executedLabels.push(`Debt Paid -${amount}: ${match.name}`);
+            } else {
+              executedLabels.push('No matching debt found');
+            }
+          } else if (op === 'DEPOSIT_EMERGENCY_FUND' && amount > 0) {
+            depositToEmergencyFund(amount);
+            executedLabels.push(`Emergency Fund +${amount}`);
+          } else if (op === 'ADD_WALLET') {
+            const rawWt = String(p.walletType || '').toLowerCase();
+            let wt: WalletType = 'Other';
+            if (rawWt.includes('mpesa') || rawWt.includes('m-pesa')) wt = 'M-PESA';
+            else if (rawWt.includes('bank')) wt = 'Bank Account';
+            else if (rawWt.includes('sacco')) wt = 'SACCO FOSA';
+            else if (rawWt.includes('cash')) wt = 'Cash / Physical';
+            else if (rawWt.includes('card')) wt = 'Credit Card';
+            else if (rawWt.includes('crypto')) wt = 'Crypto Wallet';
+
+            addWallet({
+              name: title,
+              type: wt,
+              balance: Number.isFinite(amount) ? amount : 0,
+              color: '#0df2c9',
+              notes: 'Created via Mullah Voice',
+            });
+            executedLabels.push(`Wallet Added: ${title}`);
+          } else if (op === 'TRANSFER_WALLETS' && amount > 0) {
+            const fromQ = String(p.fromWallet || '').toLowerCase().trim();
+            const toQ = String(p.toWallet || '').toLowerCase().trim();
+            const fromW = wallets.find((w) => w.id === fromQ || w.name.toLowerCase().includes(fromQ));
+            const toW = wallets.find((w) => w.id === toQ || w.name.toLowerCase().includes(toQ));
+            if (fromW && toW && fromW.id !== toW.id) {
+              const ok = transferBetweenWallets({
+                fromWalletId: fromW.id,
+                toWalletId: toW.id,
+                amount,
+                fee: Number(p.fee || 0),
+                notes: 'Transfer via Mullah Voice',
+                date: today,
+              });
+              executedLabels.push(ok ? `Transfer ${amount}: ${fromW.name} -> ${toW.name}` : 'Wallet transfer failed');
+            } else {
+              executedLabels.push('Specify two valid wallets to transfer');
+            }
+          } else if (op === 'ADD_INVESTMENT' && amount > 0) {
+            addInvestment({
+              name: title,
+              assetClass: 'Other',
+              currentValue: amount,
+              investedAmount: amount,
+              expectedAnnualYieldPercent: Number(p.interestRate || 10),
+              provider: String(p.lender || 'Portfolio'),
+            });
+            executedLabels.push(`Investment Added: ${title} (${amount})`);
+          } else if (op === 'ADD_CHAMA' && amount > 0) {
+            addChama({
+              name: title,
+              contributionAmount: amount,
+              frequency: p.frequency === 'weekly' || p.frequency === 'bi-weekly' ? p.frequency : 'monthly',
+              totalMembers: 10,
+              payoutDate: p.dueDate ? String(p.dueDate) : new Date(Date.now() + 90 * 86400000).toISOString().split('T')[0],
+              payoutAmount: amount * 10,
+              type: 'Merry-Go-Round',
+              notes: 'Added via Mullah Voice',
+            });
+            executedLabels.push(`Chama Added: ${title}`);
+          } else if (op === 'REFRESH_APP') {
+            await refreshApp();
+            executedLabels.push('Live App & FX Refreshed');
+          } else if (op === 'OPEN_QUICK_ADD') {
+            setIsQuickAddOpen(true);
+            executedLabels.push('Quick Add Opened');
+          } else if (op === 'OPEN_CURRENCY_CONVERTER') {
+            setIsCurrencyConverterOpen(true);
+            executedLabels.push('Currency Converter Opened');
+          }
         }
       }
 
       return executedLabels;
     },
-    [addExpense, addIncome, setActiveTab, setCurrency]
+    [
+      addBill,
+      addChama,
+      addDebt,
+      addExpense,
+      addIncome,
+      addInvestment,
+      addSavingsGoal,
+      addWallet,
+      bills,
+      debts,
+      deleteExpense,
+      deleteIncome,
+      depositToEmergencyFund,
+      depositToGoal,
+      expenses,
+      incomes,
+      markBillPaid,
+      recordDebtPayment,
+      refreshApp,
+      savingsGoals,
+      setActiveTab,
+      setCategoryBudget,
+      setCurrency,
+      setIsCurrencyConverterOpen,
+      setIsQuickAddOpen,
+      transferBetweenWallets,
+      wallets,
+    ]
   );
 
   // Subscribe to Proactive Voice Alerts (TP/SL hits, Paper Breakevens, Red-News 15m Warnings)
@@ -1113,6 +1883,85 @@ export const JarvisAssistant: React.FC = () => {
 
       const nextHistory = [...messages, userMsg];
       setMessages(nextHistory);
+
+      // ZERO-QUOTA INSTANT FAST-PATH: Handle Live TV, Navigation, Clear Market Scans, Quick Expense/Income, Bots & Currency locally in <5ms
+      const localFast = parseSpokenFastCommand(trimmed);
+      if (localFast) {
+        let localActions: JarvisAction[] = [];
+        let replyText = 'Done.';
+
+        if (localFast.kind === 'liveTv') {
+          localActions = localFast.actions;
+          replyText = localFast.spokenReply;
+        } else if (localFast.kind === 'navigate') {
+          localActions = [{ type: 'navigate', payload: { tab: localFast.tab } }];
+          replyText = `Opened ${localFast.label}.`;
+        } else if (localFast.kind === 'transaction') {
+          localActions = [
+            {
+              type: 'logTransaction',
+              payload: {
+                transactionType: localFast.txType,
+                title: localFast.title,
+                amount: localFast.amount,
+              },
+            },
+          ];
+          replyText = `Recorded ${localFast.txType} of ${localFast.amount} ${currency} for ${localFast.title}.`;
+        } else if (localFast.kind === 'bot') {
+          localActions = [{ type: 'controlBot', payload: { action: localFast.action, target: localFast.target } }];
+          replyText = `${localFast.target === 'ALL' ? 'All trading bots' : localFast.target} ${
+            localFast.action === 'STOP' ? 'stopped' : 'started'
+          }.`;
+        } else if (localFast.kind === 'closeTrades') {
+          localActions = [{ type: 'closePaperPositions', payload: { symbol: localFast.symbol } }];
+          replyText = 'Closed matching open paper positions.';
+        } else if (localFast.kind === 'currency') {
+          localActions = [{ type: 'setCurrency', payload: { currency: localFast.currency } }];
+          replyText = `Switched currency to ${localFast.currency}.`;
+        } else if (localFast.kind === 'financeSummary') {
+          localActions = [{ type: 'navigate', payload: { tab: 'dashboard' } }];
+          replyText = `Your net worth is ${Math.round(netWorth).toLocaleString()} ${currency}. Monthly income is ${Math.round(totalMonthlyIncome).toLocaleString()}, monthly expenses are ${Math.round(totalMonthlyExpenses).toLocaleString()}, liquid balance is ${Math.round(totalLiquidBalance).toLocaleString()}, and your financial health score is ${financialHealth.score} out of 100.`;
+        } else if (localFast.kind === 'scan') {
+          const spot = resolveTradingViewPrice(liveTvQuotesRef.current, localFast.symbol, 0);
+          const q = lookupTradingViewQuote(liveTvQuotesRef.current, localFast.symbol);
+          const session = getAssetMarketSession(localFast.symbol);
+          localActions = [
+            { type: 'focusAsset', payload: { symbol: localFast.symbol, timeframe: localFast.timeframe } },
+          ];
+          if (spot > 0) {
+            const levels = computeTimeframeSignalLevels({
+              symbol: localFast.symbol,
+              spotPrice: spot,
+              timeframe: localFast.timeframe,
+              quote: q,
+              market: localFast.symbol.includes('XAU') ? 'METALS' : localFast.symbol.includes('BTC') ? 'CRYPTO' : 'FOREX',
+            });
+            replyText = `${localFast.symbol} on ${localFast.timeframe} is ${
+              session.isOpen ? 'live' : 'weekend frozen'
+            } at ${spot}. Signal is ${levels.action}, entry ${levels.entryZone}, stop loss ${levels.sl}, TP1 ${levels.tp1}, TP2 ${levels.tp2}, risk reward ${levels.riskReward}.`;
+          } else {
+            replyText = `Focused radar on ${localFast.symbol} ${localFast.timeframe}.`;
+          }
+        }
+
+        if (localActions.length > 0) {
+          const actionsExecuted = await executeJarvisActions(localActions);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `jrv-fast-${Date.now()}`,
+              role: 'assistant',
+              text: replyText,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              actionsExecuted: [...actionsExecuted, 'Instant 0-Quota'],
+            },
+          ]);
+          await speakText(replyText, true);
+          return;
+        }
+      }
+
       setJarvisState('thinking');
 
       try {
@@ -1151,22 +2000,51 @@ export const JarvisAssistant: React.FC = () => {
         await speakText(replyText, true);
       } catch (err: unknown) {
         setJarvisState('idle');
-        const errMsg = err instanceof Error ? err.message : 'Unable to reach Mullah voice servers.';
+        const rawErr = err instanceof Error ? err.message : 'Unable to reach Mullah voice servers.';
+        const isQuota = rawErr.toLowerCase().includes('rate limit') || rawErr.includes('429');
+        const isMissingKey = rawErr.toLowerCase().includes('not configured') || rawErr.includes('GEMINI_KEY_MISSING');
+        const errMsg = isQuota
+          ? 'Cloud AI quota is cooling down for a few seconds. Direct Live TV, market scans, navigation, and quick expense voice commands remain unlimited.'
+          : isMissingKey
+          ? 'Live TV, finance logging, market scans, and voice playback are active locally. Add GEMINI_API_KEY in this host environment Secrets to unlock cloud Gemini AI Q&A.'
+          : rawErr;
         setVoiceError(errMsg);
-        // Append ONE clear notice without recursively calling speakText (prevents double error notices)
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `err-${Date.now()}`,
-            role: 'assistant',
-            text: errMsg,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            isError: true,
-          },
-        ]);
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.isError && last.text === errMsg) {
+            return prev;
+          }
+          return [
+            ...prev,
+            {
+              id: `err-${Date.now()}`,
+              role: 'assistant',
+              text: errMsg,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              isError: true,
+            },
+          ];
+        });
+        if (isQuota || isMissingKey) {
+          speakWithBrowserSynthesis(errMsg, false);
+        }
       }
     },
-    [buildAppSnapshot, executeJarvisActions, jarvisState, messages, speakText, stopSpeaking]
+    [
+      buildAppSnapshot,
+      currency,
+      executeJarvisActions,
+      financialHealth.score,
+      jarvisState,
+      messages,
+      netWorth,
+      speakText,
+      speakWithBrowserSynthesis,
+      stopSpeaking,
+      totalLiquidBalance,
+      totalMonthlyExpenses,
+      totalMonthlyIncome,
+    ]
   );
 
   const stopListening = useCallback(() => {
@@ -1473,6 +2351,23 @@ export const JarvisAssistant: React.FC = () => {
             <div className="flex items-center gap-1 shrink-0">
               <button
                 type="button"
+                onClick={() => setVoiceEngineMode((m) => (m === 'auto' ? 'unlimited' : 'auto'))}
+                title={
+                  voiceEngineMode === 'unlimited'
+                    ? 'Unlimited Local Speech Synthesis (0 cloud voice quota used)'
+                    : 'Auto Voice: Neural Audio with automatic Unlimited Local fallback'
+                }
+                className={`px-2 py-1 rounded-lg border text-[9px] font-mono font-bold transition-colors cursor-pointer ${
+                  voiceEngineMode === 'unlimited'
+                    ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-300'
+                    : 'bg-[#0b1628] border-[#1b2e4b] text-slate-300 hover:text-white'
+                }`}
+              >
+                {voiceEngineMode === 'unlimited' ? 'UNL VOICE' : 'AUTO VOICE'}
+              </button>
+
+              <button
+                type="button"
                 onClick={() => {
                   stopListening();
                   setLiveStreamMode((v) => !v);
@@ -1618,7 +2513,7 @@ export const JarvisAssistant: React.FC = () => {
                   : 'Tap Reactor to Speak'}
               </div>
               <div className="text-[10px] font-mono text-slate-400">
-                Try: &ldquo;Scan Gold 15M&rdquo;, &ldquo;Buy 0.1 Gold&rdquo;, &ldquo;Start Bot Studio&rdquo;, &ldquo;Alert Gold at 3900&rdquo;
+                Try: &ldquo;Switch Live TV to Sky News &amp; volume 80%&rdquo;, &ldquo;Add 45 USD coffee expense&rdquo;, &ldquo;Ask me anything&rdquo;, or &ldquo;Scan Gold 15M&rdquo;
               </div>
             </div>
 

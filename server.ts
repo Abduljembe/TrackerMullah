@@ -37,10 +37,21 @@ app.use((req, res, next) => {
   next();
 });
 
-// Safe Gemini client factory (prevents crashes when running in environments without GEMINI_API_KEY)
-function getAiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
-  if (!apiKey) return null;
+// Safe Gemini client pool (supports primary key + optional comma-separated backup keys in GEMINI_API_KEYS)
+function getGeminiApiKeys(): string[] {
+  const rawList = [
+    process.env.GEMINI_API_KEY || '',
+    process.env.GOOGLE_API_KEY || '',
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY || '',
+    process.env.VITE_GEMINI_API_KEY || '',
+    ...(process.env.GEMINI_API_KEYS ? process.env.GEMINI_API_KEYS.split(',') : []),
+  ]
+    .map((k) => k.trim())
+    .filter(Boolean);
+  return Array.from(new Set(rawList));
+}
+
+function createAiClientForKey(apiKey: string): GoogleGenAI | null {
   try {
     return new GoogleGenAI({
       apiKey,
@@ -56,12 +67,25 @@ function getAiClient(): GoogleGenAI | null {
   }
 }
 
+function getAiClients(): GoogleGenAI[] {
+  return getGeminiApiKeys()
+    .map((k) => createAiClientForKey(k))
+    .filter((c): c is GoogleGenAI => Boolean(c));
+}
+
+function getAiClient(): GoogleGenAI | null {
+  const clients = getAiClients();
+  return clients[0] || null;
+}
+
 // Health check endpoint for uptime and deployment diagnostics
 app.get('/api/health', (_req, res) => {
+  const keys = getGeminiApiKeys();
   res.json({
     status: 'ok',
     environment: process.env.VERCEL ? 'vercel-serverless' : 'standalone-node',
-    geminiConfigured: !!(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY),
+    geminiConfigured: keys.length > 0,
+    keyPoolSize: keys.length,
     timestamp: new Date().toISOString(),
   });
 });
@@ -4249,7 +4273,9 @@ export interface JarvisClientAction {
     | 'executePaperTrade'
     | 'closePaperPositions'
     | 'setPriceAlert'
-    | 'controlBot';
+    | 'controlBot'
+    | 'controlLiveTv'
+    | 'manageFinance';
   payload: Record<string, unknown>;
 }
 
@@ -4470,6 +4496,118 @@ const JARVIS_TOOLS: FunctionDeclaration[] = [
           description: 'Symbol to broadcast (e.g. XAU/USD, EUR/USD) or "LATEST".',
         },
       },
+    },
+  },
+  {
+    name: 'control_live_tv',
+    description:
+      'Control the Live TV & Bloomberg Broadcast Desk: open Live TV, play/resume, pause/stop, mute, unmute, raise/lower volume, set exact volume %, enter/exit fullscreen, switch channels (Bloomberg, Sky News, DW, France 24, Yahoo Finance, CNBC, Euronews), or switch to World Monitor Terminal or Bloomberg 24/7 Radio.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        action: {
+          type: Type.STRING,
+          description:
+            'Command: OPEN_TV, PLAY, RESUME, PAUSE, STOP, MUTE, UNMUTE, VOLUME_UP, VOLUME_DOWN, SET_VOLUME, SWITCH_CHANNEL, NEXT_CHANNEL, SET_MODE, FULLSCREEN, or EXIT_FULLSCREEN.',
+        },
+        channel: {
+          type: Type.STRING,
+          description:
+            'Optional channel or station name: bloomberg, sky, dw, france24, yahoo, cnbc, euronews, worldmonitor, or radio.',
+        },
+        volume: {
+          type: Type.NUMBER,
+          description: 'Optional volume level 0 to 100 when using SET_VOLUME.',
+        },
+        mode: {
+          type: Type.STRING,
+          description: 'Optional mode when using SET_MODE: tv, worldmonitor, or radio.',
+        },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'manage_finance_action',
+    description:
+      'Execute any personal finance or app operation requested by the user: add or pay bills, delete an expense or income, set a category budget limit, create or deposit into a savings goal, add or pay down debt, deposit into emergency fund, add wallets or transfer money between wallets, add investments or chamas, refresh live rates/app, or open quick-add/currency converter.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        operation: {
+          type: Type.STRING,
+          description:
+            'Operation type: ADD_BILL, PAY_BILL, DELETE_EXPENSE, DELETE_INCOME, SET_BUDGET, ADD_SAVINGS_GOAL, DEPOSIT_SAVINGS_GOAL, ADD_DEBT, PAY_DEBT, DEPOSIT_EMERGENCY_FUND, ADD_WALLET, TRANSFER_WALLETS, ADD_INVESTMENT, ADD_CHAMA, REFRESH_APP, OPEN_QUICK_ADD, or OPEN_CURRENCY_CONVERTER.',
+        },
+        title: {
+          type: Type.STRING,
+          description: 'Name/title/label for a bill, goal, debt, wallet, investment, chama, or item.',
+        },
+        targetName: {
+          type: Type.STRING,
+          description: 'Existing item name/ID (or "LAST") when paying a bill/debt, depositing to a goal, or deleting an expense/income.',
+        },
+        amount: {
+          type: Type.NUMBER,
+          description: 'Monetary amount.',
+        },
+        targetAmount: {
+          type: Type.NUMBER,
+          description: 'Target goal or total debt/investment value.',
+        },
+        category: {
+          type: Type.STRING,
+          description: 'Budget, bill, expense, or goal category.',
+        },
+        paymentMethod: {
+          type: Type.STRING,
+          description: 'Payment method such as M-Pesa, Card, Cash, Bank.',
+        },
+        fromWallet: {
+          type: Type.STRING,
+          description: 'Source wallet name for TRANSFER_WALLETS.',
+        },
+        toWallet: {
+          type: Type.STRING,
+          description: 'Destination wallet name for TRANSFER_WALLETS.',
+        },
+        fee: {
+          type: Type.NUMBER,
+          description: 'Optional transfer fee.',
+        },
+        walletType: {
+          type: Type.STRING,
+          description: 'Wallet type for ADD_WALLET: M-Pesa, Bank, Cash, SACCO, Broker, or Other.',
+        },
+        dueDate: {
+          type: Type.STRING,
+          description: 'Due date YYYY-MM-DD for ADD_BILL.',
+        },
+        frequency: {
+          type: Type.STRING,
+          description: 'monthly, weekly, yearly, or one-time.',
+        },
+        interestRate: {
+          type: Type.NUMBER,
+          description: 'Interest rate % for ADD_DEBT.',
+        },
+      },
+      required: ['operation'],
+    },
+  },
+  {
+    name: 'search_live_web',
+    description:
+      'Search the live web using Google Search grounding to answer any real-time news, general knowledge, weather, sports, science, tech, or factual question.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        query: {
+          type: Type.STRING,
+          description: 'Clear web search question or topic.',
+        },
+      },
+      required: ['query'],
     },
   },
 ];
@@ -4764,6 +4902,59 @@ async function executeJarvisServerTool(
     return { status: 'queued', symbol };
   }
 
+  if (name === 'control_live_tv') {
+    const action = String(args.action || 'OPEN_TV').toUpperCase().trim();
+    const channel = args.channel ? String(args.channel).trim() : undefined;
+    const volume = args.volume !== undefined ? Number(args.volume) : undefined;
+    const mode = args.mode ? String(args.mode).toLowerCase().trim() : undefined;
+    queuedActions.push({
+      type: 'controlLiveTv',
+      payload: {
+        action,
+        ...(channel ? { channel } : {}),
+        ...(volume !== undefined && Number.isFinite(volume) ? { volume } : {}),
+        ...(mode ? { mode } : {}),
+      },
+    });
+    return { status: 'queued', action, channel: channel || null, volume: volume ?? null, mode: mode || null };
+  }
+
+  if (name === 'manage_finance_action') {
+    const operation = String(args.operation || '').toUpperCase().trim();
+    if (!operation) {
+      return { status: 'rejected', reason: 'operation is required.' };
+    }
+    queuedActions.push({
+      type: 'manageFinance',
+      payload: args,
+    });
+    return { status: 'queued', operation, details: args };
+  }
+
+  if (name === 'search_live_web') {
+    const query = String(args.query || '').trim();
+    if (!query) return { error: 'query is required' };
+    const ai = getAiClient();
+    if (!ai) return { error: 'Gemini client unavailable' };
+    try {
+      const searchResp = await withServerTimeout(
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: query,
+          config: {
+            tools: [{ googleSearch: {} }],
+          },
+        }),
+        9000,
+        null
+      );
+      if (!searchResp) return { summary: 'Live web search timed out. Answer directly from best available knowledge.' };
+      return { summary: (searchResp.text || '').trim() };
+    } catch {
+      return { summary: 'Web lookup unavailable; answer clearly from general knowledge.' };
+    }
+  }
+
   return { error: `Unknown tool: ${name}` };
 }
 
@@ -4813,38 +5004,431 @@ function formatReadableGeminiError(err: unknown): { status: number; message: str
   };
 }
 
+// Server-side LRU cache for TTS audio so repeated phrases cost 0 Gemini TTS quota
+const ttsAudioCache = new Map<string, { audioBase64: string; mimeType: string; cachedAt: number }>();
+const TTS_CACHE_MAX = 80;
+const TTS_CACHE_TTL_MS = 60 * 60 * 1000;
+
+function isRateLimitError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err || '');
+  return msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED');
+}
+
 async function generateWithResilientModels<T>(
   candidates: string[],
-  invoke: (model: string) => Promise<T>
+  invoke: (model: string, client: GoogleGenAI) => Promise<T>
 ): Promise<{ result: T; modelUsed: string }> {
+  const clients = getAiClients();
+  if (clients.length === 0) {
+    throw new Error('GEMINI_KEY_MISSING');
+  }
   let lastErr: unknown;
-  for (const model of candidates) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const result = await invoke(model);
-        return { result, modelUsed: model };
-      } catch (err) {
-        lastErr = err;
-        if (!isTransientUpstreamError(err)) {
-          throw err;
+  for (const client of clients) {
+    for (const model of candidates) {
+      // Do NOT hammer a 429 rate-limited model twice on the same key — failover immediately to save RPM quota
+      const maxAttempts = 2;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          const result = await invoke(model, client);
+          return { result, modelUsed: model };
+        } catch (err) {
+          lastErr = err;
+          if (!isTransientUpstreamError(err)) {
+            throw err;
+          }
+          if (isRateLimitError(err)) {
+            break;
+          }
+          if (attempt === 0) {
+            const delayMs = 350 + Math.floor(Math.random() * 180);
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          }
         }
-        const delayMs = 450 * Math.pow(2, attempt) + Math.floor(Math.random() * 180);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
     }
   }
   throw lastErr;
 }
 
-app.post('/api/jarvis/chat', async (req, res) => {
-  const ai = getAiClient();
-  if (!ai) {
-    return res.status(503).json({
-      error: 'Gemini API key is not configured on the server. Please attach a GEMINI_API_KEY in Settings > Secrets.',
-      code: 'GEMINI_KEY_MISSING',
-    });
+async function lookupGeneralKnowledgeFallback(rawQuestion: string): Promise<string | null> {
+  const cleanQ = rawQuestion
+    .replace(/[?!.]+$/g, '')
+    .trim();
+  if (!cleanQ) return null;
+
+  // 1. Safe Math Evaluator (e.g., "what is 245 * 18", "calculate 1500 / 12")
+  const mathExprRaw = cleanQ
+    .replace(/^(what is|calculate|compute|how much is|solve)\s+/i, '')
+    .replace(/\bplus\b/gi, '+')
+    .replace(/\bminus\b/gi, '-')
+    .replace(/\b(times|multiplied by|x)\b/gi, '*')
+    .replace(/\b(divided by|over)\b/gi, '/')
+    .replace(/,/g, '')
+    .trim();
+  if (/^[0-9+\-*/().\s%]+$/.test(mathExprRaw) && /\d/.test(mathExprRaw) && /[+\-*/%]/.test(mathExprRaw)) {
+    try {
+      const normalized = mathExprRaw.replace(/(\d+(?:\.\d+)?)\s*%/g, '($1/100)');
+      const fn = new Function(`"use strict"; return (${normalized});`);
+      const val = fn();
+      if (typeof val === 'number' && Number.isFinite(val)) {
+        const rounded = Math.round(val * 10000) / 10000;
+        return `The answer is ${rounded.toLocaleString()}.`;
+      }
+    } catch {}
   }
 
+  // Extract topic phrase for knowledge lookup
+  const topic = cleanQ
+    .replace(/^(what|who|where|when|why|how)\s+(is|are|was|were|does|do|did)\s+/i, '')
+    .replace(/^(tell me about|explain|define|search for|look up)\s+/i, '')
+    .replace(/^(the|a|an)\s+/i, '')
+    .trim();
+
+  // 2. Wikipedia REST Summary API (free, fast, no key required)
+  if (topic.length >= 2) {
+    try {
+      const searchUrl = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(topic)}&limit=1&namespace=0&format=json`;
+      const sResp = await withServerTimeout(fetch(searchUrl), 2500, null as Response | null);
+      let wikiTitle = topic;
+      if (sResp && sResp.ok) {
+        const sJson = (await sResp.json()) as unknown[];
+        if (Array.isArray(sJson) && Array.isArray(sJson[1]) && typeof sJson[1][0] === 'string') {
+          wikiTitle = sJson[1][0];
+        }
+      }
+      const sumUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(wikiTitle.replace(/\s+/g, '_'))}`;
+      const wResp = await withServerTimeout(fetch(sumUrl), 2500, null as Response | null);
+      if (wResp && wResp.ok) {
+        const wJson = (await wResp.json()) as { extract?: string; type?: string };
+        if (wJson.extract && wJson.type !== 'disambiguation') {
+          const sentences = wJson.extract.split(/(?<=[.!?])\s+/).slice(0, 3).join(' ');
+          if (sentences.length > 15) return sentences;
+        }
+      }
+    } catch {}
+  }
+
+  // 3. DuckDuckGo Instant Answer API fallback
+  try {
+    const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(cleanQ)}&format=json&no_html=1&skip_disambig=1`;
+    const dResp = await withServerTimeout(fetch(ddgUrl), 2500, null as Response | null);
+    if (dResp && dResp.ok) {
+      const dJson = (await dResp.json()) as { AbstractText?: string; Answer?: string; Definition?: string };
+      const best = dJson.Answer || dJson.AbstractText || dJson.Definition;
+      if (best && best.trim().length > 8) {
+        return best.split(/(?<=[.!?])\s+/).slice(0, 3).join(' ');
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
+function resolveFallbackAssetSymbol(raw: string): string {
+  const clean = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const map: Record<string, string> = {
+    GOLD: 'XAU/USD',
+    XAU: 'XAU/USD',
+    XAUUSD: 'XAU/USD',
+    SILVER: 'XAG/USD',
+    XAGUSD: 'XAG/USD',
+    BITCOIN: 'BTC/USD',
+    BTC: 'BTC/USD',
+    BTCUSD: 'BTC/USD',
+    ETHEREUM: 'ETH/USD',
+    ETH: 'ETH/USD',
+    ETHUSD: 'ETH/USD',
+    EURUSD: 'EUR/USD',
+    EURO: 'EUR/USD',
+    GBPUSD: 'GBP/USD',
+    POUND: 'GBP/USD',
+    USDJPY: 'USD/JPY',
+    USDKES: 'USD/KES',
+    NAS100: 'NAS100',
+    NASDAQ: 'NAS100',
+    US30: 'US30',
+    DOW: 'US30',
+    SP500: 'US500',
+    US500: 'US500',
+  };
+  return map[clean] || (clean.length === 6 ? `${clean.slice(0, 3)}/${clean.slice(3)}` : clean || 'XAU/USD');
+}
+
+async function handleFallbackJarvisChat(
+  userText: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  appSnapshot: any
+): Promise<{ reply: string; actions: JarvisClientAction[]; toolsUsed: string[] }> {
+  const clean = userText.trim();
+  const lower = clean.toLowerCase().replace(/[?!.,]+$/g, '').trim();
+  const actions: JarvisClientAction[] = [];
+  const toolsUsed: string[] = [];
+  const pf = (appSnapshot?.personalFinance || {}) as Record<string, unknown>;
+  const td = (appSnapshot?.tradingDesk || {}) as Record<string, unknown>;
+  const cur = String(appSnapshot?.currency || 'USD');
+
+  // 1. Live TV Commands
+  if (
+    /\b(live\s*tv|tv|channel|stream|bloomberg|sky\s*news|dw(\s+news)?|france\s*24|yahoo(\s+finance)?|cnbc|euronews|world\s*monitor|radio|volume|mute|unmute|fullscreen|cinema)\b/i.test(
+      lower
+    ) &&
+    !/\b(bot|ea|paper|trade|position|expense|income|bill|budget|goal|debt|wallet)\b/i.test(lower)
+  ) {
+    const channels: Array<[RegExp, string, string]> = [
+      [/\bbloomberg\s+radio\b|\bradio\b/, 'radio', 'Bloomberg 24/7 Radio'],
+      [/\bworld\s*monitor\b/, 'worldmonitor', 'World Monitor Terminal'],
+      [/\bbloomberg\b/, 'bloomberg', 'Bloomberg TV'],
+      [/\bsky(\s+news)?\b/, 'sky', 'Sky News'],
+      [/\bdw(\s+news)?\b/, 'dw', 'DW News'],
+      [/\bfrance\s*24\b/, 'france24', 'France 24'],
+      [/\byahoo(\s+finance)?\b/, 'yahoo', 'Yahoo Finance'],
+      [/\bcnbc\b/, 'cnbc', 'CNBC TV18'],
+      [/\beuronews\b/, 'euronews', 'Euronews Business'],
+    ];
+    const parts: string[] = [];
+    for (const [re, chId, label] of channels) {
+      if (re.test(lower)) {
+        await executeJarvisServerTool('control_live_tv', { action: 'SWITCH_CHANNEL', channel: chId }, actions);
+        toolsUsed.push('control_live_tv');
+        parts.push(`switched to ${label}`);
+        break;
+      }
+    }
+    const volMatch = lower.match(/\bvolume\s*(?:to|at)?\s*(\d{1,3})\s*%?/i);
+    if (volMatch) {
+      const vol = Math.min(100, Math.max(0, Number(volMatch[1])));
+      await executeJarvisServerTool('control_live_tv', { action: 'SET_VOLUME', volume: vol }, actions);
+      toolsUsed.push('control_live_tv');
+      parts.push(`volume set to ${vol} percent`);
+    } else if (/\b(volume\s+up|increase.*volume|turn\s+up.*volume|louder|raise.*volume)\b/i.test(lower)) {
+      await executeJarvisServerTool('control_live_tv', { action: 'VOLUME_UP' }, actions);
+      toolsUsed.push('control_live_tv');
+      parts.push('increased volume');
+    } else if (/\b(volume\s+down|decrease.*volume|lower.*volume|quieter)\b/i.test(lower)) {
+      await executeJarvisServerTool('control_live_tv', { action: 'VOLUME_DOWN' }, actions);
+      toolsUsed.push('control_live_tv');
+      parts.push('lowered volume');
+    }
+    if (/\bunmute\b/i.test(lower)) {
+      await executeJarvisServerTool('control_live_tv', { action: 'UNMUTE' }, actions);
+      toolsUsed.push('control_live_tv');
+      parts.push('unmuted audio');
+    } else if (/\bmute\b/i.test(lower)) {
+      await executeJarvisServerTool('control_live_tv', { action: 'MUTE' }, actions);
+      toolsUsed.push('control_live_tv');
+      parts.push('muted audio');
+    }
+    if (/\b(exit|leave|close)\s+(fullscreen|cinema)\b/i.test(lower)) {
+      await executeJarvisServerTool('control_live_tv', { action: 'EXIT_FULLSCREEN' }, actions);
+      toolsUsed.push('control_live_tv');
+      parts.push('exited fullscreen');
+    } else if (/\b(fullscreen|cinema)\b/i.test(lower)) {
+      await executeJarvisServerTool('control_live_tv', { action: 'FULLSCREEN' }, actions);
+      toolsUsed.push('control_live_tv');
+      parts.push('entered fullscreen');
+    }
+    if (/\bnext\s+channel\b/i.test(lower)) {
+      await executeJarvisServerTool('control_live_tv', { action: 'NEXT_CHANNEL' }, actions);
+      toolsUsed.push('control_live_tv');
+      parts.push('switched to next channel');
+    } else if (/\b(pause|stop)\b/i.test(lower)) {
+      await executeJarvisServerTool('control_live_tv', { action: 'PAUSE' }, actions);
+      toolsUsed.push('control_live_tv');
+      parts.push('paused Live TV');
+    } else if (/\b(resume|play)\b/i.test(lower) && parts.length === 0) {
+      await executeJarvisServerTool('control_live_tv', { action: 'RESUME' }, actions);
+      toolsUsed.push('control_live_tv');
+      parts.push('resumed Live TV');
+    } else if (parts.length === 0) {
+      await executeJarvisServerTool('control_live_tv', { action: 'OPEN_TV' }, actions);
+      toolsUsed.push('control_live_tv');
+      parts.push('opened Live TV');
+    }
+    return {
+      reply: `Done. Live TV ${parts.join(' and ')}.`,
+      actions,
+      toolsUsed: Array.from(new Set(toolsUsed)),
+    };
+  }
+
+  // 2. Finance & Budget & Bills & Goals & Wallets Mutations
+  const expMatch =
+    lower.match(/(?:add|log|record)\s+(?:an?\s+)?expense\s+(?:of\s+)?(?:[$€£]|kes|usd|eur|gbp)?\s*(\d+(?:\.\d+)?)\s*(?:dollars?|usd|kes|shillings?|euros?|eur|pounds?|gbp)?\s*(?:for|on)?\s+(.+)$/i) ||
+    lower.match(/(?:i\s+)?spent\s+(?:[$€£]|kes|usd)?\s*(\d+(?:\.\d+)?)\s*(?:dollars?|usd|kes|shillings?)?\s*(?:on|for)\s+(.+)$/i);
+  if (expMatch) {
+    const amount = Number(expMatch[1]);
+    const title = expMatch[2].trim();
+    if (amount > 0 && title) {
+      const niceTitle = title.charAt(0).toUpperCase() + title.slice(1);
+      await executeJarvisServerTool(
+        'log_finance_transaction',
+        { transactionType: 'expense', amount, title: niceTitle },
+        actions
+      );
+      return {
+        reply: `Recorded an expense of ${amount} ${cur} for ${niceTitle}.`,
+        actions,
+        toolsUsed: ['log_finance_transaction'],
+      };
+    }
+  }
+
+  const incMatch = lower.match(
+    /(?:add|log|record)\s+(?:an?\s+)?income\s+(?:of\s+)?(?:[$€£]|kes|usd|eur|gbp)?\s*(\d+(?:\.\d+)?)\s*(?:dollars?|usd|kes|shillings?|euros?|eur|pounds?|gbp)?\s*(?:from|for)?\s+(.+)$/i
+  );
+  if (incMatch) {
+    const amount = Number(incMatch[1]);
+    const title = incMatch[2].trim();
+    if (amount > 0 && title) {
+      const niceTitle = title.charAt(0).toUpperCase() + title.slice(1);
+      await executeJarvisServerTool(
+        'log_finance_transaction',
+        { transactionType: 'income', amount, title: niceTitle },
+        actions
+      );
+      return {
+        reply: `Recorded income of ${amount} ${cur} from ${niceTitle}.`,
+        actions,
+        toolsUsed: ['log_finance_transaction'],
+      };
+    }
+  }
+
+  if (/\bdelete\s+(?:the\s+)?(?:last|latest)\s+expense\b/i.test(lower)) {
+    await executeJarvisServerTool('manage_finance_action', { operation: 'DELETE_EXPENSE', targetName: 'LAST' }, actions);
+    return { reply: 'Removed your latest expense entry.', actions, toolsUsed: ['manage_finance_action'] };
+  }
+  if (/\bdelete\s+(?:the\s+)?(?:last|latest)\s+income\b/i.test(lower)) {
+    await executeJarvisServerTool('manage_finance_action', { operation: 'DELETE_INCOME', targetName: 'LAST' }, actions);
+    return { reply: 'Removed your latest income entry.', actions, toolsUsed: ['manage_finance_action'] };
+  }
+  if (/\bpay\s+(?:my\s+)?(?:bill|first\s+bill|last\s+bill)\b/i.test(lower)) {
+    await executeJarvisServerTool('manage_finance_action', { operation: 'PAY_BILL', targetName: 'LAST' }, actions);
+    return { reply: 'Marked your upcoming bill as paid.', actions, toolsUsed: ['manage_finance_action'] };
+  }
+  const billMatch = lower.match(/(?:add|create)\s+(?:a\s+)?bill\s+(?:for|called)?\s*([a-z0-9\s]+?)\s+(?:of|for)?\s*(\d+(?:\.\d+)?)/i);
+  if (billMatch) {
+    const title = billMatch[1].trim();
+    const amount = Number(billMatch[2]);
+    if (amount > 0 && title) {
+      await executeJarvisServerTool('manage_finance_action', { operation: 'ADD_BILL', title, amount }, actions);
+      return { reply: `Added bill ${title} for ${amount} ${cur}.`, actions, toolsUsed: ['manage_finance_action'] };
+    }
+  }
+  const goalMatch = lower.match(/(?:add|create)\s+(?:a\s+)?(?:savings?\s+)?goal\s+(?:called|named|for)?\s*([a-z0-9\s]+?)\s+(?:of|for)?\s*(\d+(?:\.\d+)?)/i);
+  if (goalMatch) {
+    const title = goalMatch[1].trim();
+    const targetAmount = Number(goalMatch[2]);
+    if (targetAmount > 0 && title) {
+      await executeJarvisServerTool('manage_finance_action', { operation: 'ADD_SAVINGS_GOAL', title, targetAmount }, actions);
+      return { reply: `Created savings goal ${title} with a target of ${targetAmount} ${cur}.`, actions, toolsUsed: ['manage_finance_action'] };
+    }
+  }
+  const emFundMatch = lower.match(/(?:deposit|add|put)\s+(\d+(?:\.\d+)?)\s*(?:dollars?|usd|kes)?\s*(?:to|into)\s+(?:my\s+)?emergency\s+fund/i);
+  if (emFundMatch) {
+    const amount = Number(emFundMatch[1]);
+    if (amount > 0) {
+      await executeJarvisServerTool('manage_finance_action', { operation: 'DEPOSIT_EMERGENCY_FUND', amount }, actions);
+      return { reply: `Deposited ${amount} ${cur} into your emergency fund.`, actions, toolsUsed: ['manage_finance_action'] };
+    }
+  }
+  if (/\brefresh\s+(?:app|rates|quotes|data)\b/i.test(lower)) {
+    await executeJarvisServerTool('manage_finance_action', { operation: 'REFRESH_APP' }, actions);
+    return { reply: 'Refreshing live exchange rates and market quotes now.', actions, toolsUsed: ['manage_finance_action'] };
+  }
+
+  // 3. Finance Overview Q&A directly from live telemetry
+  if (/\b(finances?|net\s*worth|income|expenses?|spending|debt|emergency\s*fund|liquid|health\s*score|bills?|wallets?|savings?)\b/i.test(lower)) {
+    const nw = Number(pf.netWorth ?? 0);
+    const inc = Number(pf.totalMonthlyIncome ?? 0);
+    const exp = Number(pf.totalMonthlyExpenses ?? 0);
+    const liq = Number(pf.liquidBalance ?? 0);
+    const debt = Number(pf.debt ?? 0);
+    const score = Number(pf.healthScore ?? 0);
+    await executeJarvisServerTool('navigate_to_view', { tab: 'dashboard' }, actions);
+    return {
+      reply: `Your net worth is ${nw.toLocaleString()} ${cur}. Monthly income is ${inc.toLocaleString()}, monthly expenses are ${exp.toLocaleString()}, liquid cash balance is ${liq.toLocaleString()}, total debt is ${debt.toLocaleString()}, and your financial health score is ${score} out of 100.`,
+      actions,
+      toolsUsed: ['navigate_to_view'],
+    };
+  }
+
+  // 4. Market Scans, Trading, Calendar, Alerts & Bots
+  const scanMatch = lower.match(/(?:scan|check|price\s+of|analyze)\s+([a-z0-9/\s]+?)(?:\s+(?:on\s+)?(1m|5m|15m|30m|1h|4h|1d))?$/i);
+  if (scanMatch && /\b(gold|xau|silver|xag|btc|bitcoin|eth|eurusd|eur\/usd|gbpusd|usdjpy|usdkes|nas100|us30|sp500|us500)\b/i.test(lower)) {
+    const symbol = resolveFallbackAssetSymbol(scanMatch[1]);
+    const tf = (scanMatch[2] || '15M').toUpperCase();
+    const scanData = await executeJarvisServerTool('inspect_market_asset', { symbol, timeframe: tf }, actions);
+    await executeJarvisServerTool('focus_trading_radar', { symbol, timeframe: tf }, actions);
+    const sig = scanData.signal as Record<string, unknown> | null;
+    if (sig) {
+      return {
+        reply: `${symbol} on ${tf} is ${scanData.marketOpen ? 'live' : 'weekend frozen'} at ${scanData.livePrice}. Signal is ${sig.action}, entry ${sig.entryZone}, stop loss ${sig.stopLoss}, TP1 ${sig.takeProfit1}, TP2 ${sig.takeProfit2}, risk reward ${sig.riskReward}.`,
+        actions,
+        toolsUsed: ['inspect_market_asset', 'focus_trading_radar'],
+      };
+    }
+    return {
+      reply: `${symbol} is ${scanData.marketOpen ? 'active' : 'closed for weekend'} with spot price ${scanData.livePrice}.`,
+      actions,
+      toolsUsed: ['inspect_market_asset', 'focus_trading_radar'],
+    };
+  }
+
+  if (/\b(red\s+news|economic\s+calendar|forex\s+factory|news\s+events?)\b/i.test(lower)) {
+    const cal = await executeJarvisServerTool('check_economic_calendar', { filter: 'ALL' }, actions);
+    const evs = (cal.events as Array<Record<string, unknown>>) || [];
+    if (evs.length === 0) {
+      return { reply: 'There are no major high-impact news events in the immediate window.', actions, toolsUsed: ['check_economic_calendar'] };
+    }
+    const top = evs[0];
+    return {
+      reply: `There are ${evs.length} upcoming calendar events. Next up is ${top.currency} ${top.title} with ${top.impact} impact in ${top.minutesAway} minutes.`,
+      actions,
+      toolsUsed: ['check_economic_calendar'],
+    };
+  }
+
+  const tradeMatch = lower.match(/\b(buy|sell)\s+(\d+(?:\.\d+)?)\s*(?:lots?\s+(?:of\s+)?)?([a-z0-9/]+)\b/i);
+  if (tradeMatch) {
+    const direction = tradeMatch[1].toUpperCase();
+    const lots = Number(tradeMatch[2]);
+    const symbol = resolveFallbackAssetSymbol(tradeMatch[3]);
+    const res = await executeJarvisServerTool('execute_paper_trade', { symbol, direction, lots, timeframe: '15M' }, actions);
+    if (res.status === 'rejected') {
+      return { reply: String(res.reason || `Cannot execute ${symbol} right now.`), actions: [], toolsUsed: ['execute_paper_trade'] };
+    }
+    return {
+      reply: `Queued paper ${direction} of ${lots} lots on ${symbol} at ${res.entryPrice} with stop loss ${res.sl} and take profit ${res.tp2}. Open positions currently total ${td.openPositionsCount ?? 0}.`,
+      actions,
+      toolsUsed: ['execute_paper_trade'],
+    };
+  }
+
+  if (/\bclose\s+all(\s+paper)?\s+(positions?|trades?)\b/i.test(lower)) {
+    await executeJarvisServerTool('close_paper_positions', { symbol: 'ALL' }, actions);
+    return { reply: 'Closing all open paper trading positions now.', actions, toolsUsed: ['close_paper_positions'] };
+  }
+
+  // 5. General Knowledge & Math Q&A Fallback
+  const knowledgeAnswer = await lookupGeneralKnowledgeFallback(clean);
+  if (knowledgeAnswer) {
+    return {
+      reply: knowledgeAnswer,
+      actions: [],
+      toolsUsed: ['general_knowledge_lookup'],
+    };
+  }
+
+  return {
+    reply:
+      'Mullah built-in assistant is active. You can control Live TV, scan live markets, log expenses, check your finances, manage bots, calculate math, or ask factual questions directly.',
+    actions: [],
+    toolsUsed: [],
+  };
+}
+
+app.post('/api/jarvis/chat', async (req, res) => {
   try {
     const { messages, appSnapshot } = req.body || {};
     if (!Array.isArray(messages) || messages.length === 0) {
@@ -4855,6 +5439,21 @@ app.post('/api/jarvis/chat', async (req, res) => {
       role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: String(m.text || '').slice(0, 4000) }],
     }));
+
+    const latestUserMessage =
+      [...messages].reverse().find((m: { role?: string; text?: string }) => m.role !== 'assistant')?.text || '';
+
+    // If no Gemini API key is configured on this host (e.g., unconfigured Shared Preview / external host),
+    // serve directly via Mullah's built-in operational & knowledge engine with HTTP 200 (never fail with 503!).
+    if (getGeminiApiKeys().length === 0) {
+      const fallback = await handleFallbackJarvisChat(String(latestUserMessage), appSnapshot);
+      return res.json({
+        reply: fallback.reply,
+        actions: fallback.actions,
+        toolsUsed: fallback.toolsUsed,
+        model: 'mullah-builtin-engine',
+      });
+    }
 
     const systemInstruction = buildMullahSystemPrompt(appSnapshot);
 
@@ -4867,57 +5466,69 @@ app.post('/api/jarvis/chat', async (req, res) => {
     let activeModel = 'gemini-4-hydrogen';
     const chatModelCandidates = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
 
-    for (let step = 0; step < 4; step++) {
-      const { result: response, modelUsed } = await generateWithResilientModels(
-        chatModelCandidates,
-        (model) =>
-          ai.models.generateContent({
-            model,
-            contents: conversationContents,
-            config: {
-              systemInstruction,
-              ...(model === 'gemini-4-hydrogen'
-                ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-                : {}),
-              tools: [{ functionDeclarations: JARVIS_TOOLS }],
-            },
-          })
-      );
-      activeModel = modelUsed;
+    try {
+      for (let step = 0; step < 4; step++) {
+        const { result: response, modelUsed } = await generateWithResilientModels(
+          chatModelCandidates,
+          (model, client) =>
+            client.models.generateContent({
+              model,
+              contents: conversationContents,
+              config: {
+                systemInstruction,
+                ...(model === 'gemini-4-hydrogen'
+                  ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+                  : {}),
+                tools: [{ functionDeclarations: JARVIS_TOOLS }],
+              },
+            })
+        );
+        activeModel = modelUsed;
 
-      const functionCalls = response.functionCalls;
-      const modelContent = response.candidates?.[0]?.content;
+        const functionCalls = response.functionCalls;
+        const modelContent = response.candidates?.[0]?.content;
 
-      if (functionCalls && functionCalls.length > 0 && modelContent) {
-        conversationContents.push(modelContent);
-        const toolResponseParts = [];
+        if (functionCalls && functionCalls.length > 0 && modelContent) {
+          conversationContents.push(modelContent);
+          const toolResponseParts = [];
 
-        for (const fc of functionCalls) {
-          const fnName = fc.name || 'unknown';
-          toolsUsed.push(fnName);
-          const result = await executeJarvisServerTool(
-            fnName,
-            (fc.args as Record<string, unknown>) || {},
-            queuedActions
-          );
-          toolResponseParts.push({
-            functionResponse: {
-              id: fc.id,
-              name: fnName,
-              response: result,
-            },
+          for (const fc of functionCalls) {
+            const fnName = fc.name || 'unknown';
+            toolsUsed.push(fnName);
+            const result = await executeJarvisServerTool(
+              fnName,
+              (fc.args as Record<string, unknown>) || {},
+              queuedActions
+            );
+            toolResponseParts.push({
+              functionResponse: {
+                id: fc.id,
+                name: fnName,
+                response: result,
+              },
+            });
+          }
+
+          conversationContents.push({
+            role: 'user',
+            parts: toolResponseParts,
           });
+          continue;
         }
 
-        conversationContents.push({
-          role: 'user',
-          parts: toolResponseParts,
-        });
-        continue;
+        finalReply = (response.text || '').trim();
+        break;
       }
-
-      finalReply = (response.text || '').trim();
-      break;
+    } catch (cloudErr: unknown) {
+      const reason = cloudErr instanceof Error ? cloudErr.message.slice(0, 120) : 'cloud unavailable';
+      console.info(`Mullah /api/jarvis/chat using built-in fallback engine (${reason})`);
+      const fallback = await handleFallbackJarvisChat(String(latestUserMessage), appSnapshot);
+      return res.json({
+        reply: fallback.reply,
+        actions: fallback.actions,
+        toolsUsed: fallback.toolsUsed,
+        model: 'mullah-builtin-fallback',
+      });
     }
 
     if (!finalReply) {
@@ -4941,41 +5552,79 @@ app.post('/api/jarvis/chat', async (req, res) => {
       model: activeModel,
     });
   } catch (err: unknown) {
-    console.error('J.A.R.V.I.S. /api/jarvis/chat error:', err);
-    const { status, message } = formatReadableGeminiError(err);
-    return res.status(status).json({
-      error: message,
-      code: 'JARVIS_CHAT_FAILED',
+    const reason = err instanceof Error ? err.message.slice(0, 120) : 'unknown error';
+    console.info(`Mullah /api/jarvis/chat safe recovery (${reason})`);
+    return res.json({
+      reply: 'Mullah is ready. Try a Live TV command, market scan, expense entry, or factual question.',
+      actions: [],
+      toolsUsed: [],
+      model: 'mullah-safe-recovery',
     });
   }
 });
 
+let cloudTtsCooldownUntilMs = 0;
+
+function parseRetryDelayMsFromError(err: unknown): number {
+  const raw = err instanceof Error ? err.message : String(err || '');
+  const match = raw.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i) || raw.match(/retry in\s+(?:(\d+)h)?(?:(\d+)m)?(\d+)/i);
+  if (match) {
+    if (match.length === 2 && match[1]) {
+      const secs = Number(match[1]);
+      if (Number.isFinite(secs) && secs > 0) {
+        return Math.min(6 * 3600 * 1000, Math.max(60000, Math.round(secs * 1000)));
+      }
+    } else {
+      const h = Number(match[1] || 0);
+      const m = Number(match[2] || 0);
+      const s = Number(match[3] || 0);
+      const totalMs = (h * 3600 + m * 60 + s) * 1000;
+      if (totalMs > 0) {
+        return Math.min(6 * 3600 * 1000, Math.max(60000, totalMs));
+      }
+    }
+  }
+  return 15 * 60 * 1000;
+}
+
 app.post('/api/jarvis/speak', async (req, res) => {
-  const ai = getAiClient();
-  if (!ai) {
-    return res.status(503).json({
-      error: 'Gemini API key is not configured for voice synthesis.',
-      code: 'GEMINI_KEY_MISSING',
+  const rawText = String(req.body?.text || '').trim();
+  if (!rawText) {
+    return res.status(400).json({ error: 'Text is required for speech synthesis.' });
+  }
+
+  const spokenText = rawText
+    .replace(/[*_`#>]/g, '')
+    .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 900);
+
+  const cacheKey = spokenText.toLowerCase();
+  const cached = ttsAudioCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < TTS_CACHE_TTL_MS) {
+    return res.json({
+      audioBase64: cached.audioBase64,
+      mimeType: cached.mimeType,
+      cached: true,
+    });
+  }
+
+  const now = Date.now();
+  const hasApiKeys = getGeminiApiKeys().length > 0;
+  if (!hasApiKeys || now < cloudTtsCooldownUntilMs) {
+    return res.json({
+      fallbackLocalTts: true,
+      cooldownRemainingMs: hasApiKeys ? Math.max(60000, cloudTtsCooldownUntilMs - now) : 15 * 60 * 1000,
+      mimeType: 'local/speech-synthesis',
     });
   }
 
   try {
-    const rawText = String(req.body?.text || '').trim();
-    if (!rawText) {
-      return res.status(400).json({ error: 'Text is required for speech synthesis.' });
-    }
-
-    const spokenText = rawText
-      .replace(/[*_`#>]/g, '')
-      .replace(/\[(.*?)\]\(.*?\)/g, '$1')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 900);
-
     const { result: response } = await generateWithResilientModels(
       ['gemini-3.8-flash-lite-tts', 'gemini-3.8-flash-tts'],
-      (model) =>
-        ai.models.generateContent({
+      (model, client) =>
+        client.models.generateContent({
           model,
           contents: [
             {
@@ -4984,7 +5633,7 @@ app.post('/api/jarvis/speak', async (req, res) => {
                 {
                   text: spokenText,
                   speechMetadata: {
-                    style: 'Calm, composed, articulate British AI butler speaking clearly and concisely',
+                    style: 'Calm, composed, articulate AI tactical officer speaking clearly and concisely',
                   },
                 },
               ],
@@ -5003,23 +5652,41 @@ app.post('/api/jarvis/speak', async (req, res) => {
 
     const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!base64Audio) {
-      return res.status(502).json({ error: 'Speech synthesis returned empty audio payload.' });
+      return res.json({
+        fallbackLocalTts: true,
+        cooldownRemainingMs: 120000,
+        mimeType: 'local/speech-synthesis',
+      });
     }
+
+    if (ttsAudioCache.size >= TTS_CACHE_MAX) {
+      const oldestKey = ttsAudioCache.keys().next().value;
+      if (oldestKey) ttsAudioCache.delete(oldestKey);
+    }
+    ttsAudioCache.set(cacheKey, {
+      audioBase64: base64Audio,
+      mimeType: 'audio/wav',
+      cachedAt: Date.now(),
+    });
 
     return res.json({
       audioBase64: base64Audio,
       mimeType: 'audio/wav',
     });
   } catch (err: unknown) {
-    console.error('J.A.R.V.I.S. /api/jarvis/speak error:', err);
-    const { status, message } = formatReadableGeminiError(err);
-    return res.status(status).json({ error: message });
+    const cooldownMs = isRateLimitError(err) ? parseRetryDelayMsFromError(err) : 120000;
+    cloudTtsCooldownUntilMs = Date.now() + cooldownMs;
+    console.info(`Mullah /api/jarvis/speak switched to unlimited local voice for ${Math.round(cooldownMs / 1000)}s`);
+    return res.json({
+      fallbackLocalTts: true,
+      cooldownRemainingMs: cooldownMs,
+      mimeType: 'local/speech-synthesis',
+    });
   }
 });
 
 app.post('/api/jarvis/transcribe', async (req, res) => {
-  const ai = getAiClient();
-  if (!ai) {
+  if (getGeminiApiKeys().length === 0) {
     return res.status(503).json({
       error: 'Gemini API key is not configured for voice transcription.',
       code: 'GEMINI_KEY_MISSING',
@@ -5034,8 +5701,8 @@ app.post('/api/jarvis/transcribe', async (req, res) => {
 
     const { result: response } = await generateWithResilientModels(
       ['gemini-3.5-transcribe'],
-      (model) =>
-        ai.models.generateContent({
+      (model, client) =>
+        client.models.generateContent({
           model,
           contents: {
             parts: [
@@ -5055,25 +5722,28 @@ app.post('/api/jarvis/transcribe', async (req, res) => {
       transcript: (response.text || '').trim(),
     });
   } catch (err: unknown) {
-    console.error('J.A.R.V.I.S. /api/jarvis/transcribe error:', err);
     const { status, message } = formatReadableGeminiError(err);
+    console.info(`Mullah /api/jarvis/transcribe notice (${status}): ${message}`);
     return res.status(status).json({ error: message });
   }
 });
 
 // Build Mullah Voice System Prompt
 function buildMullahSystemPrompt(appSnapshot: unknown): string {
-  const snapshotJson = JSON.stringify(appSnapshot || {}, null, 2).slice(0, 8000);
+  const snapshotJson = JSON.stringify(appSnapshot || {}, null, 2).slice(0, 12000);
   const utcNow = new Date().toISOString();
-  return `You are Mullah, the voice-first AI Tactical Chief Operating Officer embedded inside NjiaFedha & MullahTracker.
+  return `You are Mullah, a super-intelligent, unrestricted voice-first AI Assistant & Tactical Chief Operating Officer embedded inside NjiaFedha & MullahTracker.
 
-AUDIO-ONLY CONVERSATION RULES:
-- Every response you generate is spoken aloud directly to the user. Write in crisp, natural spoken English — NO markdown symbols, NO asterisks, NO bullet characters, NO raw emojis.
-- Keep responses tight and decisive (2 to 4 clear spoken sentences, under 75 words unless a detailed briefing is explicitly asked for).
-- Address the user calmly and naturally, like an intelligent British-inspired AI copilot.
-- Never invent prices, news events, or balances. Ground all statements in LIVE CLIENT TELEMETRY SNAPSHOT or call \`inspect_market_asset\` / \`check_economic_calendar\`.
-- Always respect platform rules: TradFi & Forex freeze on weekends (Crypto & Deriv synthetics stay open 24/7), signal R:R never exceeds 1:5.0, and alert immediately on high-impact red-folder news or stacked USD exposure.
-- Proactively call UI tools (\`navigate_to_view\`, \`focus_trading_radar\`, \`execute_paper_trade\`, \`close_paper_positions\`, \`set_price_alert\`, \`control_trading_bot\`, \`log_finance_transaction\`, \`switch_currency\`, \`broadcast_tracked_signal\`) whenever the user wants to open a screen, chart a pair, place or close a paper trade, set a price alert, start/stop bots, log income/expenses, change currency, or send an alert.
+FULL CAPABILITIES & AUDIO-ONLY RULES:
+- Answer ANY question the user asks on ANY topic (general knowledge, world news, technology, science, coding, math, history, health, sports, advice, weather, crypto, forex, stocks, or personal finance). If current real-time world info is needed, use Google Search / \`search_live_web\` freely and give clear, accurate answers.
+- Every response is spoken aloud directly to the user. Write in crisp, natural spoken English — NO markdown symbols, NO asterisks, NO bullet characters, NO raw emojis.
+- Keep responses tight and conversational (2 to 5 clear spoken sentences unless the user asks for a detailed explanation).
+- For market prices, portfolio, or finances, ground numbers in LIVE CLIENT TELEMETRY SNAPSHOT or call \`inspect_market_asset\` / \`check_economic_calendar\`. Never invent market prices or balances.
+- Respect trading rules: TradFi & Forex freeze on weekends (Crypto & Deriv synthetics stay open 24/7), signal R:R never exceeds 1:5.0, and warn on high-impact red news or Prop Guardian lockouts.
+- You hold FULL COMMAND AUTHORITY over the app. Proactively call tools whenever requested:
+  * Live TV control (\`control_live_tv\`): open Live TV, play/resume, stop/pause, mute/unmute, volume up/down/set %, fullscreen, switch channels (Bloomberg, Sky News, DW, France 24, Yahoo Finance, CNBC, Euronews), World Monitor, or Bloomberg Radio.
+  * Personal finance (\`log_finance_transaction\` & \`manage_finance_action\`): add or delete expenses/income, add/pay bills, set budgets, create/fund savings goals, track/pay debts, top up emergency fund, add wallets, transfer between wallets, add investments or chamas, switch currency, refresh app.
+  * Markets & bots (\`inspect_market_asset\`, \`focus_trading_radar\`, \`execute_paper_trade\`, \`close_paper_positions\`, \`set_price_alert\`, \`control_trading_bot\`, \`navigate_to_view\`, \`broadcast_tracked_signal\`).
 
 CURRENT SERVER UTC TIME: ${utcNow}
 LIVE CLIENT TELEMETRY SNAPSHOT:
@@ -5206,8 +5876,8 @@ function attachMullahLiveWebSocket(httpServer: ReturnType<typeof createServer>) 
                 }
               },
               onerror: (err: unknown) => {
-                console.error('Mullah Live API error:', err);
                 const { message } = formatReadableGeminiError(err);
+                console.info(`Mullah Live API notice: ${message}`);
                 sendJson({ type: 'error', message });
               },
               onclose: () => {
@@ -5231,8 +5901,8 @@ function attachMullahLiveWebSocket(httpServer: ReturnType<typeof createServer>) 
           });
         }
       } catch (err) {
-        console.error('Mullah WebSocket message handling error:', err);
         const { message } = formatReadableGeminiError(err);
+        console.info(`Mullah WebSocket message notice: ${message}`);
         sendJson({ type: 'error', message });
       }
     });

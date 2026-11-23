@@ -244,11 +244,37 @@ export const LiveMarketsTVDesk: React.FC<LiveMarketsTVDeskProps> = ({ onSelectTi
   const [hlsError, setHlsError] = useState<string | null>(null);
   const [isHlsLoading, setIsHlsLoading] = useState<boolean>(false);
   const [isAutoplayBlocked, setIsAutoplayBlocked] = useState<boolean>(false);
+  const [mullahControlNotice, setMullahControlNotice] = useState<string | null>(null);
+
+  const ytIframeRef = useRef<HTMLIFrameElement | null>(null);
+  const isVideoMutedRef = useRef<boolean>(isVideoMuted);
+  useEffect(() => {
+    isVideoMutedRef.current = isVideoMuted;
+  }, [isVideoMuted]);
+
+  // Audio Radio State
+  const [selectedStation, setSelectedStation] = useState<RadioStation>(BLOOMBERG_RADIO_STATIONS[0]);
+  const [isRadioPlaying, setIsRadioPlaying] = useState<boolean>(false);
+  const [radioVolume, setRadioVolume] = useState<number>(0.8);
+  const [isRadioMuted, setIsRadioMuted] = useState<boolean>(false);
+  const [radioError, setRadioError] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const mediaModeRef = useRef(mediaMode);
+  mediaModeRef.current = mediaMode;
+  const videoVolumeRef = useRef(videoVolume);
+  videoVolumeRef.current = videoVolume;
+  const radioVolumeRef = useRef(radioVolume);
+  radioVolumeRef.current = radioVolume;
+  const selectedChannelRef = useRef(selectedChannel);
+  selectedChannelRef.current = selectedChannel;
 
   // Callback ref for guaranteed React video element attachment
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
+  const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const videoRefCallback = useCallback((node: HTMLVideoElement | null) => {
     if (node) {
+      videoElementRef.current = node;
       setVideoElement(node);
     }
   }, []);
@@ -305,14 +331,6 @@ export const LiveMarketsTVDesk: React.FC<LiveMarketsTVDeskProps> = ({ onSelectTi
   const [activeCustomEmbed, setActiveCustomEmbed] = useState<string | null>(null);
   const [customStreamType, setCustomStreamType] = useState<'hls' | 'embed'>('embed');
 
-  // Audio Radio State
-  const [selectedStation, setSelectedStation] = useState<RadioStation>(BLOOMBERG_RADIO_STATIONS[0]);
-  const [isRadioPlaying, setIsRadioPlaying] = useState<boolean>(false);
-  const [radioVolume, setRadioVolume] = useState<number>(0.8);
-  const [isRadioMuted, setIsRadioMuted] = useState<boolean>(false);
-  const [radioError, setRadioError] = useState<string | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-
   // HLS Stream Attachment & Playback (World Monitor architecture with multi-CDN fallback support)
   useEffect(() => {
     if (mediaMode !== 'tv' || !videoElement) return;
@@ -347,10 +365,10 @@ export const LiveMarketsTVDesk: React.FC<LiveMarketsTVDeskProps> = ({ onSelectTi
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         setIsHlsLoading(false);
-        // Browsers require video to start muted for autoplay to succeed
-        videoElement.muted = true;
-        setIsVideoMuted(true);
-        videoElement.volume = videoVolume;
+        // Preserve unmuted state if user/Mullah already unmuted; otherwise start muted for reliable autoplay
+        const shouldMute = isVideoMutedRef.current;
+        videoElement.muted = shouldMute;
+        videoElement.volume = videoVolumeRef.current;
         
         const playPromise = videoElement.play();
         if (playPromise !== undefined) {
@@ -520,6 +538,212 @@ export const LiveMarketsTVDesk: React.FC<LiveMarketsTVDeskProps> = ({ onSelectTi
     handleSelectChannel(TV_CHANNELS[nextIndex]);
   };
 
+  // Helper to command embedded YouTube iframe via postMessage JS API
+  const postYouTubeCommand = useCallback((func: string, args: unknown[] = []) => {
+    try {
+      const win = ytIframeRef.current?.contentWindow;
+      if (!win) return;
+      win.postMessage(JSON.stringify({ event: 'command', func, args }), '*');
+    } catch {}
+  }, []);
+
+  // Listen to Mullah AI Live TV voice control commands (Play/Stop/Resume/Mute/Unmute/Volume/Channel/Mode)
+  const applyLiveTvControlCommand = useCallback(
+    (cmd: {
+      action?: string;
+      channel?: string;
+      volume?: number;
+      mode?: 'tv' | 'worldmonitor' | 'radio' | 'custom';
+    }) => {
+      if (!cmd || !cmd.action) return;
+      const act = String(cmd.action).toUpperCase();
+      const showNotice = (msg: string) => {
+        setMullahControlNotice(msg);
+        setTimeout(() => setMullahControlNotice(null), 4000);
+      };
+
+      if (act === 'SET_MODE' && cmd.mode) {
+        setMediaMode(cmd.mode);
+        if (cmd.mode === 'radio' && audioRef.current) {
+          audioRef.current.play().then(() => setIsRadioPlaying(true)).catch(() => {});
+        }
+        showNotice(`Mullah switched Live Desk to ${cmd.mode.toUpperCase()}`);
+        return;
+      }
+
+      if (act === 'SWITCH_CHANNEL' || cmd.channel) {
+        const query = String(cmd.channel || '').toLowerCase().trim();
+        if (query.includes('world') || query.includes('monitor')) {
+          setMediaMode('worldmonitor');
+          showNotice('Mullah opened World Monitor Terminal');
+          return;
+        }
+        if (query.includes('radio')) {
+          setMediaMode('radio');
+          audioRef.current?.play().then(() => setIsRadioPlaying(true)).catch(() => {});
+          showNotice('Mullah switched to Bloomberg 24/7 Radio');
+          return;
+        }
+        const match = TV_CHANNELS.find(
+          (ch) =>
+            ch.id.toLowerCase().includes(query) ||
+            ch.network.toLowerCase().includes(query) ||
+            ch.name.toLowerCase().includes(query)
+        );
+        if (match) {
+          setMediaMode('tv');
+          setSelectedChannel(match);
+          setActiveHlsUrl(match.hlsUrl || '');
+          setUseFallbackEmbed(false);
+          setHlsError(null);
+          showNotice(`Mullah switched Live TV to ${match.network}`);
+        }
+        if (act === 'SWITCH_CHANNEL') return;
+      }
+
+      if (act === 'NEXT_CHANNEL') {
+        setMediaMode('tv');
+        const idx = TV_CHANNELS.findIndex((c) => c.id === selectedChannelRef.current.id);
+        const next = TV_CHANNELS[(idx + 1) % TV_CHANNELS.length];
+        setSelectedChannel(next);
+        setActiveHlsUrl(next.hlsUrl || '');
+        setUseFallbackEmbed(false);
+        setHlsError(null);
+        showNotice(`Mullah switched Live TV to ${next.network}`);
+        return;
+      }
+
+      if (act === 'PLAY' || act === 'RESUME') {
+        if (mediaModeRef.current === 'radio' && audioRef.current) {
+          audioRef.current.play().then(() => setIsRadioPlaying(true)).catch(() => {});
+          showNotice('Mullah resumed Bloomberg Radio');
+        } else {
+          if (mediaModeRef.current !== 'tv') setMediaMode('tv');
+          const v = videoElementRef.current;
+          if (v) {
+            v.play()
+              .then(() => {
+                setIsVideoPlaying(true);
+                setIsAutoplayBlocked(false);
+              })
+              .catch(() => {});
+          }
+          postYouTubeCommand('playVideo');
+          setIsVideoPlaying(true);
+          showNotice('Mullah resumed Live TV stream');
+        }
+        return;
+      }
+
+      if (act === 'PAUSE' || act === 'STOP') {
+        if (mediaModeRef.current === 'radio' && audioRef.current) {
+          audioRef.current.pause();
+          setIsRadioPlaying(false);
+          showNotice('Mullah paused Bloomberg Radio');
+        } else {
+          const v = videoElementRef.current;
+          if (v) v.pause();
+          postYouTubeCommand('pauseVideo');
+          setIsVideoPlaying(false);
+          showNotice('Mullah paused Live TV stream');
+        }
+        return;
+      }
+
+      if (act === 'MUTE') {
+        setIsVideoMuted(true);
+        isVideoMutedRef.current = true;
+        setIsRadioMuted(true);
+        if (videoElementRef.current) videoElementRef.current.muted = true;
+        if (audioRef.current) audioRef.current.volume = 0;
+        postYouTubeCommand('mute');
+        showNotice('Mullah muted Live TV audio');
+        return;
+      }
+
+      if (act === 'UNMUTE') {
+        setIsVideoMuted(false);
+        isVideoMutedRef.current = false;
+        setIsRadioMuted(false);
+        const targetVol = Math.max(0.4, videoVolumeRef.current || 0.8);
+        setVideoVolume(targetVol);
+        setRadioVolume(Math.max(0.4, radioVolumeRef.current || 0.8));
+        if (videoElementRef.current) {
+          videoElementRef.current.muted = false;
+          videoElementRef.current.volume = targetVol;
+        }
+        if (audioRef.current) audioRef.current.volume = Math.max(0.4, radioVolumeRef.current || 0.8);
+        postYouTubeCommand('unMute');
+        postYouTubeCommand('setVolume', [Math.round(targetVol * 100)]);
+        showNotice(`Mullah unmuted Live TV (${Math.round(targetVol * 100)}%)`);
+        return;
+      }
+
+      if (act === 'VOLUME_UP' || act === 'VOLUME_DOWN' || act === 'SET_VOLUME') {
+        const curVol = mediaModeRef.current === 'radio' ? radioVolumeRef.current : videoVolumeRef.current;
+        const nextVol =
+          act === 'SET_VOLUME' && typeof cmd.volume === 'number'
+            ? Math.min(1, Math.max(0, cmd.volume / 100))
+            : act === 'VOLUME_UP'
+            ? Math.min(1, Math.round((curVol + 0.2) * 100) / 100)
+            : Math.max(0.05, Math.round((curVol - 0.2) * 100) / 100);
+
+        const nextMute = nextVol <= 0;
+        setIsVideoMuted(nextMute);
+        isVideoMutedRef.current = nextMute;
+        setIsRadioMuted(nextMute);
+        setVideoVolume(nextVol);
+        setRadioVolume(nextVol);
+        if (videoElementRef.current) {
+          videoElementRef.current.muted = nextMute;
+          videoElementRef.current.volume = nextVol;
+        }
+        if (audioRef.current) {
+          audioRef.current.volume = nextVol;
+        }
+        if (!nextMute) postYouTubeCommand('unMute');
+        postYouTubeCommand('setVolume', [Math.round(nextVol * 100)]);
+        showNotice(`Mullah set Live TV volume to ${Math.round(nextVol * 100)}%`);
+        return;
+      }
+
+      if (act === 'FULLSCREEN') {
+        setIsCinemaMode(true);
+        showNotice('Mullah entered Live TV Cinema Mode');
+      } else if (act === 'EXIT_FULLSCREEN') {
+        setIsCinemaMode(false);
+        if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+        showNotice('Mullah exited Cinema Mode');
+      }
+    },
+    [postYouTubeCommand]
+  );
+
+  useEffect(() => {
+    try {
+      const pendingRaw = sessionStorage.getItem('njia_pending_livetv_control');
+      if (pendingRaw) {
+        sessionStorage.removeItem('njia_pending_livetv_control');
+        const pending = JSON.parse(pendingRaw);
+        setTimeout(() => {
+          const items = Array.isArray(pending) ? pending : [pending];
+          for (const item of items) {
+            if (item) applyLiveTvControlCommand(item);
+          }
+        }, 120);
+      }
+    } catch {}
+
+    const onControlEvent = (evt: Event) => {
+      const detail = (evt as CustomEvent).detail;
+      if (detail) {
+        applyLiveTvControlCommand(detail);
+      }
+    };
+    window.addEventListener('njia-livetv-control', onControlEvent);
+    return () => window.removeEventListener('njia-livetv-control', onControlEvent);
+  }, [applyLiveTvControlCommand]);
+
   // Parse custom URL into embed or HLS
   const handleApplyCustomUrl = (e: React.FormEvent) => {
     e.preventDefault();
@@ -583,6 +807,22 @@ export const LiveMarketsTVDesk: React.FC<LiveMarketsTVDeskProps> = ({ onSelectTi
       />
 
       {/* Top Header */}
+      {mullahControlNotice && (
+        <div className="px-3.5 py-2 rounded-xl bg-teal-500/15 border border-[#0df2c9]/50 text-xs font-mono font-bold text-[#0df2c9] flex items-center justify-between gap-2 animate-in fade-in">
+          <span className="flex items-center gap-2">
+            <Zap className="w-3.5 h-3.5" />
+            {mullahControlNotice}
+          </span>
+          <button
+            type="button"
+            onClick={() => setMullahControlNotice(null)}
+            className="text-slate-400 hover:text-white cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-[#14233c]">
         <div>
           <div className="flex items-center gap-2">
@@ -960,6 +1200,7 @@ export const LiveMarketsTVDesk: React.FC<LiveMarketsTVDeskProps> = ({ onSelectTi
             ) : (
               /* YOUTUBE IFRAME FALLBACK */
               <iframe
+                ref={ytIframeRef}
                 src={selectedChannel.embedUrl}
                 title={selectedChannel.name}
                 className="w-full h-full border-0"
