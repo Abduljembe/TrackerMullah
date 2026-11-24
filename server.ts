@@ -2412,7 +2412,7 @@ Respond strictly in valid JSON format:
     const callGeminiJson = async (promptText: string) => {
       const ai = getAiClient();
       if (!ai) return null;
-      const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
+      const candidateModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
       for (const model of candidateModels) {
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
@@ -2762,7 +2762,7 @@ User Question: "${question}"
 Provide a crisp, actionable, financial analysis with real numbers, valuation context, and risk warnings. Keep it under 150 words.`;
 
     const ai = getAiClient();
-    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
     let text = '';
     if (ai) {
       for (const model of candidateModels) {
@@ -3321,7 +3321,7 @@ Respond strictly in valid JSON format:
     const textPart = { text: promptText };
 
     const ai = getAiClient();
-    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
     let aiResponse = null;
 
     if (ai) {
@@ -3466,7 +3466,7 @@ Respond ONLY in valid JSON format:
 
     const ai = getAiClient();
     if (ai) {
-      const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
+      const candidateModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
       for (const model of candidateModels) {
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
@@ -3643,7 +3643,7 @@ Respond strictly in valid JSON matching this schema:
 
     const ai = getAiClient();
     if (ai) {
-      const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
+      const candidateModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
       for (const model of candidateModels) {
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
@@ -4089,7 +4089,7 @@ Respond strictly in valid JSON format:
     const fetchGeminiNews = async () => {
       const ai = getAiClient();
       if (!ai) return null;
-      const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
+      const candidateModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
       for (const model of candidateModels) {
         try {
           const response = await ai.models.generateContent({
@@ -4405,7 +4405,7 @@ Respond strictly in valid JSON format:
 
     // Try Gemini multimodal vision models
     const ai = getAiClient();
-    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
     let aiParsed: any = null;
 
     if (ai) {
@@ -4448,7 +4448,7 @@ Respond strictly in valid JSON format:
             }
           }
         } catch (err) {
-          console.warn(`Vision model ${model} analysis attempt failed:`, err);
+          console.warn(`Vision model ${model} notice: ${formatReadableGeminiError(err).message}`);
         }
       }
     }
@@ -5213,22 +5213,25 @@ async function executeJarvisServerTool(
   if (name === 'search_live_web') {
     const query = String(args.query || '').trim();
     if (!query) return { error: 'query is required' };
-    const ai = getAiClient();
-    if (!ai) return { error: 'Gemini client unavailable' };
+    if (getGeminiApiKeys().length === 0) return { error: 'Gemini client unavailable' };
     try {
-      const searchResp = await withServerTimeout(
-        ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
-          contents: query,
-          config: {
-            tools: [{ googleSearch: {} }],
-          },
-        }),
-        9000,
+      const searchOut = await withServerTimeout(
+        generateWithResilientModels(['gemini-4-hydrogen', 'gemini-3.1-flash-lite'], (model, client) =>
+          client.models.generateContent({
+            model,
+            contents: query,
+            config: {
+              tools: [{ googleSearch: {} }],
+            },
+          })
+        ),
+        10000,
         null
       );
-      if (!searchResp) return { summary: 'Live web search timed out. Answer directly from best available knowledge.' };
-      return { summary: (searchResp.text || '').trim() };
+      if (!searchOut?.result) {
+        return { summary: 'Live web search timed out. Answer directly from best available knowledge.' };
+      }
+      return { summary: (searchOut.result.text || '').trim() };
     } catch {
       return { summary: 'Web lookup unavailable; answer clearly from general knowledge.' };
     }
@@ -5319,11 +5322,13 @@ async function generateWithResilientModels<T>(
     throw new Error('GEMINI_KEY_MISSING');
   }
   let lastErr: unknown;
-  for (const client of clients) {
-    for (const model of candidates) {
-      // Do NOT hammer a 429 rate-limited model twice on the same key — failover immediately to save RPM quota
-      const maxAttempts = 2;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  const maxPasses = 3;
+  const passBackoffsMs = [750, 1650];
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let sawNonRateLimitTransient = false;
+    for (const client of clients) {
+      for (const model of candidates) {
         try {
           const result = await invoke(model, client);
           return { result, modelUsed: model };
@@ -5332,16 +5337,19 @@ async function generateWithResilientModels<T>(
           if (!isTransientUpstreamError(err)) {
             throw err;
           }
-          if (isRateLimitError(err)) {
-            break;
+          if (!isRateLimitError(err)) {
+            sawNonRateLimitTransient = true;
           }
-          if (attempt === 0) {
-            const delayMs = 350 + Math.floor(Math.random() * 180);
-            await new Promise((resolve) => setTimeout(resolve, delayMs));
-          }
+          // Failover immediately to the next candidate model or backup key on 503/429
         }
       }
     }
+    if (!sawNonRateLimitTransient || pass >= maxPasses - 1) {
+      break;
+    }
+    const baseDelay = passBackoffsMs[pass] ?? 1650;
+    const jitter = Math.floor(Math.random() * 250);
+    await new Promise((resolve) => setTimeout(resolve, baseDelay + jitter));
   }
   throw lastErr;
 }
@@ -5797,15 +5805,19 @@ app.post('/api/jarvis/chat', async (req, res) => {
     const latestUserMessage =
       [...messages].reverse().find((m: { role?: string; text?: string }) => m.role !== 'assistant')?.text || '';
 
-    // If no Gemini API key is configured on this host (e.g., unconfigured Shared Preview / external host),
-    // serve directly via Mullah's built-in operational & knowledge engine with HTTP 200 (never fail with 503!).
     if (getGeminiApiKeys().length === 0) {
       const fallback = await handleFallbackJarvisChat(String(latestUserMessage), appSnapshot);
-      return res.json({
-        reply: fallback.reply,
-        actions: fallback.actions,
-        toolsUsed: fallback.toolsUsed,
-        model: 'mullah-builtin-engine',
+      if (fallback.actions.length > 0 || fallback.toolsUsed.length > 0) {
+        return res.json({
+          reply: fallback.reply,
+          actions: fallback.actions,
+          toolsUsed: fallback.toolsUsed,
+          model: 'mullah-local-tools',
+        });
+      }
+      return res.status(503).json({
+        error: 'Gemini API key is not configured for conversational AI. Local voice commands remain active.',
+        code: 'GEMINI_KEY_MISSING',
       });
     }
 
@@ -5874,15 +5886,21 @@ app.post('/api/jarvis/chat', async (req, res) => {
         break;
       }
     } catch (cloudErr: unknown) {
-      const reason = cloudErr instanceof Error ? cloudErr.message.slice(0, 120) : 'cloud unavailable';
-      console.info(`Mullah /api/jarvis/chat using built-in fallback engine (${reason})`);
+      const { status, message } = formatReadableGeminiError(cloudErr);
+      console.info(`Mullah /api/jarvis/chat upstream notice (${status}): ${message}`);
+
+      // If this request matches a real deterministic app tool/lookup (Live TV, quote scan, math, calendar, Wikipedia), fulfill it cleanly
       const fallback = await handleFallbackJarvisChat(String(latestUserMessage), appSnapshot);
-      return res.json({
-        reply: fallback.reply,
-        actions: fallback.actions,
-        toolsUsed: fallback.toolsUsed,
-        model: 'mullah-builtin-fallback',
-      });
+      if (fallback.actions.length > 0 || fallback.toolsUsed.length > 0) {
+        return res.json({
+          reply: fallback.reply,
+          actions: fallback.actions,
+          toolsUsed: fallback.toolsUsed,
+          model: 'mullah-local-tools',
+        });
+      }
+
+      return res.status(status).json({ error: message });
     }
 
     if (!finalReply) {
@@ -5906,14 +5924,9 @@ app.post('/api/jarvis/chat', async (req, res) => {
       model: activeModel,
     });
   } catch (err: unknown) {
-    const reason = err instanceof Error ? err.message.slice(0, 120) : 'unknown error';
-    console.info(`Mullah /api/jarvis/chat safe recovery (${reason})`);
-    return res.json({
-      reply: 'Mullah is ready. Try a Live TV command, market scan, expense entry, or factual question.',
-      actions: [],
-      toolsUsed: [],
-      model: 'mullah-safe-recovery',
-    });
+    const { status, message } = formatReadableGeminiError(err);
+    console.info(`Mullah /api/jarvis/chat notice (${status}): ${message}`);
+    return res.status(status).json({ error: message });
   }
 });
 

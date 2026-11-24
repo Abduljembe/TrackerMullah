@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ShieldAlert,
   Globe2,
@@ -7,18 +7,18 @@ import {
   Clock,
   Send,
   Zap,
-  Flame,
   Layers,
   ArrowRight,
-  TrendingUp,
   Activity,
-  Award,
   Compass,
   Building2,
   Target,
   Sparkles,
   Search,
   BarChart3,
+  LayoutGrid,
+  ChevronDown,
+  X,
 } from 'lucide-react';
 import { useFinance } from '../../context/FinanceContext.tsx';
 import { CurrencyStrengthMeter } from '../common/CurrencyStrengthMeter.tsx';
@@ -50,6 +50,133 @@ type SuiteTab =
   | 'sessions'
   | 'dispatcher';
 
+interface QuantToolMeta {
+  id: Exclude<SuiteTab, 'all'>;
+  label: string;
+  shortLabel: string;
+  description: string;
+  icon: React.ElementType;
+}
+
+const QUANT_TOOL_CATEGORIES: Array<{
+  id: string;
+  title: string;
+  tools: QuantToolMeta[];
+}> = [
+  {
+    id: 'structure',
+    title: 'Structure & Volatility',
+    tools: [
+      {
+        id: 'barchart',
+        label: 'Barchart Opinions & Movers',
+        shortLabel: 'Barchart',
+        description: '13-indicator consensus & market movers',
+        icon: BarChart3,
+      },
+      {
+        id: 'mtf-matrix',
+        label: 'MTF 4H–1M Confluence',
+        shortLabel: 'MTF Matrix',
+        description: 'Multi-timeframe trend & momentum alignment',
+        icon: Layers,
+      },
+      {
+        id: 'camarilla',
+        label: 'Camarilla & CPR Pivots',
+        shortLabel: 'Camarilla',
+        description: 'Intraday institutional pivot & breakout levels',
+        icon: Target,
+      },
+      {
+        id: 'adr',
+        label: 'ADR Volatility Exhaustion',
+        shortLabel: 'ADR Exhaustion',
+        description: 'Daily pip range utilization & exhaustion',
+        icon: Activity,
+      },
+    ],
+  },
+  {
+    id: 'macro',
+    title: 'Macro & Positioning',
+    tools: [
+      {
+        id: 'intermarket',
+        label: 'Intermarket Macro Radar',
+        shortLabel: 'Intermarket',
+        description: 'DXY, yields, gold & equity correlation flow',
+        icon: Compass,
+      },
+      {
+        id: 'cot',
+        label: 'COT Smart Money Flows',
+        shortLabel: 'COT Flows',
+        description: 'CFTC institutional net positioning report',
+        icon: Building2,
+      },
+      {
+        id: 'csm',
+        label: 'Currency Strength (CSM)',
+        shortLabel: 'CSM Strength',
+        description: '8-currency relative strength ranking',
+        icon: Globe2,
+      },
+      {
+        id: 'sentiment',
+        label: 'Retail Sentiment',
+        shortLabel: 'Sentiment',
+        description: 'Crowd long/short contrarian positioning',
+        icon: Users,
+      },
+    ],
+  },
+  {
+    id: 'risk',
+    title: 'Risk, Sessions & Alerts',
+    tools: [
+      {
+        id: 'propfirm',
+        label: 'Prop Firm Shield',
+        shortLabel: 'Prop Shield',
+        description: 'Daily drawdown & equity protection guard',
+        icon: ShieldAlert,
+      },
+      {
+        id: 'calendar',
+        label: 'Economic Calendar',
+        shortLabel: 'Calendar',
+        description: 'High-impact macro releases & countdowns',
+        icon: Calendar,
+      },
+      {
+        id: 'sessions',
+        label: 'Killzones & Sessions',
+        shortLabel: 'Killzones',
+        description: 'London, NY & Asia liquidity windows',
+        icon: Clock,
+      },
+      {
+        id: 'dispatcher',
+        label: 'Telegram Dispatch',
+        shortLabel: 'Dispatch',
+        description: '1-click formatted signal broadcast',
+        icon: Send,
+      },
+    ],
+  },
+];
+
+const QUANT_TOOL_MAP: Record<Exclude<SuiteTab, 'all'>, QuantToolMeta> = QUANT_TOOL_CATEGORIES.reduce(
+  (acc, cat) => {
+    for (const tool of cat.tools) {
+      acc[tool.id] = tool;
+    }
+    return acc;
+  },
+  {} as Record<Exclude<SuiteTab, 'all'>, QuantToolMeta>
+);
+
 const QUICK_PAIRS = [
   'XAU/USD',
   'EUR/USD',
@@ -68,9 +195,25 @@ const QUICK_PAIRS = [
 export const ForexPowerSuiteView: React.FC = () => {
   const { setActiveTab } = useFinance();
   const [activeTabLocal, setActiveTabLocal] = useState<SuiteTab>('all');
+  const [showQuantHub, setShowQuantHub] = useState<boolean>(false);
+  const [quantQuery, setQuantQuery] = useState<string>('');
   const [selectedAsset, setSelectedAsset] = useState<string>('XAU/USD');
   const [customPairInput, setCustomPairInput] = useState<string>('');
   const liveQuotes = useTradingViewQuotes(3200);
+
+  const filteredQuantCategories = useMemo(() => {
+    const q = quantQuery.trim().toLowerCase();
+    if (!q) return QUANT_TOOL_CATEGORIES;
+    return QUANT_TOOL_CATEGORIES.map((cat) => ({
+      ...cat,
+      tools: cat.tools.filter(
+        (t) =>
+          t.label.toLowerCase().includes(q) ||
+          t.description.toLowerCase().includes(q) ||
+          cat.title.toLowerCase().includes(q)
+      ),
+    })).filter((cat) => cat.tools.length > 0);
+  }, [quantQuery]);
 
   // Compute live price & signal metrics dynamically
   const activeQuote = lookupTradingViewQuote(liveQuotes, selectedAsset);
@@ -134,37 +277,39 @@ export const ForexPowerSuiteView: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Top Banner */}
-      <div className="p-5 sm:p-6 rounded-2xl bg-gradient-to-r from-[#081324] via-[#091830] to-[#060c18] border border-teal-500/30 shadow-[0_0_30px_rgba(13,242,201,0.09)] flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="w-12 h-12 rounded-2xl bg-teal-500/15 border border-teal-500/40 flex items-center justify-center text-[#0df2c9] shadow-[0_0_15px_rgba(13,242,201,0.3)] shrink-0">
-            <Zap className="w-6 h-6 animate-pulse" />
+      <div className="p-5 sm:p-6 rounded-2xl bg-[#081222] border border-[#1a2b46] flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-center gap-3.5">
+          <div className="w-11 h-11 rounded-xl bg-teal-500/12 border border-teal-500/30 flex items-center justify-center text-[#0df2c9] shrink-0">
+            <Zap className="w-5 h-5" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-xl sm:text-2xl font-black text-white tracking-wide">
-                Forex Institutional Quant & Macro Suite
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
+                Forex Institutional Quant &amp; Macro Suite
               </h1>
-              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[#0df2c9]/15 text-[#0df2c9] border border-[#0df2c9]/30">
-                11/11 QUANT TOOLS ARMED
+              <span className="text-xs font-mono text-[#0df2c9]">
+                12 quant tools <span aria-hidden="true">·</span> synced to {selectedAsset}
               </span>
             </div>
-            <p className="text-xs sm:text-sm text-slate-400 max-w-2xl">
-              Complete professional quantitative command desk: Intermarket Macro Divergence Radar, ADR Volatility Exhaustion, COT Smart Money Flows, MTF Matrix, Camarilla Pivots, Currency Strength, Prop Firm Shield, Retail Sentiment, and Live News Guard.
+            <p className="text-xs sm:text-sm text-slate-400 max-w-2xl mt-0.5">
+              Unified institutional desk for Barchart opinions, intermarket flow, volatility exhaustion, COT smart money, MTF confluence, pivots, prop-firm risk shield, and news guard.
             </p>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
+            type="button"
             onClick={() => setActiveTab('stocks')}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#0e1a2f] hover:bg-[#142644] border border-[#1b345b] text-slate-200 text-xs font-mono font-bold transition-all cursor-pointer"
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#0e1a2f] hover:bg-[#142644] border border-[#1b345b] text-slate-200 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
           >
-            <span>Live TradingView Chart</span>
+            <span>TradingView Workbench</span>
             <ArrowRight className="w-3.5 h-3.5 text-[#0df2c9]" />
           </button>
           <button
+            type="button"
             onClick={() => setActiveTab('mt5-ea')}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-teal-500 to-emerald-500 hover:from-teal-400 hover:to-emerald-400 text-slate-950 text-xs font-black uppercase tracking-wide shadow-[0_0_15px_rgba(13,242,201,0.3)] transition-all cursor-pointer"
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#0df2c9] hover:bg-[#19f7d0] text-slate-950 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
           >
             <Zap className="w-3.5 h-3.5" />
             <span>Launch Bot EA</span>
@@ -230,164 +375,172 @@ export const ForexPowerSuiteView: React.FC = () => {
         </form>
       </div>
 
-      {/* Navigation Sub-Tabs */}
-      <div className="flex flex-wrap items-center gap-1.5 p-1.5 rounded-2xl bg-[#090f1a] border border-[#16233a] overflow-x-auto scrollbar-none">
-        <button
-          onClick={() => setActiveTabLocal('all')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'all'
-              ? 'bg-teal-500/20 text-[#0df2c9] border border-teal-500/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Layers className="w-3.5 h-3.5" />
-          <span>All Quant Tools</span>
-        </button>
+      {/* Single-Row Quant Toolbar + Categorized Hub Trigger */}
+      <div className="flex items-center justify-between gap-2 p-1.5 rounded-2xl bg-[#0c1322] border border-[#16243d]">
+        <div className="flex items-center gap-1 overflow-x-auto scrollbar-none min-w-0">
+          {(
+            [
+              { id: 'all', label: 'All Tools Grid', icon: Layers },
+              { id: 'barchart', label: 'Barchart', icon: BarChart3 },
+              { id: 'mtf-matrix', label: 'MTF Matrix', icon: Layers },
+              { id: 'calendar', label: 'Calendar', icon: Calendar },
+            ] as Array<{ id: SuiteTab; label: string; icon: React.ElementType }>
+          ).map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeTabLocal === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => {
+                  setActiveTabLocal(tab.id);
+                  setShowQuantHub(false);
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  isActive
+                    ? 'bg-[#0df2c9]/15 text-[#0df2c9] border border-[#0df2c9]/40'
+                    : 'text-slate-400 hover:text-white border border-transparent'
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                <span>{tab.label}</span>
+              </button>
+            );
+          })}
 
-        <button
-          onClick={() => setActiveTabLocal('barchart')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'barchart'
-              ? 'bg-teal-500/20 text-[#0df2c9] border border-teal-500/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <BarChart3 className="w-3.5 h-3.5 text-[#0df2c9]" />
-          <span>Barchart Opinions & Movers</span>
-        </button>
+          {activeTabLocal !== 'all' &&
+            !['barchart', 'mtf-matrix', 'calendar'].includes(activeTabLocal) &&
+            (() => {
+              const meta = QUANT_TOOL_MAP[activeTabLocal];
+              const ActiveIcon = meta?.icon || Compass;
+              return (
+                <button
+                  type="button"
+                  onClick={() => setShowQuantHub((v) => !v)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#0df2c9]/15 text-[#0df2c9] border border-[#0df2c9]/40 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <ActiveIcon className="w-3.5 h-3.5" />
+                  <span>{meta?.shortLabel || activeTabLocal}</span>
+                </button>
+              );
+            })()}
+        </div>
 
-        <button
-          onClick={() => setActiveTabLocal('intermarket')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'intermarket'
-              ? 'bg-[#0df2c9]/20 text-[#0df2c9] border border-[#0df2c9]/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Compass className="w-3.5 h-3.5 text-[#0df2c9]" />
-          <span>1. Intermarket Macro Radar</span>
-        </button>
+        <div className="flex items-center gap-3 shrink-0 pr-1">
+          <span className="text-xs font-mono text-slate-400 hidden sm:inline whitespace-nowrap">
+            {selectedAsset} <span aria-hidden="true">·</span> {currentPrice.toFixed(isJpy ? 3 : isGold || isIndex ? 2 : 5)}
+          </span>
 
-        <button
-          onClick={() => setActiveTabLocal('adr')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'adr'
-              ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Activity className="w-3.5 h-3.5 text-cyan-400" />
-          <span>2. ADR Volatility Exhaustion</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTabLocal('mtf-matrix')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'mtf-matrix'
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Layers className="w-3.5 h-3.5 text-emerald-400" />
-          <span>3. MTF 4H-1M Confluence</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTabLocal('cot')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'cot'
-              ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Building2 className="w-3.5 h-3.5 text-purple-400" />
-          <span>4. COT Smart Money Flows</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTabLocal('camarilla')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'camarilla'
-              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Target className="w-3.5 h-3.5 text-amber-400" />
-          <span>5. Camarilla & CPR Pivots</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTabLocal('csm')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'csm'
-              ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Globe2 className="w-3.5 h-3.5 text-cyan-400" />
-          <span>6. Currency Strength (CSM)</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTabLocal('propfirm')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'propfirm'
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <ShieldAlert className="w-3.5 h-3.5 text-emerald-400" />
-          <span>7. Prop Firm Shield</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTabLocal('sentiment')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'sentiment'
-              ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Users className="w-3.5 h-3.5 text-purple-400" />
-          <span>8. Retail Sentiment</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTabLocal('calendar')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'calendar'
-              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Calendar className="w-3.5 h-3.5 text-amber-400" />
-          <span>9. Economic Calendar</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTabLocal('sessions')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'sessions'
-              ? 'bg-teal-500/20 text-[#0df2c9] border border-teal-500/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Clock className="w-3.5 h-3.5 text-teal-400" />
-          <span>10. Killzones</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTabLocal('dispatcher')}
-          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
-            activeTabLocal === 'dispatcher'
-              ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40 shadow-sm'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Send className="w-3.5 h-3.5 text-blue-400" />
-          <span>11. Telegram Dispatch</span>
-        </button>
+          <button
+            type="button"
+            onClick={() => setShowQuantHub((v) => !v)}
+            aria-expanded={showQuantHub}
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              showQuantHub
+                ? 'bg-[#0df2c9] text-slate-950 border-[#0df2c9]'
+                : 'bg-[#08101e] hover:bg-[#112038] text-slate-200 border-[#213352]'
+            }`}
+          >
+            <LayoutGrid className="w-3.5 h-3.5" />
+            <span>Quant Tools (12)</span>
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showQuantHub ? 'rotate-180' : ''}`} />
+          </button>
+        </div>
       </div>
+
+      {showQuantHub && (
+        <div className="rounded-2xl bg-[#09111e] border border-[#1a2b46] shadow-2xl overflow-hidden animate-in fade-in duration-150">
+          <div className="px-4 py-3 border-b border-[#16243d] flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <h3 className="text-sm font-bold text-white whitespace-nowrap">Quant Tools Hub</h3>
+              <span className="text-xs text-slate-400 whitespace-nowrap">
+                12 modules <span aria-hidden="true">·</span> {selectedAsset}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 flex-1 sm:flex-initial justify-end">
+              <div className="relative flex-1 sm:w-56">
+                <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={quantQuery}
+                  onChange={(e) => setQuantQuery(e.target.value)}
+                  placeholder="Filter quant tools..."
+                  className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-[#050a14] border border-[#1a2b46] text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#0df2c9]"
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTabLocal('all');
+                  setShowQuantHub(false);
+                }}
+                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0e1a2e] hover:bg-[#142542] border border-[#1d3252] text-xs font-medium text-[#0df2c9] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>All 12 Grid</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowQuantHub(false)}
+                aria-label="Close quant tools hub"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-[#122038] transition-colors cursor-pointer shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {filteredQuantCategories.length === 0 ? (
+            <div className="px-6 py-8 text-center text-xs text-slate-400">
+              No quant tools matched &ldquo;{quantQuery}&rdquo;. Clear the search box to view all 12 modules.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-[#16243d]">
+              {filteredQuantCategories.map((cat) => (
+                <div key={cat.id} className="p-4 space-y-2">
+                  <div className="text-[11px] font-semibold text-slate-400 px-2 pb-1">
+                    {cat.title}
+                  </div>
+                  <div className="space-y-1">
+                    {cat.tools.map((tool) => {
+                      const Icon = tool.icon;
+                      const isActive = activeTabLocal === tool.id;
+                      return (
+                        <button
+                          key={tool.id}
+                          type="button"
+                          onClick={() => {
+                            setActiveTabLocal(tool.id);
+                            setShowQuantHub(false);
+                          }}
+                          className={`w-full flex items-start gap-2.5 px-2.5 py-2 rounded-lg text-left transition-colors cursor-pointer ${
+                            isActive
+                              ? 'bg-[#0df2c9]/12 text-[#0df2c9] border border-[#0df2c9]/35'
+                              : 'text-slate-300 hover:bg-[#101c31] hover:text-white border border-transparent'
+                          }`}
+                        >
+                          <Icon
+                            className={`w-4 h-4 mt-0.5 shrink-0 ${
+                              isActive ? 'text-[#0df2c9]' : 'text-slate-400'
+                            }`}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-semibold truncate">{tool.label}</div>
+                            <div className="text-[11px] text-slate-400 truncate">{tool.description}</div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Main Content Area */}
       {activeTabLocal === 'all' && (

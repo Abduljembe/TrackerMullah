@@ -48,6 +48,7 @@ import {
   Users,
   Compass,
   BarChart3,
+  ChevronDown,
 } from 'lucide-react';
 import { useFinance } from '../../context/FinanceContext.tsx';
 import { InvestmentItem } from '../../types/finance.ts';
@@ -77,6 +78,11 @@ import { CotInstitutionalMatrix } from '../common/CotInstitutionalMatrix.tsx';
 import { MtfConfluenceMatrixDesk } from '../common/MtfConfluenceMatrixDesk.tsx';
 import { CamarillaPivotMatrix } from '../common/CamarillaPivotMatrix.tsx';
 import { BarchartAnalyticsDesk } from '../common/BarchartAnalyticsDesk.tsx';
+import {
+  TradingToolsLauncherPanel,
+  TRADING_TOOL_META_MAP,
+  WorkbenchToolId,
+} from '../common/TradingToolsHubDrawer.tsx';
 import { generateCandles, enrichCandlesWithIndicators, computePeriodStats, Timeframe, Candle } from '../../utils/stockCandles.ts';
 import { getMarketSession, getAssetMarketSession, MarketSessionInfo } from '../../utils/marketHours.ts';
 import { lookupTradingViewQuote, resolveTradingViewPrice, useTradingViewQuotes } from '../../utils/tradingViewSync.ts';
@@ -1693,30 +1699,8 @@ export const StockRadarView: React.FC = () => {
     }
   }, [selectedStock.market, selectedStock.ticker]);
   const [preferredChartStyle, setPreferredChartStyle] = useState<ChartStyleType | undefined>(undefined);
-  const [bottomTab, setBottomTab] = useState<
-    | 'paper'
-    | 'scorecard'
-    | 'orderflow'
-    | 'barchart'
-    | 'livetv'
-    | 'journal'
-    | 'risk-calc'
-    | 'sessions'
-    | 'prop-guard'
-    | 'correlation'
-    | 'broker-arbiter'
-    | 'strength'
-    | 'backtest'
-    | 'calendar'
-    | 'news'
-    | 'sentiment'
-    | 'dispatcher'
-    | 'intermarket'
-    | 'adr'
-    | 'mtf-matrix'
-    | 'cot'
-    | 'camarilla'
-  >('paper');
+  const [bottomTab, setBottomTab] = useState<WorkbenchToolId>('paper');
+  const [showToolsHub, setShowToolsHub] = useState(false);
 
   // Auto-resolve tracked signals globally against incoming live TradingView quotes
   useEffect(() => {
@@ -3633,281 +3617,88 @@ Summary: ${sig.summary}`;
             </div>
           </div>
 
-          {/* Interactive Trading Workbench: Paper Trading Desk, Economic Calendar & News */}
-          <div id="trading-workbench" className="space-y-4">
-            {/* Workbench Navigation Tabs */}
+          {/* Interactive Trading Workbench: Clean 1-Row Quick Bar + Categorized 22-Tool Hub */}
+          <div id="trading-workbench" className="space-y-3">
+            {/* Compact Single-Row Workbench Bar */}
             <div className="flex flex-wrap items-center justify-between gap-2 p-1.5 rounded-2xl bg-[#0c1322] border border-[#18253b]">
-              <div className="flex flex-wrap items-center gap-1">
-                <button
-                  onClick={() => setBottomTab('paper')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'paper'
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Zap className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Paper Terminal</span>
-                </button>
+              <div className="flex items-center gap-1 overflow-x-auto scrollbar-none min-w-0">
+                {(
+                  [
+                    { id: 'paper', label: 'Paper Terminal', icon: Zap },
+                    { id: 'orderflow', label: 'Order Flow', icon: Layers },
+                    { id: 'barchart', label: 'Barchart', icon: BarChart3 },
+                    { id: 'journal', label: 'Journal', icon: Award },
+                  ] as Array<{ id: WorkbenchToolId; label: string; icon: React.ElementType }>
+                ).map((tab) => {
+                  const Icon = tab.icon;
+                  const isActive = bottomTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => {
+                        setBottomTab(tab.id);
+                        setShowToolsHub(false);
+                      }}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                        isActive
+                          ? 'bg-[#0df2c9]/15 text-[#0df2c9] border border-[#0df2c9]/40'
+                          : 'text-slate-400 hover:text-white border border-transparent'
+                      }`}
+                    >
+                      <Icon className="w-3.5 h-3.5" />
+                      <span>{tab.label}</span>
+                    </button>
+                  );
+                })}
 
-                <button
-                  onClick={() => setBottomTab('orderflow')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'orderflow'
-                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Layers className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Order Flow & Liquidity</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('barchart')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'barchart'
-                      ? 'bg-teal-500/20 text-[#0df2c9] border border-teal-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <BarChart3 className="w-3.5 h-3.5 text-[#0df2c9]" />
-                  <span>Barchart Opinions & Movers</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('livetv')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'livetv'
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Globe2 className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>World Monitor & Bloomberg TV</span>
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('scorecard')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'scorecard'
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Signal Win-Rate Scorecard</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('journal')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'journal'
-                      ? 'bg-[#0df2c9]/20 text-[#0df2c9] border border-[#0df2c9]/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Award className="w-3.5 h-3.5 text-[#0df2c9]" />
-                  <span>Performance Journal & Curve</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('risk-calc')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'risk-calc'
-                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Calculator className="w-3.5 h-3.5 text-purple-400" />
-                  <span>Risk & Lot Calculator</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('sessions')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'sessions'
-                      ? 'bg-teal-500/20 text-[#0df2c9] border border-teal-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Clock className="w-3.5 h-3.5 text-teal-400" />
-                  <span>Killzones & Sessions</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('prop-guard')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'prop-guard'
-                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <ShieldAlert className="w-3.5 h-3.5 text-purple-400" />
-                  <span>Prop Firm Guard</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('correlation')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'correlation'
-                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Grid className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Correlation Matrix</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('broker-arbiter')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'broker-arbiter'
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Smartphone className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Broker M-Pesa Arbiter</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('strength')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'strength'
-                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Globe className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Currency Strength & Heatmap</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('backtest')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'backtest'
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Strategy Backtester</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('calendar')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'calendar'
-                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Flame className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Economic Calendar</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('news')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'news'
-                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Flame className="w-3.5 h-3.5 text-rose-400" />
-                  <span>Forex Factory News & AI Insights</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('sentiment')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'sentiment'
-                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Users className="w-3.5 h-3.5 text-purple-400" />
-                  <span>Retail Sentiment & Order Book</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('dispatcher')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'dispatcher'
-                      ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Send className="w-3.5 h-3.5 text-blue-400" />
-                  <span>Telegram & Discord Broadcast</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('intermarket')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'intermarket'
-                      ? 'bg-[#0df2c9]/20 text-[#0df2c9] border border-[#0df2c9]/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Compass className="w-3.5 h-3.5 text-[#0df2c9]" />
-                  <span>Intermarket Macro Radar</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('adr')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'adr'
-                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Activity className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>ADR Volatility Exhaustion</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('mtf-matrix')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'mtf-matrix'
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Layers className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>MTF 4H-1M Matrix</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('cot')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'cot'
-                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Flame className="w-3.5 h-3.5 text-purple-400" />
-                  <span>COT Smart Money</span>
-                </button>
-
-                <button
-                  onClick={() => setBottomTab('camarilla')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    bottomTab === 'camarilla'
-                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Target className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Camarilla & CPR Pivots</span>
-                </button>
+                {!['paper', 'orderflow', 'barchart', 'journal'].includes(bottomTab) && (() => {
+                  const activeMeta = TRADING_TOOL_META_MAP[bottomTab];
+                  const ActiveIcon = activeMeta?.icon || Layers;
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => setShowToolsHub((v) => !v)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#0df2c9]/15 text-[#0df2c9] border border-[#0df2c9]/40 cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <ActiveIcon className="w-3.5 h-3.5" />
+                      <span>{activeMeta?.shortLabel || bottomTab}</span>
+                    </button>
+                  );
+                })()}
               </div>
 
-              <span className="text-[11px] font-mono text-slate-500 px-2 hidden lg:inline">
-                Asset: {selectedStock.ticker}
-              </span>
+              <div className="flex items-center gap-3 shrink-0 pr-1">
+                <span className="text-xs font-mono text-slate-400 hidden sm:inline whitespace-nowrap">
+                  {selectedStock.ticker} <span aria-hidden="true">·</span> {timeframe}
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() => setShowToolsHub((v) => !v)}
+                  aria-expanded={showToolsHub}
+                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                    showToolsHub
+                      ? 'bg-[#0df2c9] text-slate-950 border-[#0df2c9]'
+                      : 'bg-[#08101e] hover:bg-[#112038] text-slate-200 border-[#213352]'
+                  }`}
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                  <span>All Tools (22)</span>
+                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showToolsHub ? 'rotate-180' : ''}`} />
+                </button>
+              </div>
             </div>
+
+            {showToolsHub && (
+              <TradingToolsLauncherPanel
+                activeTool={bottomTab}
+                activeAsset={selectedStock.ticker}
+                onSelectTool={(id) => setBottomTab(id)}
+                onClose={() => setShowToolsHub(false)}
+                onOpenFullSuite={() => setActiveTab('forex-suite')}
+              />
+            )}
 
             {/* Tab 1: Live Paper Trading Desk */}
             {bottomTab === 'paper' && (

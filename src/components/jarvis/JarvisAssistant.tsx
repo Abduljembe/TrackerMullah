@@ -2986,8 +2986,10 @@ export const JarvisAssistant: React.FC = () => {
       } catch (err: unknown) {
         setJarvisState('idle');
         const rawErr = err instanceof Error ? err.message : 'Unable to reach Mullah voice servers.';
-        const isQuota = rawErr.toLowerCase().includes('rate limit') || rawErr.includes('429');
-        const isMissingKey = rawErr.toLowerCase().includes('not configured') || rawErr.includes('GEMINI_KEY_MISSING');
+        const lowerErr = rawErr.toLowerCase();
+        const isQuota = lowerErr.includes('rate limit') || rawErr.includes('429');
+        const isBusy = lowerErr.includes('demand') || lowerErr.includes('503') || lowerErr.includes('temporarily');
+        const isMissingKey = lowerErr.includes('not configured') || rawErr.includes('GEMINI_KEY_MISSING');
         const errMsg = isQuota
           ? 'Cloud AI quota is cooling down for a few seconds. Direct Live TV, market scans, navigation, and quick expense voice commands remain unlimited.'
           : isMissingKey
@@ -3010,7 +3012,7 @@ export const JarvisAssistant: React.FC = () => {
             },
           ];
         });
-        if (isQuota || isMissingKey) {
+        if (isQuota || isMissingKey || isBusy) {
           speakWithBrowserSynthesis(errMsg, false);
         }
       }
