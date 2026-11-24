@@ -31,6 +31,9 @@ import { evaluatePortfolioExposure, emitPaperPositionsUpdated, PAPER_POSITIONS_E
 import { scheduleTradingCloudPush, CLOUD_TRADING_HYDRATED_EVENT } from '../../utils/tradingCloudSync.ts';
 import { evaluatePropTradeBlock, syncRealizedTradePnlToProp, PROP_GUARD_EVENT, PropBlockStatus } from '../../utils/propGuardian.ts';
 
+export type TradeMindset = 'DISCIPLINED' | 'FOMO' | 'REVENGE' | 'TIRED';
+export type SetupGrade = 'A+' | 'B' | 'C';
+
 export interface Position {
   id: string;
   ticket: number;
@@ -50,6 +53,8 @@ export interface Position {
   executionType?: string;
   brokerServer?: string;
   isBreakEvenLocked?: boolean;
+  mindset?: TradeMindset;
+  setupGrade?: SetupGrade;
 }
 
 export interface ClosedTrade {
@@ -64,6 +69,8 @@ export interface ClosedTrade {
   pnlPercent: number;
   timestamp: string;
   outcome: 'WIN' | 'LOSS';
+  mindset?: TradeMindset;
+  setupGrade?: SetupGrade;
 }
 
 export interface PrefillOrderData {
@@ -172,12 +179,20 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
   const closedTradesJsonRef = useRef<string>(JSON.stringify(closedTrades));
   const lastExternalSyncPosJsonRef = useRef<string>(positionsJsonRef.current);
 
-  // Order inputs
+  // Order inputs & Pre-Trade Discipline Gate
   const [direction, setDirection] = useState<'LONG' | 'SHORT'>('LONG');
   const [orderLots, setOrderLots] = useState<number>(market === 'FOREX' || market === 'METALS' ? 0.1 : 10);
   const [customSl, setCustomSl] = useState<string>('');
   const [customTp, setCustomTp] = useState<string>('');
   const [activeTab, setActiveTab] = useState<'order' | 'positions' | 'history'>('order');
+  const [tradeMindset, setTradeMindset] = useState<TradeMindset>('DISCIPLINED');
+  const [setupGrade, setSetupGrade] = useState<SetupGrade>('A+');
+  const [preFlightChecks, setPreFlightChecks] = useState({
+    htfAligned: true,
+    newsClear: true,
+    killzoneActive: true,
+    slPlaced: true,
+  });
 
   // React to prefill orders from Institutional Signal card
   useEffect(() => {
@@ -337,6 +352,8 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       executionType: 'Market Execution',
       brokerServer: activeBroker,
+      mindset: tradeMindset,
+      setupGrade,
     };
 
     setPositions((prev) => [newPos, ...prev]);
@@ -417,6 +434,8 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
       pnlPercent: pos.pnlPercent,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       outcome: realizedPortionPnl >= 0 ? 'WIN' : 'LOSS',
+      mindset: pos.mindset || 'DISCIPLINED',
+      setupGrade: pos.setupGrade || 'A+',
     };
     setClosedTrades((prev) => [partialClosed, ...prev]);
 
@@ -461,6 +480,8 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
       pnlPercent: pos.pnlPercent,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       outcome: isWin ? 'WIN' : 'LOSS',
+      mindset: pos.mindset || 'DISCIPLINED',
+      setupGrade: pos.setupGrade || 'A+',
     };
 
     setClosedTrades((prev) => [closed, ...prev]);
@@ -691,6 +712,81 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
               </span>
             </div>
           )}
+
+          {/* Pre-Trade Discipline Checklist, Grade & Mindset Tag */}
+          <div className="p-3 rounded-xl bg-[#080d18] border border-[#162540] space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+                <span className="text-slate-400 font-semibold">Mindset:</span>
+                {(['DISCIPLINED', 'FOMO', 'REVENGE', 'TIRED'] as TradeMindset[]).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setTradeMindset(m)}
+                    className={`px-2 py-0.5 rounded border cursor-pointer transition-colors ${
+                      tradeMindset === m
+                        ? m === 'DISCIPLINED'
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                          : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                        : 'bg-[#0f1829] text-slate-400 border-[#1a2b46] hover:text-white'
+                    }`}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-1.5 text-[11px] font-mono">
+                <span className="text-slate-400 font-semibold">Setup:</span>
+                {(['A+', 'B', 'C'] as SetupGrade[]).map((g) => (
+                  <button
+                    key={g}
+                    type="button"
+                    onClick={() => setSetupGrade(g)}
+                    className={`px-2 py-0.5 rounded border cursor-pointer transition-colors ${
+                      setupGrade === g
+                        ? 'bg-[#0df2c9]/20 text-[#0df2c9] border-[#0df2c9]/40'
+                        : 'bg-[#0f1829] text-slate-400 border-[#1a2b46] hover:text-white'
+                    }`}
+                  >
+                    {g}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-slate-300">
+              {(
+                [
+                  { key: 'htfAligned', label: 'HTF Bias Aligned' },
+                  { key: 'killzoneActive', label: 'Liquid Session' },
+                  { key: 'newsClear', label: 'No Red News <30m' },
+                  { key: 'slPlaced', label: 'Hard SL Defined' },
+                ] as const
+              ).map((item) => (
+                <label key={item.key} className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={preFlightChecks[item.key]}
+                    onChange={(e) =>
+                      setPreFlightChecks((prev) => ({ ...prev, [item.key]: e.target.checked }))
+                    }
+                    className="accent-[#0df2c9] rounded"
+                  />
+                  <span>{item.label}</span>
+                </label>
+              ))}
+            </div>
+
+            {(tradeMindset === 'FOMO' || tradeMindset === 'REVENGE' || tradeMindset === 'TIRED') && (
+              <div className="text-[11px] font-mono text-rose-300 flex items-center gap-1.5 pt-0.5">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  Tilt Warning: Emotional {tradeMindset} entries are logged separately in your Journal &amp; hurt long-term expectancy.
+                </span>
+              </div>
+            )}
+          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* 1-Click BUY Button (Executes at live Ask) */}

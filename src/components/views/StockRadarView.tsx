@@ -78,6 +78,10 @@ import { CotInstitutionalMatrix } from '../common/CotInstitutionalMatrix.tsx';
 import { MtfConfluenceMatrixDesk } from '../common/MtfConfluenceMatrixDesk.tsx';
 import { CamarillaPivotMatrix } from '../common/CamarillaPivotMatrix.tsx';
 import { BarchartAnalyticsDesk } from '../common/BarchartAnalyticsDesk.tsx';
+import { CentralBankCarryDesk } from '../common/CentralBankCarryDesk.tsx';
+import { LiquidityPoolMapDesk } from '../common/LiquidityPoolMapDesk.tsx';
+import { ExposureAndSpreadGuardDesk } from '../common/ExposureAndSpreadGuardDesk.tsx';
+import { ChartReplayTrainerDesk } from '../common/ChartReplayTrainerDesk.tsx';
 import {
   TradingToolsLauncherPanel,
   TRADING_TOOL_META_MAP,
@@ -3684,7 +3688,7 @@ Summary: ${sig.summary}`;
                   }`}
                 >
                   <LayoutGrid className="w-3.5 h-3.5" />
-                  <span>All Tools (22)</span>
+                  <span>All Tools (26)</span>
                   <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showToolsHub ? 'rotate-180' : ''}`} />
                 </button>
               </div>
@@ -3963,6 +3967,53 @@ Summary: ${sig.summary}`;
                   const match = FEATURED_ASSETS.find((a) => a.ticker === ticker || a.ticker.replace('/', '') === ticker.replace('/', ''));
                   if (match) setSelectedStock(match);
                 }}
+              />
+            )}
+
+            {/* Tab 19: Central Bank Monetary Policy & Carry Swap Matrix */}
+            {bottomTab === 'central-banks' && (
+              <CentralBankCarryDesk
+                currentTicker={selectedStock.ticker}
+                onSelectPair={(pair) => {
+                  const match = FEATURED_ASSETS.find((a) => a.ticker === pair || a.ticker.replace('/', '') === pair.replace('/', ''));
+                  if (match) setSelectedStock(match);
+                }}
+              />
+            )}
+
+            {/* Tab 20: Institutional Liquidity Pool Map & Asian Range Sweep */}
+            {bottomTab === 'liquidity-map' && (
+              <LiquidityPoolMapDesk
+                currentTicker={selectedStock.ticker}
+                currentPrice={currentDisplayPrice}
+                candles={activeCandles}
+                onApplySetupToOrder={(dir, sl, tp) => {
+                  setPrefillOrder({
+                    direction: dir,
+                    lots: 0.1,
+                    sl: String(sl),
+                    tp: String(tp),
+                    timestamp: Date.now(),
+                  });
+                  setBottomTab('paper');
+                }}
+              />
+            )}
+
+            {/* Tab 21: Net Currency Exposure, Spread Spike & Risk-of-Ruin */}
+            {bottomTab === 'exposure-risk' && (
+              <ExposureAndSpreadGuardDesk
+                currentTicker={selectedStock.ticker}
+                currentPrice={currentDisplayPrice}
+              />
+            )}
+
+            {/* Tab 22: Bar-by-Bar Chart Replay & Execution Trainer */}
+            {bottomTab === 'chart-replay' && (
+              <ChartReplayTrainerDesk
+                currentTicker={selectedStock.ticker}
+                currentPrice={currentDisplayPrice}
+                timeframe={timeframe}
               />
             )}
           </div>

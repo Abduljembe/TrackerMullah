@@ -22,6 +22,10 @@ import {
   X,
   Zap,
   ArrowUpRight,
+  Landmark,
+  Crosshair,
+  Scale,
+  Play,
 } from 'lucide-react';
 
 export type WorkbenchToolId =
@@ -46,7 +50,11 @@ export type WorkbenchToolId =
   | 'adr'
   | 'mtf-matrix'
   | 'cot'
-  | 'camarilla';
+  | 'camarilla'
+  | 'central-banks'
+  | 'liquidity-map'
+  | 'exposure-risk'
+  | 'chart-replay';
 
 export interface TradingToolMeta {
   id: WorkbenchToolId;
@@ -114,6 +122,14 @@ export const TRADING_TOOL_CATEGORIES: Array<{
         category: 'execution',
         icon: Smartphone,
       },
+      {
+        id: 'exposure-risk',
+        label: 'Exposure, Spread & Risk-of-Ruin',
+        shortLabel: 'Exposure & Ruin',
+        description: 'Net currency stack, rollover tax & Monte Carlo',
+        category: 'execution',
+        icon: Scale,
+      },
     ],
   },
   {
@@ -160,6 +176,14 @@ export const TRADING_TOOL_CATEGORIES: Array<{
         category: 'structure',
         icon: Activity,
       },
+      {
+        id: 'liquidity-map',
+        label: 'Institutional Liquidity Map',
+        shortLabel: 'Liquidity Map',
+        description: 'PDH/PDL, PWH/PWL & Asian range sweeps',
+        category: 'structure',
+        icon: Crosshair,
+      },
     ],
   },
   {
@@ -205,6 +229,14 @@ export const TRADING_TOOL_CATEGORIES: Array<{
         description: 'DXY, yields, gold & equity flow',
         category: 'macro',
         icon: Compass,
+      },
+      {
+        id: 'central-banks',
+        label: 'Central Banks & Swap Carry',
+        shortLabel: 'CB Rates & Carry',
+        description: 'G10/CBK rate spread & 3x Wednesday swap',
+        category: 'macro',
+        icon: Landmark,
       },
     ],
   },
@@ -260,6 +292,14 @@ export const TRADING_TOOL_CATEGORIES: Array<{
         category: 'news',
         icon: Send,
       },
+      {
+        id: 'chart-replay',
+        label: 'Bar-by-Bar Chart Replay',
+        shortLabel: 'Chart Replay',
+        description: 'Candle-by-candle execution practice',
+        category: 'news',
+        icon: Play,
+      },
     ],
   },
 ];
@@ -312,7 +352,7 @@ export const TradingToolsLauncherPanel: React.FC<TradingToolsLauncherPanelProps>
         <div className="flex items-center gap-3 min-w-0">
           <h3 className="text-sm font-bold text-white whitespace-nowrap">Trading Tools Hub</h3>
           <span className="text-xs text-slate-400 whitespace-nowrap">
-            22 tools <span aria-hidden="true">·</span> {activeAsset}
+            26 tools <span aria-hidden="true">·</span> {activeAsset}
           </span>
         </div>
 
@@ -356,7 +396,7 @@ export const TradingToolsLauncherPanel: React.FC<TradingToolsLauncherPanelProps>
       {/* 4-Column Categorized Directory */}
       {filteredCategories.length === 0 ? (
         <div className="px-6 py-8 text-center text-xs text-slate-400">
-          No tools matched &ldquo;{query}&rdquo;. Clear the search box to view all 22 tools.
+          No tools matched &ldquo;{query}&rdquo;. Clear the search box to view all 26 tools.
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 divide-y md:divide-y-0 md:divide-x divide-[#16243d]">

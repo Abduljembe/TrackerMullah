@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import {
   ShieldAlert,
   Globe2,
@@ -19,6 +19,10 @@ import {
   LayoutGrid,
   ChevronDown,
   X,
+  Landmark,
+  Crosshair,
+  Scale,
+  Play,
 } from 'lucide-react';
 import { useFinance } from '../../context/FinanceContext.tsx';
 import { CurrencyStrengthMeter } from '../common/CurrencyStrengthMeter.tsx';
@@ -33,6 +37,11 @@ import { CotInstitutionalMatrix } from '../common/CotInstitutionalMatrix.tsx';
 import { MtfConfluenceMatrixDesk } from '../common/MtfConfluenceMatrixDesk.tsx';
 import { CamarillaPivotMatrix } from '../common/CamarillaPivotMatrix.tsx';
 import { BarchartAnalyticsDesk } from '../common/BarchartAnalyticsDesk.tsx';
+import { CentralBankCarryDesk } from '../common/CentralBankCarryDesk.tsx';
+import { LiquidityPoolMapDesk } from '../common/LiquidityPoolMapDesk.tsx';
+import { ExposureAndSpreadGuardDesk } from '../common/ExposureAndSpreadGuardDesk.tsx';
+import { ChartReplayTrainerDesk } from '../common/ChartReplayTrainerDesk.tsx';
+import { Candle, generateCandles } from '../../utils/stockCandles.ts';
 import { useTradingViewQuotes, lookupTradingViewQuote, resolveTradingViewPrice } from '../../utils/tradingViewSync.ts';
 
 type SuiteTab =
@@ -48,7 +57,11 @@ type SuiteTab =
   | 'sentiment'
   | 'calendar'
   | 'sessions'
-  | 'dispatcher';
+  | 'dispatcher'
+  | 'central-banks'
+  | 'liquidity-map'
+  | 'exposure-risk'
+  | 'chart-replay';
 
 interface QuantToolMeta {
   id: Exclude<SuiteTab, 'all'>;
@@ -95,6 +108,20 @@ const QUANT_TOOL_CATEGORIES: Array<{
         description: 'Daily pip range utilization & exhaustion',
         icon: Activity,
       },
+      {
+        id: 'liquidity-map',
+        label: 'Institutional Liquidity Map',
+        shortLabel: 'Liquidity Map',
+        description: 'PDH/PDL, PWH/PWL & Asian range sweeps',
+        icon: Crosshair,
+      },
+      {
+        id: 'chart-replay',
+        label: 'Bar-by-Bar Chart Replay',
+        shortLabel: 'Chart Replay',
+        description: 'Hidden-edge candle execution trainer',
+        icon: Play,
+      },
     ],
   },
   {
@@ -107,6 +134,13 @@ const QUANT_TOOL_CATEGORIES: Array<{
         shortLabel: 'Intermarket',
         description: 'DXY, yields, gold & equity correlation flow',
         icon: Compass,
+      },
+      {
+        id: 'central-banks',
+        label: 'Central Banks & Swap Carry',
+        shortLabel: 'CB Rates & Carry',
+        description: 'G10/CBK rate spread & Wednesday 3x swap',
+        icon: Landmark,
       },
       {
         id: 'cot',
@@ -141,6 +175,13 @@ const QUANT_TOOL_CATEGORIES: Array<{
         shortLabel: 'Prop Shield',
         description: 'Daily drawdown & equity protection guard',
         icon: ShieldAlert,
+      },
+      {
+        id: 'exposure-risk',
+        label: 'Exposure, Spread & Risk-of-Ruin',
+        shortLabel: 'Exposure & Ruin',
+        description: 'Net currency stack, rollover tax & Monte Carlo',
+        icon: Scale,
       },
       {
         id: 'calendar',
@@ -199,7 +240,27 @@ export const ForexPowerSuiteView: React.FC = () => {
   const [quantQuery, setQuantQuery] = useState<string>('');
   const [selectedAsset, setSelectedAsset] = useState<string>('XAU/USD');
   const [customPairInput, setCustomPairInput] = useState<string>('');
+  const [suiteLiveCandles, setSuiteLiveCandles] = useState<Candle[] | null>(null);
   const liveQuotes = useTradingViewQuotes(3200);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/stocks/history?ticker=${encodeURIComponent(selectedAsset)}&timeframe=15m`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.success && Array.isArray(data.candles) && data.candles.length >= 12) {
+          setSuiteLiveCandles(data.candles);
+        } else if (!cancelled) {
+          setSuiteLiveCandles(null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setSuiteLiveCandles(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAsset]);
 
   const filteredQuantCategories = useMemo(() => {
     const q = quantQuery.trim().toLowerCase();
@@ -288,7 +349,7 @@ export const ForexPowerSuiteView: React.FC = () => {
                 Forex Institutional Quant &amp; Macro Suite
               </h1>
               <span className="text-xs font-mono text-[#0df2c9]">
-                12 quant tools <span aria-hidden="true">·</span> synced to {selectedAsset}
+                16 quant tools <span aria-hidden="true">·</span> synced to {selectedAsset}
               </span>
             </div>
             <p className="text-xs sm:text-sm text-slate-400 max-w-2xl mt-0.5">
@@ -442,7 +503,7 @@ export const ForexPowerSuiteView: React.FC = () => {
             }`}
           >
             <LayoutGrid className="w-3.5 h-3.5" />
-            <span>Quant Tools (12)</span>
+            <span>Quant Tools (16)</span>
             <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showQuantHub ? 'rotate-180' : ''}`} />
           </button>
         </div>
@@ -454,7 +515,7 @@ export const ForexPowerSuiteView: React.FC = () => {
             <div className="flex items-center gap-3 min-w-0">
               <h3 className="text-sm font-bold text-white whitespace-nowrap">Quant Tools Hub</h3>
               <span className="text-xs text-slate-400 whitespace-nowrap">
-                12 modules <span aria-hidden="true">·</span> {selectedAsset}
+                16 modules <span aria-hidden="true">·</span> {selectedAsset}
               </span>
             </div>
 
@@ -479,7 +540,7 @@ export const ForexPowerSuiteView: React.FC = () => {
                 className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0e1a2e] hover:bg-[#142542] border border-[#1d3252] text-xs font-medium text-[#0df2c9] transition-colors cursor-pointer whitespace-nowrap shrink-0"
               >
                 <Layers className="w-3.5 h-3.5" />
-                <span>All 12 Grid</span>
+                <span>All 16 Grid</span>
               </button>
 
               <button
@@ -495,7 +556,7 @@ export const ForexPowerSuiteView: React.FC = () => {
 
           {filteredQuantCategories.length === 0 ? (
             <div className="px-6 py-8 text-center text-xs text-slate-400">
-              No quant tools matched &ldquo;{quantQuery}&rdquo;. Clear the search box to view all 12 modules.
+              No quant tools matched &ldquo;{quantQuery}&rdquo;. Clear the search box to view all 16 modules.
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-[#16243d]">
@@ -604,6 +665,23 @@ export const ForexPowerSuiteView: React.FC = () => {
             <EconomicCalendar currentTicker={selectedAsset} />
             <TelegramSignalDispatcher activeSignal={dynamicSignalPayload} />
           </div>
+
+          {/* Row 7: Central Bank Carry + Institutional Liquidity Map */}
+          <CentralBankCarryDesk
+            currentTicker={selectedAsset}
+            onSelectPair={(pair) => setSelectedAsset(pair)}
+          />
+
+          <LiquidityPoolMapDesk
+            currentTicker={selectedAsset}
+            currentPrice={currentPrice}
+            candles={suiteLiveCandles || generateCandles(selectedAsset, currentPrice, currentPrice * 0.004, '15m')}
+          />
+
+          <ExposureAndSpreadGuardDesk
+            currentTicker={selectedAsset}
+            currentPrice={currentPrice}
+          />
         </div>
       )}
 
@@ -674,6 +752,36 @@ export const ForexPowerSuiteView: React.FC = () => {
 
       {activeTabLocal === 'dispatcher' && (
         <TelegramSignalDispatcher activeSignal={dynamicSignalPayload} />
+      )}
+
+      {activeTabLocal === 'central-banks' && (
+        <CentralBankCarryDesk
+          currentTicker={selectedAsset}
+          onSelectPair={(pair) => setSelectedAsset(pair)}
+        />
+      )}
+
+      {activeTabLocal === 'liquidity-map' && (
+        <LiquidityPoolMapDesk
+          currentTicker={selectedAsset}
+          currentPrice={currentPrice}
+          candles={suiteLiveCandles || generateCandles(selectedAsset, currentPrice, currentPrice * 0.004, '15m')}
+        />
+      )}
+
+      {activeTabLocal === 'exposure-risk' && (
+        <ExposureAndSpreadGuardDesk
+          currentTicker={selectedAsset}
+          currentPrice={currentPrice}
+        />
+      )}
+
+      {activeTabLocal === 'chart-replay' && (
+        <ChartReplayTrainerDesk
+          currentTicker={selectedAsset}
+          currentPrice={currentPrice}
+          timeframe="15m"
+        />
       )}
     </div>
   );

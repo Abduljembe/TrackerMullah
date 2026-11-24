@@ -15,6 +15,8 @@ export interface TimeframeTechnicals {
 export interface LiveTvQuote {
   symbol: string;
   price: number;
+  bid?: number;
+  ask?: number;
   changePercent: number;
   changeValue: number;
   high?: number;

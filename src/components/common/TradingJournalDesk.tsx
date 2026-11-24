@@ -16,8 +16,8 @@ import {
   Layers,
   Sparkles,
 } from 'lucide-react';
-import { ClosedTrade } from './PaperTradingDesk.tsx';
-import { CLOUD_TRADING_HYDRATED_EVENT } from '../../utils/tradingCloudSync.ts';
+import { ClosedTrade, TradeMindset } from './PaperTradingDesk.tsx';
+import { CLOUD_TRADING_HYDRATED_EVENT, scheduleTradingCloudPush } from '../../utils/tradingCloudSync.ts';
 import { PAPER_POSITIONS_EVENT } from '../../utils/portfolioGuard.ts';
 
 interface TradingJournalDeskProps {
@@ -240,12 +240,52 @@ export const TradingJournalDesk: React.FC<TradingJournalDeskProps> = ({ currentT
         return (
           t.ticker.toLowerCase().includes(q) ||
           t.direction.toLowerCase().includes(q) ||
-          t.timestamp.toLowerCase().includes(q)
+          t.timestamp.toLowerCase().includes(q) ||
+          (t.mindset || '').toLowerCase().includes(q)
         );
       }
       return true;
     });
   }, [trades, filterTicker, outcomeFilter, searchQuery]);
+
+  // Psychology & Setup Grade analytics
+  const psychologyStats = useMemo(() => {
+    const disciplined = trades.filter((t) => !t.mindset || t.mindset === 'DISCIPLINED');
+    const emotional = trades.filter((t) => t.mindset && t.mindset !== 'DISCIPLINED');
+
+    const summarize = (list: ClosedTrade[]) => {
+      const wins = list.filter((t) => t.outcome === 'WIN').length;
+      const pnl = list.reduce((s, t) => s + t.pnl, 0);
+      return {
+        count: list.length,
+        winRate: list.length > 0 ? Math.round((wins / list.length) * 100) : 0,
+        pnl: Number(pnl.toFixed(2)),
+      };
+    };
+
+    const aPlus = trades.filter((t) => !t.setupGrade || t.setupGrade === 'A+');
+    const bOrC = trades.filter((t) => t.setupGrade === 'B' || t.setupGrade === 'C');
+
+    return {
+      disciplined: summarize(disciplined),
+      emotional: summarize(emotional),
+      aPlus: summarize(aPlus),
+      bOrC: summarize(bOrC),
+    };
+  }, [trades]);
+
+  const handleUpdateTradeMindset = (tradeId: string, nextMindset: TradeMindset) => {
+    setTrades((prev) => {
+      const updated = prev.map((t) => (t.id === tradeId ? { ...t, mindset: nextMindset } : t));
+      try {
+        localStorage.setItem('njia_paper_trades', JSON.stringify(updated));
+        scheduleTradingCloudPush();
+      } catch {
+        // ignore storage failure
+      }
+      return updated;
+    });
+  };
 
   // Export to CSV
   const handleExportCsv = () => {
@@ -417,6 +457,59 @@ export const TradingJournalDesk: React.FC<TradingJournalDeskProps> = ({ currentT
         </div>
       </div>
 
+      {/* Discipline & Mindset Expectancy Breakdown */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+        <div className="p-3.5 rounded-xl bg-[#0c1424] border border-[#182744]">
+          <div className="text-[11px] font-mono text-slate-400">Disciplined Mindset</div>
+          <div className="flex items-baseline justify-between mt-1 font-mono">
+            <span className="text-base font-bold text-emerald-400">
+              {psychologyStats.disciplined.winRate}% Win
+            </span>
+            <span className={psychologyStats.disciplined.pnl >= 0 ? 'text-xs text-emerald-300' : 'text-xs text-rose-300'}>
+              {psychologyStats.disciplined.pnl >= 0 ? '+' : '-'}${Math.abs(psychologyStats.disciplined.pnl).toFixed(2)}
+            </span>
+          </div>
+          <div className="text-[10px] text-slate-500 mt-0.5">{psychologyStats.disciplined.count} trades</div>
+        </div>
+
+        <div className="p-3.5 rounded-xl bg-[#0c1424] border border-[#182744]">
+          <div className="text-[11px] font-mono text-slate-400">Emotional (FOMO / Revenge)</div>
+          <div className="flex items-baseline justify-between mt-1 font-mono">
+            <span className="text-base font-bold text-rose-400">
+              {psychologyStats.emotional.count > 0 ? `${psychologyStats.emotional.winRate}% Win` : '0 Trades'}
+            </span>
+            <span className={psychologyStats.emotional.pnl >= 0 ? 'text-xs text-emerald-300' : 'text-xs text-rose-300'}>
+              {psychologyStats.emotional.pnl >= 0 ? '+' : '-'}${Math.abs(psychologyStats.emotional.pnl).toFixed(2)}
+            </span>
+          </div>
+          <div className="text-[10px] text-slate-500 mt-0.5">{psychologyStats.emotional.count} tilt trades</div>
+        </div>
+
+        <div className="p-3.5 rounded-xl bg-[#0c1424] border border-[#182744]">
+          <div className="text-[11px] font-mono text-slate-400">A+ Grade Setups</div>
+          <div className="flex items-baseline justify-between mt-1 font-mono">
+            <span className="text-base font-bold text-[#0df2c9]">{psychologyStats.aPlus.winRate}% Win</span>
+            <span className={psychologyStats.aPlus.pnl >= 0 ? 'text-xs text-emerald-300' : 'text-xs text-rose-300'}>
+              {psychologyStats.aPlus.pnl >= 0 ? '+' : '-'}${Math.abs(psychologyStats.aPlus.pnl).toFixed(2)}
+            </span>
+          </div>
+          <div className="text-[10px] text-slate-500 mt-0.5">{psychologyStats.aPlus.count} setups</div>
+        </div>
+
+        <div className="p-3.5 rounded-xl bg-[#0c1424] border border-[#182744]">
+          <div className="text-[11px] font-mono text-slate-400">B / C Grade Setups</div>
+          <div className="flex items-baseline justify-between mt-1 font-mono">
+            <span className="text-base font-bold text-amber-300">
+              {psychologyStats.bOrC.count > 0 ? `${psychologyStats.bOrC.winRate}% Win` : '0 Trades'}
+            </span>
+            <span className={psychologyStats.bOrC.pnl >= 0 ? 'text-xs text-emerald-300' : 'text-xs text-rose-300'}>
+              {psychologyStats.bOrC.pnl >= 0 ? '+' : '-'}${Math.abs(psychologyStats.bOrC.pnl).toFixed(2)}
+            </span>
+          </div>
+          <div className="text-[10px] text-slate-500 mt-0.5">{psychologyStats.bOrC.count} setups</div>
+        </div>
+      </div>
+
       {/* Filter and Search Bar */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2">
         <div className="flex items-center gap-1.5 overflow-x-auto p-1 bg-[#070b13] border border-[#162540] rounded-xl">
@@ -476,6 +569,7 @@ export const TradingJournalDesk: React.FC<TradingJournalDeskProps> = ({ currentT
                 <th className="py-2.5 px-3">Entry</th>
                 <th className="py-2.5 px-3">Exit</th>
                 <th className="py-2.5 px-4 text-right">PnL Return</th>
+                <th className="py-2.5 px-3">Mindset</th>
                 <th className="py-2.5 px-4">Timestamp</th>
                 <th className="py-2.5 px-3 text-center">Status</th>
               </tr>
@@ -509,6 +603,21 @@ export const TradingJournalDesk: React.FC<TradingJournalDeskProps> = ({ currentT
                     <span className={`font-bold ${t.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                       {t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)} ({t.pnlPercent >= 0 ? '+' : ''}{t.pnlPercent}%)
                     </span>
+                  </td>
+                  <td className="py-2.5 px-3">
+                    <select
+                      value={t.mindset || 'DISCIPLINED'}
+                      onChange={(e) => handleUpdateTradeMindset(t.id, e.target.value as TradeMindset)}
+                      aria-label={`Mindset tag for ${t.ticker}`}
+                      className={`px-2 py-0.5 rounded bg-[#0c1424] border border-[#1b2c48] text-[10px] font-mono focus:outline-none cursor-pointer ${
+                        !t.mindset || t.mindset === 'DISCIPLINED' ? 'text-emerald-300' : 'text-rose-300'
+                      }`}
+                    >
+                      <option value="DISCIPLINED">DISCIPLINED</option>
+                      <option value="FOMO">FOMO</option>
+                      <option value="REVENGE">REVENGE</option>
+                      <option value="TIRED">TIRED</option>
+                    </select>
                   </td>
                   <td className="py-2.5 px-4 text-slate-500 text-[11px]">{t.timestamp}</td>
                   <td className="py-2.5 px-3 text-center">

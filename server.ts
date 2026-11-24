@@ -94,6 +94,8 @@ app.get('/api/health', (_req, res) => {
 interface TradingViewQuote {
   symbol: string;
   price: number;
+  bid?: number;
+  ask?: number;
   changePercent: number;
   changeValue: number;
   high: number;
@@ -662,8 +664,8 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
   const tfFields = ['Recommend.All', 'Recommend.MA', 'Recommend.Other', 'RSI', 'MACD.macd', 'MACD.signal', 'EMA20', 'EMA50', 'change'] as const;
   const tfColumns = tfBuckets.flatMap((tf) => tfFields.map((f) => `${f}|${tf}`));
 
-  const tvColumns = [...baseTvColumns, ...tfColumns];
-  const stockColumns = [...baseTvColumns, ...stockExtraColumns, ...tfColumns];
+  const tvColumns = [...baseTvColumns, ...tfColumns, 'bid', 'ask'];
+  const stockColumns = [...baseTvColumns, ...stockExtraColumns, ...tfColumns, 'bid', 'ask'];
 
   try {
     const [forexRes, cfdRes, americaRes, kenyaRes, cryptoRes, futuresRes, bondRes] = await Promise.all([
@@ -747,9 +749,15 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
           };
         });
 
+        const bidAskOffset = tfOffset + tfColumns.length;
+        const rawBid = typeof item.d[bidAskOffset] === 'number' ? Number(item.d[bidAskOffset]) : existing?.bid;
+        const rawAsk = typeof item.d[bidAskOffset + 1] === 'number' ? Number(item.d[bidAskOffset + 1]) : existing?.ask;
+
         const q: TradingViewQuote = {
           symbol: rawSym,
           price: hasFreshWsTick ? existing.price : Number(item.d[0]),
+          bid: typeof rawBid === 'number' && rawBid > 0 ? rawBid : existing?.bid,
+          ask: typeof rawAsk === 'number' && rawAsk > 0 ? rawAsk : existing?.ask,
           changePercent: hasFreshWsTick ? existing.changePercent : Math.round(Number(item.d[1]) * 100) / 100,
           changeValue: hasFreshWsTick ? existing.changeValue : Number(item.d[2]),
           high: hasFreshWsTick ? Math.max(existing.high, Number(item.d[3])) : Number(item.d[3]),
@@ -2916,8 +2924,13 @@ app.get('/api/stocks/history', async (req, res) => {
       'WTI/USD': 'CL=F',
       BRENT: 'BZ=F',
       US500: '^GSPC',
+      SPX500: '^GSPC',
+      SP500: '^GSPC',
+      SPX: '^GSPC',
       NAS100: '^NDX',
+      USTEC: '^NDX',
       US30: '^DJI',
+      DJ30: '^DJI',
       GER40: '^GDAXI',
       UK100: '^FTSE',
       JPN225: '^N225',
@@ -3033,6 +3046,154 @@ app.get('/api/stocks/history', async (req, res) => {
     });
   } catch {
     return res.json({ success: false, candles: [] });
+  }
+});
+
+// Live Central Bank Policy Rates + 2Y Sovereign Yields + Upcoming Rate Decisions
+let centralBankCache: { timestamp: number; payload: any } | null = null;
+const CENTRAL_BANK_CACHE_TTL_MS = 5 * 60 * 1000;
+
+app.get('/api/macro/central-banks', async (req, res) => {
+  try {
+    const force = req.query.force === '1' || req.query.refresh === '1';
+    const now = Date.now();
+    if (!force && centralBankCache && now - centralBankCache.timestamp < CENTRAL_BANK_CACHE_TTL_MS) {
+      return res.json(centralBankCache.payload);
+    }
+
+    const specs = [
+      { currency: 'KES', bank: 'Central Bank of Kenya', bankShort: 'CBK', econSym: 'ECONOMICS:KEINTR', yieldSym: '', pairShortcut: 'USD/KES', defaultRate: 8.75 },
+      { currency: 'USD', bank: 'Federal Reserve', bankShort: 'FOMC', econSym: 'ECONOMICS:USINTR', yieldSym: 'TVC:US02Y', pairShortcut: 'EUR/USD', defaultRate: 4.0 },
+      { currency: 'GBP', bank: 'Bank of England', bankShort: 'BOE', econSym: 'ECONOMICS:GBINTR', yieldSym: 'TVC:GB02Y', pairShortcut: 'GBP/USD', defaultRate: 4.0 },
+      { currency: 'AUD', bank: 'Reserve Bank of Australia', bankShort: 'RBA', econSym: 'ECONOMICS:AUINTR', yieldSym: 'TVC:AU02Y', pairShortcut: 'AUD/USD', defaultRate: 4.85 },
+      { currency: 'NZD', bank: 'Reserve Bank of New Zealand', bankShort: 'RBNZ', econSym: 'ECONOMICS:NZINTR', yieldSym: 'TVC:NZ02Y', pairShortcut: 'NZD/USD', defaultRate: 2.75 },
+      { currency: 'EUR', bank: 'European Central Bank', bankShort: 'ECB', econSym: 'ECONOMICS:EUINTR', yieldSym: 'TVC:DE02Y', pairShortcut: 'EUR/USD', defaultRate: 2.65 },
+      { currency: 'CAD', bank: 'Bank of Canada', bankShort: 'BOC', econSym: 'ECONOMICS:CAINTR', yieldSym: 'TVC:CA02Y', pairShortcut: 'USD/CAD', defaultRate: 2.5 },
+      { currency: 'JPY', bank: 'Bank of Japan', bankShort: 'BOJ', econSym: 'ECONOMICS:JPINTR', yieldSym: 'TVC:JP02Y', pairShortcut: 'USD/JPY', defaultRate: 1.25 },
+      { currency: 'CHF', bank: 'Swiss National Bank', bankShort: 'SNB', econSym: 'ECONOMICS:CHINTR', yieldSym: 'TVC:CH02Y', pairShortcut: 'USD/CHF', defaultRate: 0.0 },
+    ];
+
+    const allTickers = specs.flatMap((s) => (s.yieldSym ? [s.econSym, s.yieldSym] : [s.econSym]));
+
+    const [tvResp, ffEvents] = await Promise.all([
+      fetch('https://scanner.tradingview.com/global/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbols: { tickers: allTickers },
+          columns: ['close', 'change', 'description'],
+        }),
+        signal: AbortSignal.timeout(4500),
+      })
+        .then((r) => (r.ok ? r.json() : { data: [] }))
+        .catch(() => ({ data: [] })),
+      getLiveForexFactoryEvents().catch(() => []),
+    ]);
+
+    const tickerMap: Record<string, { close: number; change: number }> = {};
+    if (Array.isArray(tvResp?.data)) {
+      for (const row of tvResp.data) {
+        if (row?.s && Array.isArray(row.d) && typeof row.d[0] === 'number') {
+          tickerMap[String(row.s)] = {
+            close: Number(row.d[0]),
+            change: typeof row.d[1] === 'number' ? Number(row.d[1]) : 0,
+          };
+        }
+      }
+    }
+
+    const liveFetchSucceeded = Object.keys(tickerMap).length >= 5;
+
+    const banks = specs.map((spec) => {
+      const econ = tickerMap[spec.econSym];
+      const bond = spec.yieldSym ? tickerMap[spec.yieldSym] : undefined;
+
+      const rate = econ ? Number(econ.close.toFixed(2)) : spec.defaultRate;
+      const pctChange = econ ? econ.change : 0;
+      const previousRate =
+        pctChange !== 0 && Math.abs(1 + pctChange / 100) > 0.05
+          ? Number((rate / (1 + pctChange / 100)).toFixed(2))
+          : rate;
+
+      const yield2y = bond ? Number(bond.close.toFixed(3)) : null;
+      const spreadVs2yBps = yield2y !== null ? Math.round((yield2y - rate) * 100) : null;
+
+      // Match live Forex Factory rate decision event if present
+      const rateKeywords = ['rate', 'fomc', 'monetary policy', 'policy rate', 'ocr', 'cash rate', 'refinancing', 'bank rate'];
+      const matchedEvent = Array.isArray(ffEvents)
+        ? ffEvents.find((ev: any) => {
+            const c = String(ev?.country || '').toUpperCase();
+            const title = String(ev?.title || '').toLowerCase();
+            const ts = ev?.date ? new Date(ev.date).getTime() : 0;
+            return c === spec.currency && ts > now - 3600000 && rateKeywords.some((kw) => title.includes(kw));
+          })
+        : null;
+
+      let stance: 'HAWKISH' | 'NEUTRAL' | 'DOVISH' = 'NEUTRAL';
+      let impliedNextMove = 'Hold Priced (Neutral)';
+
+      if (spreadVs2yBps !== null) {
+        if (spreadVs2yBps >= 35) {
+          stance = 'HAWKISH';
+          impliedNextMove = `+${spreadVs2yBps} bps above policy (Hike / Tighter Priced)`;
+        } else if (spreadVs2yBps <= -35) {
+          stance = 'DOVISH';
+          impliedNextMove = `${spreadVs2yBps} bps below policy (Cut Cycle Priced)`;
+        } else {
+          stance = 'NEUTRAL';
+          impliedNextMove = `${spreadVs2yBps >= 0 ? '+' : ''}${spreadVs2yBps} bps vs policy (Hold Priced)`;
+        }
+      } else if (rate > previousRate) {
+        stance = 'HAWKISH';
+        impliedNextMove = 'Recent Tightening';
+      } else if (rate < previousRate) {
+        stance = 'DOVISH';
+        impliedNextMove = 'Recent Easing Cycle';
+      }
+
+      let nextMeeting = 'Scheduled';
+      let daysUntilMeeting: number | null = null;
+      let eventLabel = '';
+      if (matchedEvent?.date) {
+        const dt = new Date(matchedEvent.date);
+        nextMeeting = dt.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+        daysUntilMeeting = Math.max(0, Math.ceil((dt.getTime() - now) / (1000 * 60 * 60 * 24)));
+        eventLabel = `${matchedEvent.title}${matchedEvent.forecast ? ` (Est: ${matchedEvent.forecast})` : ''}`;
+      }
+
+      const note =
+        eventLabel ||
+        (yield2y !== null
+          ? `Live 2Y Sovereign Yield at ${yield2y.toFixed(2)}% vs ${rate.toFixed(2)}% policy benchmark.`
+          : `Official ${spec.bankShort} policy rate live at ${rate.toFixed(2)}%.`);
+
+      return {
+        currency: spec.currency,
+        bank: spec.bank,
+        bankShort: spec.bankShort,
+        rate,
+        previousRate,
+        yield2y,
+        spreadVs2yBps,
+        stance,
+        impliedNextMove,
+        nextMeeting,
+        daysUntilMeeting,
+        pairShortcut: spec.pairShortcut,
+        note,
+      };
+    });
+
+    const payload = {
+      success: true,
+      source: liveFetchSucceeded ? 'tradingview_macro_live' : 'macro_baseline',
+      fetchedAt: new Date().toISOString(),
+      banks,
+    };
+    centralBankCache = { timestamp: now, payload };
+    return res.json(payload);
+  } catch {
+    return res.status(500).json({ success: false, error: 'Failed to load live central bank data' });
   }
 });
 
