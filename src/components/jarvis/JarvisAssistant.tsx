@@ -253,10 +253,21 @@ function parseSpokenFastCommand(
     }
   | null {
   const clean = rawText.trim();
-  const lower = clean.toLowerCase().replace(/[?!.,]+$/g, '').trim();
+  const wakePrefixMatch = clean.match(
+    /^(?:(?:hey|hello|hi|yo|greetings|ok|okay|dear)\s+)?(?:mullah|mulla|mula|moolah|molah|mulah|muller|maula|malah|jarvis)\b[,:.!?\s]*(.*)$/i
+  );
+  const strippedClean = wakePrefixMatch && wakePrefixMatch[1]?.trim() ? wakePrefixMatch[1].trim() : clean;
+  const lower = strippedClean.toLowerCase().replace(/[?!.,]+$/g, '').trim();
+  const fullLower = clean.toLowerCase().replace(/[?!.,]+$/g, '').trim();
   if (!lower) return null;
 
-  if (/^(?:hi|hello|hey|yo|greetings)(?:\s+(?:mullah|jarvis))?$/i.test(lower) || /^good\s+(?:morning|afternoon|evening)(?:\s+(?:mullah|jarvis))?$/i.test(lower)) {
+  if (
+    /^(?:(?:hi|hello|hey|yo|greetings|ok|okay|dear)\s+)?(?:mullah|mulla|mula|moolah|molah|mulah|muller|maula|malah|jarvis)$/i.test(
+      fullLower
+    ) ||
+    /^(?:hi|hello|hey|yo|greetings)$/i.test(fullLower) ||
+    /^good\s+(?:morning|afternoon|evening)(?:\s+(?:mullah|mulla|mula|jarvis))?$/i.test(fullLower)
+  ) {
     return { kind: 'greeting' };
   }
   if (/^(?:who\s+am\s+i|what\s+is\s+my\s+name|what'?s\s+my\s+name|do\s+you\s+know\s+my\s+name|say\s+my\s+name)$/i.test(lower)) {
@@ -837,10 +848,7 @@ export const JarvisAssistant: React.FC = () => {
   // Auto-open Mullah when website first loads
   const [isOpen, setIsOpen] = useState(true);
   const [jarvisState, setJarvisState] = useState<JarvisState>('idle');
-  // Default to stable Tap-to-Speak mode so speakers never self-trigger mic echo loops; users can toggle AUTO anytime
-  const [handsFreeLoop, setHandsFreeLoop] = useState<boolean>(false);
   const [liveStreamMode, setLiveStreamMode] = useState<boolean>(false);
-  const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(false);
   const [proactiveAlertsEnabled, setProactiveAlertsEnabled] = useState<boolean>(true);
   // 'auto' uses Gemini Neural Voice with automatic Unlimited Local Speech fallback; 'unlimited' always uses 0-quota local speech
   const [voiceEngineMode, setVoiceEngineMode] = useState<'auto' | 'unlimited'>('auto');
@@ -850,6 +858,12 @@ export const JarvisAssistant: React.FC = () => {
   const [mullahMemory, setMullahMemory] = useState<MullahMemoryProfile>(() => loadLocalMullahMemory(null));
   const mullahMemoryRef = useRef<MullahMemoryProfile>(mullahMemory);
   mullahMemoryRef.current = mullahMemory;
+  const wakeWordEnabled = mullahMemory.wakeWordEnabled !== false;
+  const handsFreeLoop = mullahMemory.autoConversation !== false;
+  const [wakeMicState, setWakeMicState] = useState<'active' | 'needs_gesture' | 'denied' | 'unsupported' | 'paused'>('paused');
+  const wakeMicStateRef = useRef(wakeMicState);
+  wakeMicStateRef.current = wakeMicState;
+  const [wakeRetryNonce, setWakeRetryNonce] = useState(0);
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const calendarEventsRef = useRef<CalendarNewsEvent[]>([]);
 
@@ -916,12 +930,13 @@ export const JarvisAssistant: React.FC = () => {
 
   const startListeningRef = useRef<() => void>(() => {});
   const handsFreeLoopRef = useRef<boolean>(handsFreeLoop);
+  handsFreeLoopRef.current = handsFreeLoop;
+  const wakeWordEnabledRef = useRef<boolean>(wakeWordEnabled);
+  wakeWordEnabledRef.current = wakeWordEnabled;
+  const autoFollowUpPendingRef = useRef<boolean>(false);
+  const wakeCooldownUntilRef = useRef<number>(0);
   const jarvisStateRef = useRef<JarvisState>(jarvisState);
   const hasBootGreetedRef = useRef<boolean>(false);
-
-  useEffect(() => {
-    handsFreeLoopRef.current = handsFreeLoop;
-  }, [handsFreeLoop]);
 
   useEffect(() => {
     jarvisStateRef.current = jarvisState;
@@ -1095,6 +1110,7 @@ export const JarvisAssistant: React.FC = () => {
 
   const stopSpeaking = useCallback(() => {
     speechGenerationRef.current += 1;
+    autoFollowUpPendingRef.current = false;
     if (speakDispatchTimerRef.current) {
       clearTimeout(speakDispatchTimerRef.current);
       speakDispatchTimerRef.current = null;
@@ -1198,15 +1214,18 @@ export const JarvisAssistant: React.FC = () => {
           if (chunkIdx >= chunks.length) {
             activeUtteranceRef.current = null;
             lastSpeakEndedAtRef.current = Date.now();
+            const willAutoFollowUp = Boolean(triggerAutoListenAfter && handsFreeLoopRef.current);
+            autoFollowUpPendingRef.current = willAutoFollowUp;
             setJarvisState('idle');
-            if (triggerAutoListenAfter && handsFreeLoopRef.current) {
+            if (willAutoFollowUp) {
               if (autoListenTimerRef.current) clearTimeout(autoListenTimerRef.current);
               autoListenTimerRef.current = setTimeout(() => {
                 autoListenTimerRef.current = null;
+                autoFollowUpPendingRef.current = false;
                 if (speechGenerationRef.current === gen && jarvisStateRef.current === 'idle') {
                   startListeningRef.current();
                 }
-              }, 1100);
+              }, 1150);
             }
             return;
           }
@@ -1380,15 +1399,18 @@ export const JarvisAssistant: React.FC = () => {
         }
         if (speechGenerationRef.current !== gen) return;
         lastSpeakEndedAtRef.current = Date.now();
+        const willAutoFollowUp = Boolean(triggerAutoListenAfter && handsFreeLoopRef.current);
+        autoFollowUpPendingRef.current = willAutoFollowUp;
         setJarvisState('idle');
-        if (triggerAutoListenAfter && handsFreeLoopRef.current) {
+        if (willAutoFollowUp) {
           if (autoListenTimerRef.current) clearTimeout(autoListenTimerRef.current);
           autoListenTimerRef.current = setTimeout(() => {
             autoListenTimerRef.current = null;
+            autoFollowUpPendingRef.current = false;
             if (speechGenerationRef.current === gen && jarvisStateRef.current === 'idle') {
               startListeningRef.current();
             }
-          }, 1100);
+          }, 1150);
         }
       };
 
@@ -1469,12 +1491,16 @@ export const JarvisAssistant: React.FC = () => {
     return false;
   }, [playAudioPayload, speakWithBrowserSynthesis, stopSpeaking]);
 
-  // First user tap/click/key anywhere unlocks browser audio on HTTPS/Vercel immediately
+  // First user tap/click/key anywhere unlocks browser audio AND automatic "Hello Mullah" mic on HTTPS/Vercel immediately
   useEffect(() => {
     const onFirstUserGesture = () => {
       hasUserGestureRef.current = true;
       if (pendingWelcomeAudioRef.current || pendingSpeechRef.current) {
         flushPendingSpeechOnGesture();
+      }
+      if (wakeWordEnabledRef.current && wakeMicStateRef.current === 'needs_gesture') {
+        wakeCooldownUntilRef.current = 0;
+        setWakeRetryNonce((n) => n + 1);
       }
     };
     window.addEventListener('pointerdown', onFirstUserGesture, { passive: true });
@@ -2734,21 +2760,22 @@ export const JarvisAssistant: React.FC = () => {
         return;
       }
 
-      // Acoustic self-echo rejection: if mic opens right after speakers finish and hears Mullah's own words
-      if (now - lastSpeakEndedAtRef.current < 3000 && lastSpokenRef.current.textLower) {
+      // Acoustic self-echo rejection: if mic hears Mullah's own speakers right after speaking
+      if (now - lastSpeakEndedAtRef.current < 8000 && lastSpokenRef.current.textLower) {
         const heardWords = normalizedCmd
           .replace(/[^a-z0-9\s]/g, ' ')
           .split(/\s+/)
           .filter((w) => w.length >= 3);
-        if (heardWords.length >= 3) {
+        const isEchoSentenceMatch =
+          normalizedCmd.length >= 18 && lastSpokenRef.current.textLower.includes(normalizedCmd);
+        if (heardWords.length >= 4) {
           const spokenSet = new Set(lastSpokenRef.current.words);
           const overlapCount = heardWords.filter((w) => spokenSet.has(w)).length;
-          if (
-            lastSpokenRef.current.textLower.includes(normalizedCmd) ||
-            overlapCount / heardWords.length >= 0.6
-          ) {
+          if (isEchoSentenceMatch || overlapCount / heardWords.length >= 0.6) {
             return;
           }
+        } else if (isEchoSentenceMatch) {
+          return;
         }
       }
 
@@ -3010,6 +3037,7 @@ export const JarvisAssistant: React.FC = () => {
   );
 
   const stopListening = useCallback(() => {
+    autoFollowUpPendingRef.current = false;
     stopLiveAudioStream();
     if (autoListenTimerRef.current) {
       clearTimeout(autoListenTimerRef.current);
@@ -3038,6 +3066,7 @@ export const JarvisAssistant: React.FC = () => {
       return;
     }
     hasUserGestureRef.current = true;
+    autoFollowUpPendingRef.current = false;
 
     if (pendingWelcomeAudioRef.current || pendingSpeechRef.current) {
       flushPendingSpeechOnGesture();
@@ -3051,6 +3080,16 @@ export const JarvisAssistant: React.FC = () => {
 
     stopSpeaking();
     setVoiceError(null);
+
+    // Ensure passive wake word listener releases microphone cleanly before active command capture starts
+    const hadWakeRec = Boolean(wakeRecognitionRef.current);
+    try {
+      wakeRecognitionRef.current?.abort?.();
+    } catch {}
+    wakeRecognitionRef.current = null;
+    if (hadWakeRec) {
+      await new Promise((r) => setTimeout(r, 120));
+    }
 
     // Abort any stale SpeechRecognition instance cleanly before opening a new mic session
     try {
@@ -3079,7 +3118,7 @@ export const JarvisAssistant: React.FC = () => {
           try {
             recognition.stop();
           } catch {}
-          if (jarvisStateRef.current === 'speaking' || Date.now() - lastSpeakEndedAtRef.current < 900) {
+          if (jarvisStateRef.current === 'speaking' || Date.now() - lastSpeakEndedAtRef.current < 1050) {
             setJarvisState('idle');
             return;
           }
@@ -3096,7 +3135,13 @@ export const JarvisAssistant: React.FC = () => {
           }
           setJarvisState('idle');
           if (event?.error === 'no-speech') {
-            setVoiceError('No voice detected. Tap the reactor when ready to speak.');
+            // In automatic "Hello Mullah" / hands-free mode, quietly return to passive Wake Standby without error noise
+            if (!wakeWordEnabledRef.current && !handsFreeLoopRef.current) {
+              setVoiceError('No voice detected. Tap the reactor when ready to speak.');
+            }
+          } else if (event?.error === 'not-allowed' || event?.error === 'service-not-allowed') {
+            setWakeMicState('denied');
+            setVoiceError('Microphone access blocked. Allow mic permission in browser settings.');
           } else if (event?.error && event.error !== 'aborted') {
             setVoiceError(`Microphone error: ${event.error}`);
           }
@@ -3188,65 +3233,191 @@ export const JarvisAssistant: React.FC = () => {
     startListeningRef.current = startListening;
   }, [startListening]);
 
-  // Passive "Hey Mullah" Wake Word Standby Listener (active only when Wake Word toggle is ON and jarvisState is idle)
+  const enableHandsFreeMic = useCallback(async () => {
+    hasUserGestureRef.current = true;
+    setVoiceError(null);
+    wakeCooldownUntilRef.current = 0;
+    try {
+      if (navigator.mediaDevices?.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((t) => t.stop());
+      }
+      updateMullahMemory((p) => ({ ...p, wakeWordEnabled: true, autoConversation: true }));
+      setWakeMicState('paused');
+      setWakeRetryNonce((n) => n + 1);
+    } catch {
+      setWakeMicState('denied');
+      setVoiceError('Allow microphone permission in browser address bar to say "Hello Mullah" hands-free.');
+    }
+  }, [updateMullahMemory]);
+
+  // Passive "Hello Mullah" Wake Word Standby Listener (always ready when idle & hands-free wake mode is ON)
   useEffect(() => {
-    if (!wakeWordEnabled || jarvisState !== 'idle' || liveStreamMode) {
+    if (!wakeWordEnabled || jarvisState !== 'idle' || liveStreamMode || autoFollowUpPendingRef.current) {
       try {
-        wakeRecognitionRef.current?.stop();
+        wakeRecognitionRef.current?.abort?.();
       } catch {}
       wakeRecognitionRef.current = null;
+      setWakeMicState((prev) => (prev === 'denied' || prev === 'unsupported' ? prev : 'paused'));
       return;
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRec) return;
+    if (!SpeechRec) {
+      setWakeMicState('unsupported');
+      return;
+    }
 
     let cancelled = false;
-    try {
-      const rec = new SpeechRec();
-      rec.lang = 'en-US';
-      rec.continuous = true;
-      rec.interimResults = false;
-      wakeRecognitionRef.current = rec;
+    let restartTimer: ReturnType<typeof setTimeout> | null = null;
+    const WAKE_RE =
+      /(?:^|\b)(?:(?:hey|hello|hi|yo|greetings|ok|okay|dear)\s+)?(?:mullah|mulla|mula|moolah|molah|mulah|muller|maula|malah)\b[,:.!?\s]*(.*)$/i;
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      rec.onresult = (event: any) => {
-        if (cancelled) return;
-        const latest = event?.results?.[event.results.length - 1]?.[0]?.transcript?.trim() || '';
-        const lower = latest.toLowerCase();
-        if (lower.includes('hey mullah') || lower.includes('mullah')) {
-          try {
-            rec.stop();
-          } catch {}
-          setIsOpen(true);
-          const remainder = latest.replace(/^(hey\s+)?mullah[,:\s]*/i, '').trim();
-          if (remainder.length > 2) {
-            sendSpokenCommand(remainder);
-          } else {
-            startListeningRef.current();
+    const startWakeListener = () => {
+      if (
+        cancelled ||
+        !wakeWordEnabledRef.current ||
+        jarvisStateRef.current !== 'idle' ||
+        autoFollowUpPendingRef.current ||
+        isProcessingCommandRef.current
+      ) {
+        return;
+      }
+
+      const now = Date.now();
+      const speakerDecayRemaining = Math.max(0, 1300 - (now - lastSpeakEndedAtRef.current));
+      const cooldownRemaining = Math.max(0, wakeCooldownUntilRef.current - now);
+      const waitMs = Math.max(speakerDecayRemaining, cooldownRemaining);
+      if (waitMs > 40) {
+        restartTimer = setTimeout(startWakeListener, waitMs);
+        return;
+      }
+
+      try {
+        const rec = new SpeechRec();
+        rec.lang = 'en-US';
+        rec.continuous = true;
+        rec.interimResults = false;
+        rec.maxAlternatives = 3;
+        wakeRecognitionRef.current = rec;
+        let lastErrorKind = '';
+
+        rec.onstart = () => {
+          if (!cancelled) {
+            setWakeMicState('active');
           }
-        }
-      };
-      rec.onend = () => {
-        if (!cancelled && wakeWordEnabled && jarvisStateRef.current === 'idle') {
-          setTimeout(() => {
-            try {
-              rec.start();
-            } catch {}
-          }, 400);
-        }
-      };
-      rec.start();
-    } catch {}
+        };
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        rec.onresult = (event: any) => {
+          if (
+            cancelled ||
+            jarvisStateRef.current !== 'idle' ||
+            isProcessingCommandRef.current ||
+            Date.now() - lastSpeakEndedAtRef.current < 1300
+          ) {
+            return;
+          }
+          const latestResult = event?.results?.[event.results.length - 1];
+          if (!latestResult) return;
+
+          let matchedFull = '';
+          let matchedRemainder = '';
+          let found = false;
+
+          for (let i = 0; i < latestResult.length; i++) {
+            const altText = String(latestResult[i]?.transcript || '').trim();
+            if (!altText) continue;
+            const m = altText.match(WAKE_RE);
+            if (m) {
+              matchedFull = altText;
+              matchedRemainder = (m[1] || '').trim();
+              found = true;
+              break;
+            }
+          }
+
+          if (!found) return;
+
+          // Ignore loudspeaker bleed if Mullah just finished a long report
+          const normCheck = matchedFull.toLowerCase().replace(/\s+/g, ' ');
+          if (
+            Date.now() - lastSpeakEndedAtRef.current < 7000 &&
+            lastSpokenRef.current.textLower &&
+            normCheck.length >= 18 &&
+            lastSpokenRef.current.textLower.includes(normCheck)
+          ) {
+            return;
+          }
+
+          cancelled = true;
+          if (restartTimer) clearTimeout(restartTimer);
+          try {
+            rec.abort();
+          } catch {}
+          if (wakeRecognitionRef.current === rec) {
+            wakeRecognitionRef.current = null;
+          }
+          setIsOpen(true);
+
+          // If user gave a full command after "Hello Mullah ...", execute immediately;
+          // otherwise greet by name and automatically open active listening for their command.
+          if (matchedRemainder.length > 2) {
+            sendSpokenCommand(matchedRemainder);
+          } else {
+            sendSpokenCommand('hello mullah');
+          }
+        };
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        rec.onerror = (event: any) => {
+          lastErrorKind = String(event?.error || '').toLowerCase();
+          if (lastErrorKind === 'not-allowed' || lastErrorKind === 'service-not-allowed') {
+            cancelled = true;
+            if (wakeRecognitionRef.current === rec) {
+              wakeRecognitionRef.current = null;
+            }
+            setWakeMicState(hasUserGestureRef.current ? 'denied' : 'needs_gesture');
+          } else if (lastErrorKind === 'network' || lastErrorKind === 'audio-capture') {
+            wakeCooldownUntilRef.current = Date.now() + 2500;
+          }
+        };
+
+        rec.onend = () => {
+          if (wakeRecognitionRef.current === rec) {
+            wakeRecognitionRef.current = null;
+          }
+          if (
+            !cancelled &&
+            lastErrorKind !== 'not-allowed' &&
+            lastErrorKind !== 'service-not-allowed' &&
+            wakeWordEnabledRef.current &&
+            jarvisStateRef.current === 'idle' &&
+            !autoFollowUpPendingRef.current
+          ) {
+            const delay = lastErrorKind === 'network' || lastErrorKind === 'audio-capture' ? 2200 : 520;
+            restartTimer = setTimeout(startWakeListener, delay);
+          }
+        };
+
+        rec.start();
+      } catch {
+        setWakeMicState(hasUserGestureRef.current ? 'paused' : 'needs_gesture');
+      }
+    };
+
+    startWakeListener();
 
     return () => {
       cancelled = true;
+      if (restartTimer) clearTimeout(restartTimer);
       try {
-        wakeRecognitionRef.current?.stop();
+        wakeRecognitionRef.current?.abort?.();
       } catch {}
+      wakeRecognitionRef.current = null;
     };
-  }, [jarvisState, liveStreamMode, sendSpokenCommand, wakeWordEnabled]);
+  }, [jarvisState, liveStreamMode, sendSpokenCommand, wakeRetryNonce, wakeWordEnabled]);
 
   const handleReactorTap = () => {
     // Ignore the synthetic click event if the preceding pointerdown just unlocked & started pending audio
@@ -3375,8 +3546,14 @@ export const JarvisAssistant: React.FC = () => {
                     : jarvisState === 'speaking'
                     ? 'Speaking'
                     : wakeWordEnabled
-                    ? 'Wake Standby'
-                    : 'Ready'}
+                    ? wakeMicState === 'active'
+                      ? 'Say "Hello Mullah"'
+                      : wakeMicState === 'needs_gesture'
+                      ? 'Tap Once for Hands-Free'
+                      : wakeMicState === 'denied'
+                      ? 'Mic Permission Needed'
+                      : 'Wake Standby'
+                    : 'Tap Mode'}
                 </span>
               </div>
               <div className="text-[11px] text-slate-400 truncate mt-0.5">
@@ -3571,20 +3748,28 @@ export const JarvisAssistant: React.FC = () => {
 
                 <button
                   type="button"
-                  onClick={() => setHandsFreeLoop((v) => !v)}
+                  onClick={() => updateMullahMemory((p) => ({ ...p, autoConversation: !handsFreeLoop }))}
                   className={`px-2.5 py-1.5 rounded-md border text-left transition-colors cursor-pointer ${
                     handsFreeLoop
                       ? 'bg-[#0df2c9]/15 border-[#0df2c9]/45 text-[#0df2c9]'
                       : 'bg-[#0a1628] border-[#1a2e4a] text-slate-300 hover:text-white'
                   }`}
                 >
-                  <div className="text-[10px] text-slate-400">Mic Trigger</div>
-                  <div className="font-semibold">{handsFreeLoop ? 'Hands-Free Loop' : 'Tap to Speak'}</div>
+                  <div className="text-[10px] text-slate-400">Auto Follow-Up</div>
+                  <div className="font-semibold">{handsFreeLoop ? 'Hands-Free Loop' : 'Single Turn'}</div>
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => setWakeWordEnabled((v) => !v)}
+                  onClick={() => {
+                    const nextWake = !wakeWordEnabled;
+                    updateMullahMemory((p) => ({ ...p, wakeWordEnabled: nextWake }));
+                    if (nextWake) {
+                      hasUserGestureRef.current = true;
+                      wakeCooldownUntilRef.current = 0;
+                      setWakeRetryNonce((n) => n + 1);
+                    }
+                  }}
                   className={`px-2.5 py-1.5 rounded-md border text-left transition-colors cursor-pointer ${
                     wakeWordEnabled
                       ? 'bg-emerald-500/15 border-emerald-400/45 text-emerald-200'
@@ -3592,7 +3777,7 @@ export const JarvisAssistant: React.FC = () => {
                   }`}
                 >
                   <div className="text-[10px] text-slate-400">Wake Phrase</div>
-                  <div className="font-semibold">{wakeWordEnabled ? '"Hey Mullah" On' : 'Off'}</div>
+                  <div className="font-semibold">{wakeWordEnabled ? '"Hello Mullah" On' : 'Off'}</div>
                 </button>
               </div>
 
@@ -3706,10 +3891,18 @@ export const JarvisAssistant: React.FC = () => {
                   ? 'Analyzing live markets & telemetry...'
                   : jarvisState === 'speaking'
                   ? 'Mullah is speaking (tap core to interrupt)'
+                  : wakeWordEnabled && wakeMicState === 'active'
+                  ? 'Hands-Free Ready · Say "Hello Mullah"'
+                  : wakeWordEnabled && wakeMicState === 'needs_gesture'
+                  ? 'Tap Once to Enable "Hello Mullah" Mic'
+                  : wakeWordEnabled && wakeMicState === 'denied'
+                  ? 'Allow Mic Permission for "Hello Mullah"'
                   : 'Tap Reactor to Speak'}
               </div>
               <div className="text-[10px] font-mono text-slate-400">
-                Try: &ldquo;Switch Live TV to Sky News &amp; volume 80%&rdquo;, &ldquo;Add 45 USD coffee expense&rdquo;, &ldquo;Ask me anything&rdquo;, or &ldquo;Scan Gold 15M&rdquo;
+                {wakeWordEnabled && wakeMicState === 'active'
+                  ? 'Just say "Hello Mullah" or "Hello Mullah, scan Gold 15M" anytime — no tap needed'
+                  : 'Try: "Hello Mullah", "Open Gold Scalper", "Add 45 USD coffee expense", or "Scan Gold 15M"'}
               </div>
             </div>
 
@@ -3721,6 +3914,17 @@ export const JarvisAssistant: React.FC = () => {
               >
                 <Volume2 className="w-3 h-3" />
                 Tap to Hear Mullah Speak
+              </button>
+            )}
+
+            {!autoplayBlocked && wakeWordEnabled && (wakeMicState === 'needs_gesture' || wakeMicState === 'denied') && jarvisState === 'idle' && (
+              <button
+                type="button"
+                onClick={enableHandsFreeMic}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-emerald-500/20 border border-emerald-400/60 text-[10px] font-mono font-bold text-emerald-200 hover:bg-emerald-500/30 cursor-pointer"
+              >
+                <Zap className="w-3 h-3" />
+                Activate &ldquo;Hello Mullah&rdquo; Hands-Free Mic
               </button>
             )}
 

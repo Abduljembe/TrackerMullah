@@ -17,6 +17,8 @@ export interface MullahMemoryProfile {
   briefingMode: 'full' | 'concise';
   favoriteChannel: string;
   preferredRiskPct: number;
+  wakeWordEnabled: boolean;
+  autoConversation: boolean;
   notes: MullahMemoryNote[];
   updatedAt: string;
 }
@@ -59,6 +61,8 @@ export const DEFAULT_MULLAH_MEMORY: MullahMemoryProfile = {
   briefingMode: 'full',
   favoriteChannel: 'bloomberg',
   preferredRiskPct: 1,
+  wakeWordEnabled: true,
+  autoConversation: true,
   notes: [],
   updatedAt: new Date(0).toISOString(),
 };
@@ -91,6 +95,8 @@ export function loadLocalMullahMemory(uid?: string | null): MullahMemoryProfile 
         typeof parsed.preferredRiskPct === 'number' && parsed.preferredRiskPct > 0 && parsed.preferredRiskPct <= 10
           ? parsed.preferredRiskPct
           : 1,
+      wakeWordEnabled: typeof parsed.wakeWordEnabled === 'boolean' ? parsed.wakeWordEnabled : true,
+      autoConversation: typeof parsed.autoConversation === 'boolean' ? parsed.autoConversation : true,
       notes: Array.isArray(parsed.notes) ? parsed.notes.slice(0, 30) : [],
       updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
     };
@@ -167,6 +173,12 @@ export async function hydrateMullahMemoryFromCloud(uid: string): Promise<MullahM
         useCloudPrimary && typeof cloud.preferredRiskPct === 'number'
           ? cloud.preferredRiskPct
           : local.preferredRiskPct,
+      wakeWordEnabled:
+        useCloudPrimary && typeof cloud.wakeWordEnabled === 'boolean' ? cloud.wakeWordEnabled : local.wakeWordEnabled,
+      autoConversation:
+        useCloudPrimary && typeof cloud.autoConversation === 'boolean'
+          ? cloud.autoConversation
+          : local.autoConversation,
       notes: mergedNotes,
       updatedAt: new Date().toISOString(),
     };
