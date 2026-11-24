@@ -1,20 +1,11 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import {
   Users,
-  ShieldAlert,
-  Flame,
-  ArrowRight,
   TrendingDown,
   TrendingUp,
   AlertTriangle,
-  Zap,
-  Info,
-  CheckCircle2,
-  Crosshair,
-  BarChart3,
   RefreshCw,
   Search,
-  Filter,
   Copy,
   Check,
   Sliders,
@@ -24,7 +15,7 @@ import { useTradingViewQuotes, lookupTradingViewQuote } from '../../utils/tradin
 export interface SentimentAsset {
   symbol: string;
   name: string;
-  category: 'MAJORS' | 'CROSSES' | 'METALS' | 'INDICES' | 'EXOTICS';
+  category: 'CRYPTO' | 'MAJORS' | 'CROSSES' | 'METALS' | 'INDICES';
   retailLongPct: number;
   retailShortPct: number;
   change24h: number;
@@ -33,226 +24,189 @@ export interface SentimentAsset {
   trapWarning: string;
   stopLossClusterHigh: number;
   stopLossClusterLow: number;
-  totalPositionsSampled: string;
+  sourceLabel: string;
   decimals: number;
 }
 
 export const ALL_SENTIMENT_ASSETS: SentimentAsset[] = [
-  // --- METALS & COMMODITIES ---
+  {
+    symbol: 'BTC/USD',
+    name: 'Bitcoin / US Dollar',
+    category: 'CRYPTO',
+    retailLongPct: 62,
+    retailShortPct: 38,
+    change24h: 1.4,
+    currentPrice: 94250,
+    institutionalBias: 'BALANCED / NEUTRAL',
+    trapWarning: 'Live Binance Futures perpetual account ratio combined with liquidity sweep zones above/below daily swings.',
+    stopLossClusterHigh: 96200,
+    stopLossClusterLow: 91800,
+    sourceLabel: 'Binance Futures Global L/S',
+    decimals: 2,
+  },
+  {
+    symbol: 'ETH/USD',
+    name: 'Ethereum / US Dollar',
+    category: 'CRYPTO',
+    retailLongPct: 65,
+    retailShortPct: 35,
+    change24h: 1.1,
+    currentPrice: 3180,
+    institutionalBias: 'BALANCED / NEUTRAL',
+    trapWarning: 'Live Binance Futures perpetual positioning for ETHUSDT accounts.',
+    stopLossClusterHigh: 3290,
+    stopLossClusterLow: 3040,
+    sourceLabel: 'Binance Futures Global L/S',
+    decimals: 2,
+  },
+  {
+    symbol: 'SOL/USD',
+    name: 'Solana / US Dollar',
+    category: 'CRYPTO',
+    retailLongPct: 68,
+    retailShortPct: 32,
+    change24h: 2.1,
+    currentPrice: 185,
+    institutionalBias: 'BALANCED / NEUTRAL',
+    trapWarning: 'Live Binance Futures perpetual positioning for SOLUSDT accounts.',
+    stopLossClusterHigh: 196,
+    stopLossClusterLow: 174,
+    sourceLabel: 'Binance Futures Global L/S',
+    decimals: 2,
+  },
   {
     symbol: 'XAU/USD',
     name: 'Spot Gold / US Dollar',
     category: 'METALS',
-    retailLongPct: 82,
-    retailShortPct: 18,
+    retailLongPct: 64,
+    retailShortPct: 36,
     change24h: 0.71,
     currentPrice: 3878.46,
-    institutionalBias: 'STRONG FADE (SHORT)',
-    trapWarning: 'Extreme Retail Long Crowding. Institutions have primed Sell-Side Liquidity sweeps below 3,854 to trigger retail stops before any true upside continuation.',
-    stopLossClusterHigh: 3915.00,
-    stopLossClusterLow: 3852.00,
-    totalPositionsSampled: '48,290 retail lots',
+    institutionalBias: 'BALANCED / NEUTRAL',
+    trapWarning: 'Derived from live Gold RSI stretch, ATR stop bands, and intraday momentum.',
+    stopLossClusterHigh: 3915.0,
+    stopLossClusterLow: 3852.0,
+    sourceLabel: 'Live RSI + ATR Crowding Model',
     decimals: 2,
   },
   {
     symbol: 'XAG/USD',
     name: 'Spot Silver / US Dollar',
     category: 'METALS',
-    retailLongPct: 78,
-    retailShortPct: 22,
+    retailLongPct: 60,
+    retailShortPct: 40,
     change24h: 0.85,
     currentPrice: 49.14,
-    institutionalBias: 'STRONG FADE (SHORT)',
-    trapWarning: 'Retail crowd buying late breakouts. High risk of a fast liquidity shakeout beneath 48.30.',
-    stopLossClusterHigh: 49.95,
-    stopLossClusterLow: 48.20,
-    totalPositionsSampled: '19,400 retail lots',
-    decimals: 2,
-  },
-  {
-    symbol: 'WTI/USD',
-    name: 'WTI Crude Oil',
-    category: 'METALS',
-    retailLongPct: 44,
-    retailShortPct: 56,
-    change24h: 1.15,
-    currentPrice: 89.08,
     institutionalBias: 'BALANCED / NEUTRAL',
-    trapWarning: 'Slight retail short bias. Institutional order flow driven primarily by supply headlines and inventory draws.',
-    stopLossClusterHigh: 90.40,
-    stopLossClusterLow: 87.50,
-    totalPositionsSampled: '15,800 retail lots',
+    trapWarning: 'Derived from live Silver RSI + session range extremes.',
+    stopLossClusterHigh: 49.95,
+    stopLossClusterLow: 48.2,
+    sourceLabel: 'Live RSI + ATR Crowding Model',
     decimals: 2,
   },
-
-  // --- FOREX MAJORS ---
   {
     symbol: 'EUR/USD',
     name: 'Euro / US Dollar',
     category: 'MAJORS',
-    retailLongPct: 34,
-    retailShortPct: 66,
-    change24h: -0.10,
+    retailLongPct: 42,
+    retailShortPct: 58,
+    change24h: -0.1,
     currentPrice: 1.1032,
-    institutionalBias: 'STRONG FADE (BUY)',
-    trapWarning: 'Heavy Retail Short consensus. Institutional market makers targeting Buy-Side Liquidity above 1.1080 to squeeze retail breakout shorts.',
+    institutionalBias: 'BALANCED / NEUTRAL',
+    trapWarning: 'Computed from live EUR/USD RSI, 24h drift, and session liquidity boundaries.',
     stopLossClusterHigh: 1.1085,
     stopLossClusterLow: 1.0995,
-    totalPositionsSampled: '32,150 retail lots',
+    sourceLabel: 'Live RSI + ATR Crowding Model',
     decimals: 4,
   },
   {
     symbol: 'GBP/USD',
     name: 'British Pound / US Dollar',
     category: 'MAJORS',
-    retailLongPct: 41,
-    retailShortPct: 59,
+    retailLongPct: 45,
+    retailShortPct: 55,
     change24h: 0.15,
     currentPrice: 1.3222,
-    institutionalBias: 'STRONG FADE (BUY)',
-    trapWarning: 'Moderate Short imbalance. Potential squeeze of retail shorts during London/NY overlap session.',
+    institutionalBias: 'BALANCED / NEUTRAL',
+    trapWarning: 'Computed from live GBP/USD RSI + session range.',
     stopLossClusterHigh: 1.3285,
-    stopLossClusterLow: 1.3150,
-    totalPositionsSampled: '24,800 retail lots',
+    stopLossClusterLow: 1.315,
+    sourceLabel: 'Live RSI + ATR Crowding Model',
     decimals: 4,
   },
   {
     symbol: 'USD/JPY',
     name: 'US Dollar / Japanese Yen',
     category: 'MAJORS',
-    retailLongPct: 74,
-    retailShortPct: 26,
-    change24h: -0.32,
-    currentPrice: 159.86,
-    institutionalBias: 'STRONG FADE (SHORT)',
-    trapWarning: 'Retail buying dips into resistance. High probability of BoJ jawboning liquidity sweep downward.',
-    stopLossClusterHigh: 160.50,
-    stopLossClusterLow: 158.85,
-    totalPositionsSampled: '29,400 retail lots',
-    decimals: 2,
-  },
-  {
-    symbol: 'USD/CHF',
-    name: 'US Dollar / Swiss Franc',
-    category: 'MAJORS',
     retailLongPct: 68,
     retailShortPct: 32,
-    change24h: 0.05,
-    currentPrice: 0.8376,
+    change24h: -0.32,
+    currentPrice: 159.86,
     institutionalBias: 'BALANCED / NEUTRAL',
-    trapWarning: 'Retail long tilt. Swiss National Bank reserve intervention risk elevated near 0.8415 resistance.',
-    stopLossClusterHigh: 0.8420,
-    stopLossClusterLow: 0.8345,
-    totalPositionsSampled: '11,200 retail lots',
-    decimals: 4,
+    trapWarning: 'Computed from live USD/JPY RSI + ATR swing bounds.',
+    stopLossClusterHigh: 160.5,
+    stopLossClusterLow: 158.85,
+    sourceLabel: 'Live RSI + ATR Crowding Model',
+    decimals: 2,
   },
   {
     symbol: 'USD/CAD',
     name: 'US Dollar / Canadian Dollar',
     category: 'MAJORS',
-    retailLongPct: 28,
-    retailShortPct: 72,
+    retailLongPct: 38,
+    retailShortPct: 62,
     change24h: -0.15,
     currentPrice: 1.4249,
-    institutionalBias: 'STRONG FADE (BUY)',
-    trapWarning: 'Heavy retail selling into oil rallies. Prime institutional accumulation setup targeting 1.4300 stops.',
+    institutionalBias: 'BALANCED / NEUTRAL',
+    trapWarning: 'Computed from live USD/CAD RSI + ATR swing bounds.',
     stopLossClusterHigh: 1.4305,
     stopLossClusterLow: 1.4205,
-    totalPositionsSampled: '18,500 retail lots',
+    sourceLabel: 'Live RSI + ATR Crowding Model',
     decimals: 4,
   },
-  {
-    symbol: 'AUD/USD',
-    name: 'Australian Dollar / US Dollar',
-    category: 'MAJORS',
-    retailLongPct: 62,
-    retailShortPct: 38,
-    change24h: 0.20,
-    currentPrice: 0.6776,
-    institutionalBias: 'BALANCED / NEUTRAL',
-    trapWarning: 'Moderate long bias. Commodity currency flows dependent on Chinese stimulus updates.',
-    stopLossClusterHigh: 0.6825,
-    stopLossClusterLow: 0.6735,
-    totalPositionsSampled: '14,300 retail lots',
-    decimals: 4,
-  },
-
-  // --- FOREX CROSSES ---
   {
     symbol: 'EUR/JPY',
     name: 'Euro / Japanese Yen',
     category: 'CROSSES',
-    retailLongPct: 79,
-    retailShortPct: 21,
+    retailLongPct: 71,
+    retailShortPct: 29,
     change24h: -0.45,
     currentPrice: 176.35,
     institutionalBias: 'STRONG FADE (SHORT)',
-    trapWarning: 'Retail carry-trade longs trapped near historic highs. High probability of violent liquidation cascading down to 174.90.',
+    trapWarning: 'Carry-trade stretch derived from live cross momentum and session high/low stops.',
     stopLossClusterHigh: 177.45,
     stopLossClusterLow: 175.15,
-    totalPositionsSampled: '21,900 retail lots',
+    sourceLabel: 'Live RSI + ATR Crowding Model',
     decimals: 2,
   },
   {
     symbol: 'GBP/JPY',
     name: 'British Pound / Japanese Yen',
     category: 'CROSSES',
-    retailLongPct: 76,
-    retailShortPct: 24,
-    change24h: -0.20,
+    retailLongPct: 70,
+    retailShortPct: 30,
+    change24h: -0.2,
     currentPrice: 211.37,
     institutionalBias: 'STRONG FADE (SHORT)',
-    trapWarning: 'Retail crowd refusing to sell the dragon. Institutional order book primed for rapid 150-pip stop cascades.',
-    stopLossClusterHigh: 212.80,
-    stopLossClusterLow: 209.90,
-    totalPositionsSampled: '26,400 retail lots',
+    trapWarning: 'Volatile cross crowding derived from live RSI and ATR stop zones.',
+    stopLossClusterHigh: 212.8,
+    stopLossClusterLow: 209.9,
+    sourceLabel: 'Live RSI + ATR Crowding Model',
     decimals: 2,
   },
-  {
-    symbol: 'EUR/GBP',
-    name: 'Euro / British Pound',
-    category: 'CROSSES',
-    retailLongPct: 47,
-    retailShortPct: 53,
-    change24h: -0.05,
-    currentPrice: 0.8343,
-    institutionalBias: 'BALANCED / NEUTRAL',
-    trapWarning: 'Balanced retail distribution. Pure technical play within 0.8325 - 0.8365 range.',
-    stopLossClusterHigh: 0.8380,
-    stopLossClusterLow: 0.8320,
-    totalPositionsSampled: '9,800 retail lots',
-    decimals: 4,
-  },
-
-  // --- INDICES ---
   {
     symbol: 'NAS100',
     name: 'Nasdaq 100 Tech Index',
     category: 'INDICES',
-    retailLongPct: 76,
-    retailShortPct: 24,
+    retailLongPct: 69,
+    retailShortPct: 31,
     change24h: 0.85,
     currentPrice: 27744.26,
-    institutionalBias: 'STRONG FADE (SHORT)',
-    trapWarning: 'Euphoric retail call-buying. Smart money distributing into high-volume liquidity pools.',
-    stopLossClusterHigh: 27940.00,
-    stopLossClusterLow: 27570.00,
-    totalPositionsSampled: '18,920 retail contracts',
-    decimals: 2,
-  },
-  {
-    symbol: 'US30',
-    name: 'Dow Jones Industrial Average',
-    category: 'INDICES',
-    retailLongPct: 48,
-    retailShortPct: 52,
-    change24h: 0.22,
-    currentPrice: 52225.33,
     institutionalBias: 'BALANCED / NEUTRAL',
-    trapWarning: 'Equilibrium zone. No extreme retail crowding detected; follow pure technical price action.',
-    stopLossClusterHigh: 52510.00,
-    stopLossClusterLow: 51920.00,
-    totalPositionsSampled: '14,200 retail contracts',
+    trapWarning: 'Index crowding derived from live Nasdaq RSI + high/low volatility envelope.',
+    stopLossClusterHigh: 27940.0,
+    stopLossClusterLow: 27570.0,
+    sourceLabel: 'Live RSI + ATR Crowding Model',
     decimals: 2,
   },
 ];
@@ -263,107 +217,133 @@ interface RetailSentimentDeskProps {
 }
 
 export const RetailSentimentDesk: React.FC<RetailSentimentDeskProps> = ({
-  currentTicker = 'XAU/USD',
+  currentTicker = 'BTC/USD',
   onSelectTicker,
 }) => {
   const [selectedSymbol, setSelectedSymbol] = useState<string>(currentTicker);
-  const [categoryFilter, setCategoryFilter] = useState<'ALL' | 'MAJORS' | 'CROSSES' | 'METALS' | 'INDICES'>('ALL');
+  const [categoryFilter, setCategoryFilter] = useState<'ALL' | 'CRYPTO' | 'MAJORS' | 'CROSSES' | 'METALS' | 'INDICES'>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-
-  // Interactive Simulator: Lets trader slide retail crowding and see how smart money trap levels change
   const [crowdingMultiplier, setCrowdingMultiplier] = useState<number>(0);
+  const [binanceLiveMap, setBinanceLiveMap] = useState<
+    Record<string, { retailLongPct: number; retailShortPct: number; longShortRatio: number }>
+  >({});
 
   useEffect(() => {
-    if (currentTicker) {
-      setSelectedSymbol(currentTicker);
-    }
+    if (currentTicker) setSelectedSymbol(currentTicker);
   }, [currentTicker]);
 
+  useEffect(() => {
+    let active = true;
+    fetch('/api/market/sentiment')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!active || !Array.isArray(data?.cryptoSentiments)) return;
+        const map: Record<string, { retailLongPct: number; retailShortPct: number; longShortRatio: number }> = {};
+        for (const item of data.cryptoSentiments) {
+          map[item.symbol] = {
+            retailLongPct: item.retailLongPct,
+            retailShortPct: item.retailShortPct,
+            longShortRatio: item.longShortRatio,
+          };
+        }
+        setBinanceLiveMap(map);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const liveQuotes = useTradingViewQuotes(3500);
+
+  const enrichedAssets = useMemo(() => {
+    return ALL_SENTIMENT_ASSETS.map((base) => {
+      const q = lookupTradingViewQuote(liveQuotes, base.symbol);
+      const binance = binanceLiveMap[base.symbol];
+
+      const rsi = q?.rsi ?? 50;
+      const chg = q?.changePercent ?? base.change24h;
+      const price = q && q.price > 0 ? q.price : base.currentPrice;
+
+      const longPct = binance
+        ? binance.retailLongPct
+        : Math.min(89, Math.max(11, Math.round(50 + (rsi - 50) * 0.72 + chg * 3.5)));
+      const shortPct = 100 - longPct;
+
+      const rangeHalf =
+        q?.high && q?.low && q.high > q.low
+          ? (q.high - q.low) * 0.65
+          : q?.atr
+          ? q.atr * 1.4
+          : price * 0.0055;
+
+      const clusterHigh = Number(Math.max(q?.high || price + rangeHalf, price + rangeHalf * 0.45).toFixed(base.decimals));
+      const clusterLow = Number(Math.min(q?.low || price - rangeHalf, price - rangeHalf * 0.45).toFixed(base.decimals));
+
+      return {
+        ...base,
+        currentPrice: price,
+        change24h: chg,
+        retailLongPct: longPct,
+        retailShortPct: shortPct,
+        stopLossClusterHigh: clusterHigh,
+        stopLossClusterLow: clusterLow,
+        sourceLabel: binance
+          ? `Binance Live Futures L/S (${binance.longShortRatio.toFixed(2)})`
+          : `Live RSI (${rsi.toFixed(1)}) + ATR Model`,
+        institutionalBias:
+          longPct >= 70
+            ? ('STRONG FADE (SHORT)' as const)
+            : shortPct >= 70
+            ? ('STRONG FADE (BUY)' as const)
+            : ('BALANCED / NEUTRAL' as const),
+      };
+    });
+  }, [liveQuotes, binanceLiveMap]);
+
   const filteredAssets = useMemo(() => {
-    return ALL_SENTIMENT_ASSETS.filter((a) => {
+    return enrichedAssets.filter((a) => {
       const matchCat = categoryFilter === 'ALL' || a.category === categoryFilter;
       const matchSearch =
         a.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
         a.name.toLowerCase().includes(searchQuery.toLowerCase());
       return matchCat && matchSearch;
     });
-  }, [categoryFilter, searchQuery]);
-
-  const liveQuotes = useTradingViewQuotes(3500);
+  }, [enrichedAssets, categoryFilter, searchQuery]);
 
   const selectedAsset = useMemo(() => {
-    const base =
-      ALL_SENTIMENT_ASSETS.find(
+    return (
+      enrichedAssets.find(
         (a) =>
           a.symbol === selectedSymbol ||
           a.symbol.replace('/', '') === selectedSymbol.replace('/', '')
-      ) || ALL_SENTIMENT_ASSETS[0];
-    const q = lookupTradingViewQuote(liveQuotes, base.symbol);
-    if (!q || q.price <= 0) return base;
+      ) || enrichedAssets[0]
+    );
+  }, [enrichedAssets, selectedSymbol]);
 
-    // Derive dynamic retail crowding from live RSI + 24h momentum (retail typically chases extremes/fades moves)
-    const rsi = q.rsi ?? 50;
-    const chg = q.changePercent ?? base.change24h;
-    const derivedLong = Math.min(89, Math.max(11, Math.round(50 + (rsi - 50) * 0.72 + chg * 3.5)));
-    const derivedShort = 100 - derivedLong;
-    const rangeHalf =
-      q.high && q.low && q.high > q.low
-        ? (q.high - q.low) * 0.65
-        : q.atr
-        ? q.atr * 1.4
-        : q.price * 0.0055;
-
-    const clusterHigh = Number(Math.max(q.high || q.price + rangeHalf, q.price + rangeHalf * 0.45).toFixed(base.decimals));
-    const clusterLow = Number(Math.min(q.low || q.price - rangeHalf, q.price - rangeHalf * 0.45).toFixed(base.decimals));
-
-    return {
-      ...base,
-      currentPrice: q.price,
-      change24h: chg,
-      retailLongPct: derivedLong,
-      retailShortPct: derivedShort,
-      stopLossClusterHigh: clusterHigh,
-      stopLossClusterLow: clusterLow,
-      institutionalBias:
-        derivedLong >= 70
-          ? ('STRONG FADE (SHORT)' as const)
-          : derivedShort >= 70
-          ? ('STRONG FADE (BUY)' as const)
-          : ('BALANCED / NEUTRAL' as const),
-    };
-  }, [selectedSymbol, liveQuotes]);
-
-  // Simulated effective Long % based on interactive crowding slider
-  const effectiveLongPct = useMemo(() => {
-    const raw = selectedAsset.retailLongPct + crowdingMultiplier;
-    return Math.min(95, Math.max(5, raw));
-  }, [selectedAsset.retailLongPct, crowdingMultiplier]);
-
+  const effectiveLongPct = Math.min(95, Math.max(5, selectedAsset.retailLongPct + crowdingMultiplier));
   const effectiveShortPct = 100 - effectiveLongPct;
 
   const dynamicTrapStatus = useMemo(() => {
-    if (effectiveLongPct >= 75) {
+    if (effectiveLongPct >= 72) {
       return {
-        bias: 'EXTREME RETAIL LONG CROWDING (FADE SHORT)',
-        badge: 'SELL-SIDE SWEEP RISK ⚠️',
+        badge: 'CROWDED LONG • SWEEP RISK',
         color: 'text-rose-400 bg-rose-950/60 border-rose-500/40',
-        message: 'Over 75% of retail accounts are Long. Smart money market makers are actively absorbing liquidity and preparing a swift breakdown to wipe out retail stop losses.',
+        message: `${effectiveLongPct}% long positioning detected. Watch sell-side liquidity below recent swing lows for stop runs before continuation.`,
       };
     }
-    if (effectiveShortPct >= 75) {
+    if (effectiveShortPct >= 72) {
       return {
-        bias: 'EXTREME RETAIL SHORT CROWDING (FADE BUY)',
-        badge: 'BUY-SIDE SQUEEZE RISK ⚠️',
+        badge: 'CROWDED SHORT • SQUEEZE RISK',
         color: 'text-emerald-400 bg-emerald-950/60 border-emerald-500/40',
-        message: 'Over 75% of retail accounts are Short. Institutional algorithms will trigger a violent short squeeze above previous swing highs.',
+        message: `${effectiveShortPct}% short positioning detected. Watch buy-side stops above swing highs for rapid short squeezes.`,
       };
     }
     return {
-      bias: 'BALANCED RETAIL EQUILIBRIUM',
-      badge: 'NO CROWD BIAS',
+      badge: 'BALANCED EQUILIBRIUM',
       color: 'text-teal-400 bg-teal-950/60 border-teal-500/40',
-      message: 'Retail positioning is reasonably balanced (within 40-60%). Institutional order hunting risk is low; follow higher-timeframe technical structure.',
+      message: 'Positioning is balanced without extreme one-sided crowding. Follow higher-timeframe price structure and pivots.',
     };
   }, [effectiveLongPct, effectiveShortPct]);
 
@@ -377,56 +357,57 @@ export const RetailSentimentDesk: React.FC<RetailSentimentDeskProps> = ({
     setTimeout(() => setCopiedKey(null), 1800);
   };
 
-  const formatPrice = (p: number) => {
-    return p.toLocaleString(undefined, {
+  const formatPrice = (p: number) =>
+    p.toLocaleString(undefined, {
       minimumFractionDigits: selectedAsset.decimals,
       maximumFractionDigits: selectedAsset.decimals,
     });
-  };
 
   return (
-    <div className="p-5 sm:p-6 rounded-2xl bg-gradient-to-br from-[#0c1424] via-[#09101d] to-[#070d18] border border-teal-500/30 shadow-[0_0_25px_rgba(13,242,201,0.08)] space-y-6">
+    <div className="p-5 sm:p-6 rounded-2xl bg-gradient-to-br from-[#0c1424] via-[#09101d] to-[#070d18] border border-teal-500/30 shadow-[0_0_25px_rgba(13,242,201,0.08)] space-y-5">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#182942] pb-4">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-purple-500/20 border border-purple-500/40 flex items-center justify-center text-purple-300 shadow-[0_0_12px_rgba(168,85,247,0.3)] shrink-0">
+          <div className="w-10 h-10 rounded-xl bg-purple-500/20 border border-purple-500/40 flex items-center justify-center text-purple-300 shrink-0">
             <Users className="w-5 h-5" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <h3 className="text-base sm:text-lg font-bold text-white tracking-wide">
-                Retail vs. Institutional Sentiment & Order Book Ratio
+                Live Exchange Sentiment & Crowding Radar
               </h3>
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-purple-500/15 text-purple-300 border border-purple-500/30">
-                ALL PAIRS ({ALL_SENTIMENT_ASSETS.length})
+              <span className="text-[10px] font-mono font-bold text-purple-300">
+                BINANCE LIVE L/S + TV RSI TELEMETRY
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              When 75%+ of retail traders pile into one direction, institutional market makers hunt their stop clusters. Trade with the smart money, not the crowd.
+              Real-time Binance Futures global Long/Short account ratios for Crypto plus live RSI/ATR crowding models for FX, Metals & Indices.
             </p>
           </div>
         </div>
 
         <button
+          type="button"
           onClick={() => setCrowdingMultiplier(0)}
           className="px-2.5 py-1.5 rounded-xl bg-[#0e192c] hover:bg-[#14233a] border border-[#1b345b] text-slate-300 text-xs font-mono transition-all cursor-pointer flex items-center gap-1 self-start sm:self-auto"
-          title="Reset sentiment simulator to live broker readings"
+          title="Reset What-If crowding offset to live reading"
         >
           <RefreshCw className="w-3.5 h-3.5 text-[#0df2c9]" />
-          <span>Reset Sim</span>
+          <span>Reset Offset</span>
         </button>
       </div>
 
-      {/* Category Filter & Search Bar */}
+      {/* Category Filter & Search */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono">
-          {(['ALL', 'MAJORS', 'CROSSES', 'METALS', 'INDICES'] as const).map((cat) => (
+          {(['ALL', 'CRYPTO', 'MAJORS', 'CROSSES', 'METALS', 'INDICES'] as const).map((cat) => (
             <button
               key={cat}
+              type="button"
               onClick={() => setCategoryFilter(cat)}
               className={`px-3 py-1.5 rounded-xl border transition-all cursor-pointer ${
                 categoryFilter === cat
-                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/60 font-bold shadow-sm'
+                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/60 font-bold'
                   : 'bg-[#09111e] text-slate-400 hover:text-white border-[#182942]'
               }`}
             >
@@ -439,7 +420,7 @@ export const RetailSentimentDesk: React.FC<RetailSentimentDeskProps> = ({
           <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
-            placeholder="Search pair (e.g. JPY, XAU, GBP)..."
+            placeholder="Search pair (e.g. BTC, XAU, EUR)..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-[#08101d] border border-[#1b2f4c] text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-purple-500"
@@ -447,38 +428,33 @@ export const RetailSentimentDesk: React.FC<RetailSentimentDeskProps> = ({
         </div>
       </div>
 
-      {/* Horizontal Asset Selector Pills */}
+      {/* Asset Selector */}
       <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
         {filteredAssets.map((item) => {
           const isSelected = item.symbol === selectedAsset.symbol;
-          const isExtreme = item.retailLongPct >= 75 || item.retailShortPct >= 75;
           return (
             <button
               key={item.symbol}
+              type="button"
               onClick={() => {
                 setSelectedSymbol(item.symbol);
                 setCrowdingMultiplier(0);
-                if (onSelectTicker) onSelectTicker(item.symbol);
+                onSelectTicker?.(item.symbol);
               }}
-              className={`px-3 py-2 rounded-xl text-xs font-mono transition-all flex items-center gap-2 cursor-pointer border shrink-0 ${
+              className={`px-3 py-2 rounded-xl text-xs font-mono transition-all flex items-center gap-2 cursor-pointer border shrink-0 tabular-nums ${
                 isSelected
-                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/60 shadow-[0_0_12px_rgba(168,85,247,0.2)] font-bold'
+                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/60 font-bold'
                   : 'bg-[#09111e] hover:bg-[#0e1a2f] text-slate-300 border-[#182942]'
               }`}
             >
               <span>{item.symbol}</span>
               <span
                 className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
-                  item.retailLongPct > 50
-                    ? 'bg-emerald-500/20 text-emerald-300'
-                    : 'bg-rose-500/20 text-rose-300'
+                  item.retailLongPct > 50 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
                 }`}
               >
                 {item.retailLongPct}% L
               </span>
-              {isExtreme && (
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
-              )}
             </button>
           );
         })}
@@ -488,16 +464,11 @@ export const RetailSentimentDesk: React.FC<RetailSentimentDeskProps> = ({
       <div className="p-4 sm:p-5 rounded-xl bg-[#08101d] border border-[#1b3050] space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#14233a] pb-3">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-base font-bold text-white font-mono">{selectedAsset.symbol}</span>
-              <span className="text-xs text-slate-400 font-mono">({selectedAsset.name})</span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-                {selectedAsset.category}
-              </span>
+              <span className="text-xs text-slate-400 font-mono">{selectedAsset.name}</span>
             </div>
-            <span className="text-xs font-mono text-slate-400">
-              Sampled Broker Order Book: <strong className="text-slate-200">{selectedAsset.totalPositionsSampled}</strong>
-            </span>
+            <span className="text-xs font-mono text-teal-300">{selectedAsset.sourceLabel}</span>
           </div>
 
           <span className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border self-start sm:self-auto ${dynamicTrapStatus.color}`}>
@@ -505,15 +476,41 @@ export const RetailSentimentDesk: React.FC<RetailSentimentDeskProps> = ({
           </span>
         </div>
 
-        {/* Interactive Crowding Shift Slider */}
-        <div className="p-3.5 rounded-xl bg-[#060c18] border border-[#172740] space-y-2">
+        {/* Visual Bar Ratio */}
+        <div className="space-y-2 tabular-nums">
+          <div className="flex items-center justify-between text-xs font-mono">
+            <span className="text-emerald-400 font-bold flex items-center gap-1">
+              <TrendingUp className="w-3.5 h-3.5" />
+              LONG: {effectiveLongPct}%
+            </span>
+            <span className="text-rose-400 font-bold flex items-center gap-1">
+              SHORT: {effectiveShortPct}%
+              <TrendingDown className="w-3.5 h-3.5" />
+            </span>
+          </div>
+
+          <div className="h-4 w-full bg-slate-900 rounded-full overflow-hidden flex border border-[#1e3458] p-0.5">
+            <div
+              style={{ width: `${effectiveLongPct}%` }}
+              className="h-full bg-gradient-to-r from-emerald-600 to-emerald-400 rounded-l-full transition-all duration-300"
+            />
+            <div
+              style={{ width: `${effectiveShortPct}%` }}
+              className="h-full bg-gradient-to-r from-rose-400 to-rose-600 rounded-r-full transition-all duration-300"
+            />
+          </div>
+        </div>
+
+        {/* Optional What-If Sensitivity Offset */}
+        <div className="p-3 rounded-xl bg-[#060c18] border border-[#172740] space-y-1.5">
           <div className="flex items-center justify-between text-xs font-mono">
             <span className="text-slate-300 font-bold flex items-center gap-1.5">
               <Sliders className="w-3.5 h-3.5 text-purple-400" />
-              <span>Interactive Retail Sentiment Simulator:</span>
+              <span>What-If Sensitivity Shift:</span>
             </span>
-            <span className="text-purple-300 font-bold">
-              {crowdingMultiplier >= 0 ? '+' : ''}{crowdingMultiplier}% Crowding Shift
+            <span className="text-purple-300 font-bold tabular-nums">
+              {crowdingMultiplier >= 0 ? '+' : ''}
+              {crowdingMultiplier}% Offset
             </span>
           </div>
           <input
@@ -525,63 +522,30 @@ export const RetailSentimentDesk: React.FC<RetailSentimentDeskProps> = ({
             onChange={(e) => setCrowdingMultiplier(parseInt(e.target.value, 10))}
             className="w-full accent-purple-400 cursor-pointer"
           />
-          <div className="flex items-center justify-between text-[10px] font-mono text-slate-500">
-            <span>More Retail Selling (-30%)</span>
-            <span>Live Broker Baseline (0%)</span>
-            <span>More Retail Buying (+30%)</span>
-          </div>
         </div>
 
-        {/* Visual Bar Ratio */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between text-xs font-mono">
-            <span className="text-emerald-400 font-bold flex items-center gap-1">
-              <TrendingUp className="w-3.5 h-3.5" />
-              RETAIL LONG: {effectiveLongPct}%
-            </span>
-            <span className="text-rose-400 font-bold flex items-center gap-1">
-              RETAIL SHORT: {effectiveShortPct}%
-              <TrendingDown className="w-3.5 h-3.5" />
-            </span>
-          </div>
-
-          <div className="h-4 w-full bg-slate-900 rounded-full overflow-hidden flex border border-[#1e3458] p-0.5">
-            <div
-              style={{ width: `${effectiveLongPct}%` }}
-              className="h-full bg-gradient-to-r from-emerald-600 to-emerald-400 rounded-l-full transition-all duration-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]"
-            />
-            <div
-              style={{ width: `${effectiveShortPct}%` }}
-              className="h-full bg-gradient-to-r from-rose-400 to-rose-600 rounded-r-full transition-all duration-500 shadow-[0_0_10px_rgba(244,63,94,0.5)]"
-            />
-          </div>
-        </div>
-
-        {/* Institutional Liquidity Trap Warning */}
+        {/* Contrarian Analysis */}
         <div className="p-3.5 rounded-xl bg-amber-950/20 border border-amber-500/40 flex items-start gap-3">
           <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
           <div className="space-y-1">
             <span className="text-xs font-bold text-amber-300 uppercase tracking-wide block font-mono">
-              Smart Money Order Book Analysis
+              Order Book Liquidity Observation
             </span>
-            <p className="text-xs text-slate-300 leading-relaxed font-mono">
-              {dynamicTrapStatus.message}
-            </p>
+            <p className="text-xs text-slate-300 leading-relaxed font-mono">{dynamicTrapStatus.message}</p>
           </div>
         </div>
 
-        {/* Clickable Liquidity Pools & Stop Clusters */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+        {/* Dynamic Liquidity Target Levels */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 tabular-nums">
           <button
+            type="button"
             onClick={() => handleCopy(selectedAsset.stopLossClusterHigh, 'bsl')}
             className="p-3 rounded-lg bg-[#0a1526] border border-[#172d4c] hover:border-emerald-500/40 text-left transition-all cursor-pointer group space-y-1"
           >
             <div className="flex items-center justify-between text-xs font-mono">
-              <span className="text-slate-400">Buy-Side Stop Clustered (BSL):</span>
+              <span className="text-slate-400">Buy-Side Liquidity (BSL):</span>
               <div className="flex items-center gap-1.5">
-                <span className="text-emerald-400 font-bold">
-                  {formatPrice(selectedAsset.stopLossClusterHigh)}
-                </span>
+                <span className="text-emerald-400 font-bold">{formatPrice(selectedAsset.stopLossClusterHigh)}</span>
                 {copiedKey === 'bsl' ? (
                   <Check className="w-3.5 h-3.5 text-emerald-400" />
                 ) : (
@@ -590,20 +554,19 @@ export const RetailSentimentDesk: React.FC<RetailSentimentDeskProps> = ({
               </div>
             </div>
             <span className="text-[11px] text-slate-400 block font-mono">
-              Retail shorts have protective buy-stops clustered here. Market makers wick into this level to sweep liquidity.
+              Upper stop cluster derived from live session high & ATR expansion.
             </span>
           </button>
 
           <button
+            type="button"
             onClick={() => handleCopy(selectedAsset.stopLossClusterLow, 'ssl')}
             className="p-3 rounded-lg bg-[#0a1526] border border-[#172d4c] hover:border-rose-500/40 text-left transition-all cursor-pointer group space-y-1"
           >
             <div className="flex items-center justify-between text-xs font-mono">
-              <span className="text-slate-400">Sell-Side Stop Clustered (SSL):</span>
+              <span className="text-slate-400">Sell-Side Liquidity (SSL):</span>
               <div className="flex items-center gap-1.5">
-                <span className="text-rose-400 font-bold">
-                  {formatPrice(selectedAsset.stopLossClusterLow)}
-                </span>
+                <span className="text-rose-400 font-bold">{formatPrice(selectedAsset.stopLossClusterLow)}</span>
                 {copiedKey === 'ssl' ? (
                   <Check className="w-3.5 h-3.5 text-emerald-400" />
                 ) : (
@@ -612,7 +575,7 @@ export const RetailSentimentDesk: React.FC<RetailSentimentDeskProps> = ({
               </div>
             </div>
             <span className="text-[11px] text-slate-400 block font-mono">
-              Retail longs placed stops beneath this swing low. Prime target for institutional accumulation before an upside run.
+              Lower stop cluster derived from live session low & ATR contraction.
             </span>
           </button>
         </div>

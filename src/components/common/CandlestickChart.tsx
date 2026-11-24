@@ -48,6 +48,11 @@ import {
   Info,
 } from 'lucide-react';
 
+import {
+  computeRealVolumeProfile,
+  detectRealOrderBlocksAndPools,
+} from '../../utils/orderFlowEngine.ts';
+
 export type ChartStyleType = 'candles' | 'hollow' | 'line' | 'area' | 'bars';
 
 interface CandlestickChartProps {
@@ -60,6 +65,7 @@ interface CandlestickChartProps {
   marketSession?: MarketSessionInfo;
   chartType?: 'candlestick' | 'line';
   onChartTypeChange?: (type: 'candlestick' | 'line') => void;
+  preferredChartStyle?: ChartStyleType;
   isLiveStreaming?: boolean;
   onToggleLiveStreaming?: () => void;
   currentLivePrice?: number;
@@ -89,6 +95,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   onTimeframeChange,
   isMarketLive = false,
   marketSession,
+  preferredChartStyle,
   isLiveStreaming = true,
   onToggleLiveStreaming,
   currentLivePrice,
@@ -104,13 +111,21 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   const priceLinesRef = useRef<IPriceLine[]>([]);
 
   // Chart configuration state
-  const [chartStyle, setChartStyle] = useState<ChartStyleType>('candles');
+  const [chartStyle, setChartStyle] = useState<ChartStyleType>(preferredChartStyle || 'candles');
   const [showVolume, setShowVolume] = useState<boolean>(true);
+  const [volumeDisplayMode, setVolumeDisplayMode] = useState<'volume' | 'delta'>('volume');
+  const [showOrderFlowOverlay, setShowOrderFlowOverlay] = useState<boolean>(false);
   const [showEma20, setShowEma20] = useState<boolean>(false);
   const [showEma50, setShowEma50] = useState<boolean>(false);
   const [showBollinger, setShowBollinger] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [priceLineAlerts, setPriceLineAlerts] = useState<number[]>([]);
+
+  useEffect(() => {
+    if (preferredChartStyle) {
+      setChartStyle(preferredChartStyle);
+    }
+  }, [preferredChartStyle]);
 
   // Timeframe dropdown menu state
   const [showTfMenu, setShowTfMenu] = useState<boolean>(false);
@@ -177,24 +192,30 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   const prevTfRef = useRef(timeframe);
   const prevStyleRef = useRef(chartStyle);
   const prevCandleLenRef = useRef(candles.length);
+  const prevVolModeRef = useRef(volumeDisplayMode);
+  const prevObOverlayRef = useRef(showOrderFlowOverlay);
 
   // Main Chart Initialization
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
-    // Check if this is a live tick update (same ticker, timeframe, style, and candle length)
+    // Check if this is a live tick update (same ticker, timeframe, style, overlay, and candle length)
     const isLiveTick =
       chartRef.current &&
       mainSeriesRef.current &&
       prevTickerRef.current === ticker &&
       prevTfRef.current === timeframe &&
       prevStyleRef.current === chartStyle &&
+      prevVolModeRef.current === volumeDisplayMode &&
+      prevObOverlayRef.current === showOrderFlowOverlay &&
       prevCandleLenRef.current === candles.length &&
       candles.length > 0;
 
     prevTickerRef.current = ticker;
     prevTfRef.current = timeframe;
     prevStyleRef.current = chartStyle;
+    prevVolModeRef.current = volumeDisplayMode;
+    prevObOverlayRef.current = showOrderFlowOverlay;
     prevCandleLenRef.current = candles.length;
 
     if (isLiveTick && mainSeriesRef.current) {
@@ -378,7 +399,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       });
     }
 
-    // 2. Add Volume Histogram
+    // 2. Add Volume / Buy-Sell Delta Histogram
     if (showVolume) {
       const volumeSeries = chart.addSeries(HistogramSeries, {
         priceFormat: { type: 'volume' },
@@ -390,13 +411,33 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           bottom: 0,
         },
       });
-      volumeSeries.setData(
-        candles.map((c) => ({
-          time: c.time as Time,
-          value: c.volume,
-          color: c.close >= c.open ? 'rgba(16, 185, 129, 0.35)' : 'rgba(244, 63, 94, 0.35)',
-        }))
-      );
+      if (volumeDisplayMode === 'delta') {
+        volumeSeries.setData(
+          candles.map((c) => {
+            const anyC = c as Candle & { takerBuyVolume?: number };
+            const rng = Math.max(1e-8, c.high - c.low);
+            const rawVol = c.volume > 0 ? c.volume : Math.max(10, Math.round(rng * (c.close < 10 ? 10000 : 100)));
+            const buyRatio =
+              typeof anyC.takerBuyVolume === 'number' && c.volume > 0
+                ? Math.min(0.95, Math.max(0.05, anyC.takerBuyVolume / c.volume))
+                : Math.min(0.92, Math.max(0.08, ((c.close - c.low) / rng) * 0.78 + (c.close >= c.open ? 0.23 : -0.01)));
+            const delta = Math.round(rawVol * (2 * buyRatio - 1));
+            return {
+              time: c.time as Time,
+              value: Math.abs(delta),
+              color: delta >= 0 ? 'rgba(16, 185, 129, 0.72)' : 'rgba(244, 63, 94, 0.72)',
+            };
+          })
+        );
+      } else {
+        volumeSeries.setData(
+          candles.map((c) => ({
+            time: c.time as Time,
+            value: c.volume > 0 ? c.volume : Math.max(1, Math.round((c.high - c.low) * (c.close < 10 ? 10000 : 100))),
+            color: c.close >= c.open ? 'rgba(16, 185, 129, 0.35)' : 'rgba(244, 63, 94, 0.35)',
+          }))
+        );
+      }
       volumeSeriesRef.current = volumeSeries;
     }
 
@@ -475,8 +516,79 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       bbLowerSeriesRef.current = bbLower;
     }
 
-    // 6. Restore user custom price alert lines
+    // 6. Restore user custom price alert lines + Optional Real Order Flow OB/POC Overlay
     priceLinesRef.current = [];
+    if (showOrderFlowOverlay && candles.length >= 6) {
+      const refSpot = candles[candles.length - 1]?.close || 0;
+      const vp = computeRealVolumeProfile(candles, refSpot, ticker, 14);
+      const { orderBlocks, liquidityPools } = detectRealOrderBlocksAndPools(candles, refSpot, ticker);
+
+      if (vp.pocNode) {
+        priceLinesRef.current.push(
+          mainSeries.createPriceLine({
+            price: vp.pocNode.price,
+            color: '#f59e0b',
+            lineWidth: 2,
+            lineStyle: LineStyle.Solid,
+            axisLabelVisible: true,
+            title: 'POC',
+          })
+        );
+      }
+      const bullOb = orderBlocks.find((z) => z.type === 'BULLISH');
+      if (bullOb) {
+        priceLinesRef.current.push(
+          mainSeries.createPriceLine({
+            price: bullOb.midpoint,
+            color: '#10b981',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: bullOb.kind === 'FVG' ? 'Bull FVG' : 'Bull OB',
+          })
+        );
+      }
+      const bearOb = orderBlocks.find((z) => z.type === 'BEARISH');
+      if (bearOb) {
+        priceLinesRef.current.push(
+          mainSeries.createPriceLine({
+            price: bearOb.midpoint,
+            color: '#f43f5e',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: bearOb.kind === 'FVG' ? 'Bear FVG' : 'Bear OB',
+          })
+        );
+      }
+      const topBsl = liquidityPools.find((l) => l.type.includes('BSL'));
+      if (topBsl) {
+        priceLinesRef.current.push(
+          mainSeries.createPriceLine({
+            price: topBsl.price,
+            color: '#38bdf8',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: 'BSL Liq',
+          })
+        );
+      }
+      const topSsl = liquidityPools.find((l) => l.type.includes('SSL'));
+      if (topSsl) {
+        priceLinesRef.current.push(
+          mainSeries.createPriceLine({
+            price: topSsl.price,
+            color: '#a855f7',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: 'SSL Liq',
+          })
+        );
+      }
+    }
+
     priceLineAlerts.forEach((price) => {
       const line = mainSeries.createPriceLine({
         price,
@@ -565,12 +677,15 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     candles,
     chartStyle,
     showVolume,
+    volumeDisplayMode,
+    showOrderFlowOverlay,
     showEma20,
     showEma50,
     showBollinger,
     isFullscreen,
     priceLineAlerts,
     currency,
+    ticker,
   ]);
 
   // TradingView Control Handlers
@@ -848,21 +963,21 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             )}
           </div>
 
-          {/* Chart Style Switcher */}
-          <div className="hidden lg:flex items-center bg-[#050912] p-0.5 rounded-lg border border-[#162540]">
+          {/* Chart Style Switcher — visible on all screen sizes */}
+          <div className="flex items-center bg-[#050912] p-0.5 rounded-lg border border-[#162540] overflow-x-auto max-w-full">
             {(
               [
-                { id: 'candles', label: '🕯️ Candles' },
-                { id: 'hollow', label: '🕯️ Hollow' },
-                { id: 'line', label: '📈 Line' },
-                { id: 'area', label: '🏔️ Area' },
-                { id: 'bars', label: '📊 Bars' },
+                { id: 'candles', label: 'Candles' },
+                { id: 'hollow', label: 'Hollow' },
+                { id: 'bars', label: 'OHLC Bars' },
+                { id: 'line', label: 'Line' },
+                { id: 'area', label: 'Area' },
               ] as const
             ).map((st) => (
               <button
                 key={st.id}
                 onClick={() => setChartStyle(st.id)}
-                className={`px-2 py-1 rounded-md text-[11px] font-medium transition-all cursor-pointer ${
+                className={`px-2 py-1 rounded-md text-[11px] font-medium whitespace-nowrap transition-all cursor-pointer ${
                   chartStyle === st.id
                     ? 'bg-teal-500/20 text-[#0df2c9] font-bold border border-teal-500/40 shadow-sm'
                     : 'text-slate-400 hover:text-white'
@@ -873,11 +988,11 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             ))}
           </div>
 
-          {/* Technical Indicators Toggle Pills */}
-          <div className="hidden md:flex items-center gap-1 bg-[#050912] p-0.5 rounded-lg border border-[#162540]">
+          {/* Technical Indicators & Order Flow Overlay Toggles — visible on all screen sizes */}
+          <div className="flex flex-wrap items-center gap-1 bg-[#050912] p-0.5 rounded-lg border border-[#162540]">
             <button
               onClick={() => setShowEma20((prev) => !prev)}
-              className={`px-2 py-1 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
+              className={`px-2 py-1 rounded text-[10px] font-mono font-bold whitespace-nowrap transition-all cursor-pointer ${
                 showEma20
                   ? 'bg-sky-500/20 text-sky-400 border border-sky-500/40'
                   : 'text-slate-400 hover:text-white'
@@ -888,7 +1003,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             </button>
             <button
               onClick={() => setShowEma50((prev) => !prev)}
-              className={`px-2 py-1 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
+              className={`px-2 py-1 rounded text-[10px] font-mono font-bold whitespace-nowrap transition-all cursor-pointer ${
                 showEma50
                   ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
                   : 'text-slate-400 hover:text-white'
@@ -899,7 +1014,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             </button>
             <button
               onClick={() => setShowBollinger((prev) => !prev)}
-              className={`px-2 py-1 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
+              className={`px-2 py-1 rounded text-[10px] font-mono font-bold whitespace-nowrap transition-all cursor-pointer ${
                 showBollinger
                   ? 'bg-purple-500/20 text-purple-400 border border-purple-500/40'
                   : 'text-slate-400 hover:text-white'
@@ -909,16 +1024,40 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               BBands
             </button>
             <button
+              onClick={() => setShowOrderFlowOverlay((prev) => !prev)}
+              className={`px-2 py-1 rounded text-[10px] font-mono font-bold whitespace-nowrap transition-all cursor-pointer ${
+                showOrderFlowOverlay
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+              title="Overlay real detected POC, Order Blocks & BSL/SSL Liquidity levels"
+            >
+              OB / POC
+            </button>
+            <button
               onClick={() => setShowVolume((prev) => !prev)}
-              className={`px-2 py-1 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
+              className={`px-2 py-1 rounded text-[10px] font-mono font-bold whitespace-nowrap transition-all cursor-pointer ${
                 showVolume
                   ? 'bg-teal-500/20 text-teal-300 border border-teal-500/40'
                   : 'text-slate-400 hover:text-white'
               }`}
-              title="Toggle Volume Bars"
+              title="Toggle Volume Histogram"
             >
               Vol
             </button>
+            {showVolume && (
+              <button
+                onClick={() => setVolumeDisplayMode((prev) => (prev === 'volume' ? 'delta' : 'volume'))}
+                className={`px-2 py-1 rounded text-[10px] font-mono font-bold whitespace-nowrap transition-all cursor-pointer ${
+                  volumeDisplayMode === 'delta'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+                title="Switch lower histogram between Total Volume and Buy/Sell Net Delta"
+              >
+                {volumeDisplayMode === 'delta' ? 'Delta' : 'Std Vol'}
+              </button>
+            )}
           </div>
         </div>
 

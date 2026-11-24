@@ -18,6 +18,7 @@ import {
   Target,
   Sparkles,
   Search,
+  BarChart3,
 } from 'lucide-react';
 import { useFinance } from '../../context/FinanceContext.tsx';
 import { CurrencyStrengthMeter } from '../common/CurrencyStrengthMeter.tsx';
@@ -31,10 +32,12 @@ import { AdrVolatilityExhaustionDesk } from '../common/AdrVolatilityExhaustionDe
 import { CotInstitutionalMatrix } from '../common/CotInstitutionalMatrix.tsx';
 import { MtfConfluenceMatrixDesk } from '../common/MtfConfluenceMatrixDesk.tsx';
 import { CamarillaPivotMatrix } from '../common/CamarillaPivotMatrix.tsx';
+import { BarchartAnalyticsDesk } from '../common/BarchartAnalyticsDesk.tsx';
 import { useTradingViewQuotes, lookupTradingViewQuote, resolveTradingViewPrice } from '../../utils/tradingViewSync.ts';
 
 type SuiteTab =
   | 'all'
+  | 'barchart'
   | 'intermarket'
   | 'adr'
   | 'mtf-matrix'
@@ -238,7 +241,19 @@ export const ForexPowerSuiteView: React.FC = () => {
           }`}
         >
           <Layers className="w-3.5 h-3.5" />
-          <span>All 11 Quant Tools</span>
+          <span>All Quant Tools</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTabLocal('barchart')}
+          className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer whitespace-nowrap ${
+            activeTabLocal === 'barchart'
+              ? 'bg-teal-500/20 text-[#0df2c9] border border-teal-500/40 shadow-sm'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <BarChart3 className="w-3.5 h-3.5 text-[#0df2c9]" />
+          <span>Barchart Opinions & Movers</span>
         </button>
 
         <button
@@ -377,6 +392,12 @@ export const ForexPowerSuiteView: React.FC = () => {
       {/* Main Content Area */}
       {activeTabLocal === 'all' && (
         <div className="space-y-6">
+          <BarchartAnalyticsDesk
+            currentTicker={selectedAsset}
+            currentPrice={currentPrice}
+            onSelectTicker={(pair) => setSelectedAsset(pair)}
+          />
+
           {/* Priority Macro & Volatility Suite */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <IntermarketDivergenceRadar
@@ -431,6 +452,14 @@ export const ForexPowerSuiteView: React.FC = () => {
             <TelegramSignalDispatcher activeSignal={dynamicSignalPayload} />
           </div>
         </div>
+      )}
+
+      {activeTabLocal === 'barchart' && (
+        <BarchartAnalyticsDesk
+          currentTicker={selectedAsset}
+          currentPrice={currentPrice}
+          onSelectTicker={(pair) => setSelectedAsset(pair)}
+        />
       )}
 
       {activeTabLocal === 'intermarket' && (

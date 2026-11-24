@@ -51,6 +51,7 @@ import { useFinance } from '../../context/FinanceContext.tsx';
 import { useTradingViewQuotes, lookupTradingViewQuote } from '../../utils/tradingViewSync.ts';
 import { getMarketSession } from '../../utils/marketHours.ts';
 import { MAX_RISK_REWARD, getTimeframeProfile, resolveQuoteForTimeframe, evaluateDirectionalConfluence } from '../../utils/signalEngine.ts';
+import { BotLiveChart } from '../trading/BotLiveChart.tsx';
 
 // =========================================================================
 // TRADINGVIEW GOLD CHART ADVANCED EMBED
@@ -2163,132 +2164,47 @@ void CloseAllGoldPositions()
                 height={isChartFullscreen ? 620 : 500}
               />
             </div>
-          ) : (
-            <div className="w-full space-y-3">
-              <div className="flex items-center justify-between text-xs font-mono">
-                <span className="text-slate-400">Execution Stops & Live ATR Overlay</span>
-                <div className="flex items-center gap-3">
-                  <span className="flex items-center gap-1.5 text-slate-300">
-                    <span className="w-2.5 h-0.5 bg-emerald-400" /> TP (2.0x ATR)
-                  </span>
-                  <span className="flex items-center gap-1.5 text-slate-300">
-                    <span className="w-2.5 h-0.5 bg-rose-400" /> SL (1.5x ATR)
-                  </span>
-                  <span className="flex items-center gap-1.5 text-slate-300">
-                    <span className="w-2.5 h-0.5 bg-amber-400" /> Trailing (1.0x ATR)
-                  </span>
+          ) : (() => {
+            const isBuyBias = fastEmaVal >= slowEmaVal;
+            const liveTp = Number((isBuyBias ? goldPrice + atrVal * strategyParams.takeProfitATR : goldPrice - atrVal * strategyParams.takeProfitATR).toFixed(2));
+            const liveSl = Number((isBuyBias ? goldPrice - atrVal * strategyParams.stopLossATR : goldPrice + atrVal * strategyParams.stopLossATR).toFixed(2));
+            const liveTrail = Number((isBuyBias ? goldPrice - atrVal * strategyParams.trailingATR : goldPrice + atrVal * strategyParams.trailingATR).toFixed(2));
+            const tfParamMap: Record<string, string> = { '1': '1m', '5': '5m', '15': '15m', '60': '1H', '240': '4H', 'D': '1D' };
+            const rrText = `1:${(strategyParams.takeProfitATR / Math.max(0.1, strategyParams.stopLossATR)).toFixed(1)}`;
+            return (
+              <div className="w-full space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+                  <span className="text-slate-400">Live Execution Stops & ATR Overlay ({isBuyBias ? 'LONG BIAS' : 'SHORT BIAS'})</span>
+                  <div className="flex flex-wrap items-center gap-3 tabular-nums">
+                    <span className="flex items-center gap-1.5 text-emerald-300">
+                      <span className="w-2.5 h-0.5 bg-emerald-400" /> TP ({strategyParams.takeProfitATR.toFixed(1)}x ATR): ${liveTp.toFixed(2)}
+                    </span>
+                    <span className="flex items-center gap-1.5 text-rose-300">
+                      <span className="w-2.5 h-0.5 bg-rose-400" /> SL ({strategyParams.stopLossATR.toFixed(1)}x ATR): ${liveSl.toFixed(2)}
+                    </span>
+                    <span className="flex items-center gap-1.5 text-amber-300">
+                      <span className="w-2.5 h-0.5 bg-amber-400" /> Trail ({strategyParams.trailingATR.toFixed(1)}x ATR): ${liveTrail.toFixed(2)}
+                    </span>
+                  </div>
                 </div>
+
+                <BotLiveChart
+                  symbol="XAU/USD"
+                  category="METALS"
+                  timeframe={tfParamMap[tvInterval] || '1m'}
+                  digits={2}
+                  livePrice={goldPrice}
+                  entryPrice={goldPrice}
+                  takeProfit={liveTp}
+                  stopLoss={liveSl}
+                  trailingStop={strategyParams.useTrailingStop ? liveTrail : undefined}
+                  isBreakEvenArmed={false}
+                  rrRatio={rrText}
+                  height={isChartFullscreen ? 580 : 460}
+                />
               </div>
-
-              {/* SVG M1 Candlestick Visualizer */}
-              <div
-                className="w-full bg-[#070b14] rounded-lg border border-slate-800/80 p-3 relative flex flex-col justify-between overflow-hidden"
-                style={{ height: isChartFullscreen ? 620 : 500 }}
-              >
-                {/* Price Scale Lines */}
-                <div className="absolute inset-0 flex flex-col justify-between p-3 pointer-events-none opacity-20">
-                  <div className="border-b border-slate-700 w-full" />
-                  <div className="border-b border-slate-700 w-full" />
-                  <div className="border-b border-slate-700 w-full" />
-                  <div className="border-b border-slate-700 w-full" />
-                </div>
-
-                {/* Live Visual Overlay Lines */}
-                <div className="relative w-full h-full flex items-end justify-between px-4 z-10">
-                  {(() => {
-                    const allLows = candles.map((x) => x.low);
-                    const allHighs = candles.map((x) => x.high);
-                    const rawMin = Math.min(...allLows, goldPrice);
-                    const rawMax = Math.max(...allHighs, goldPrice);
-                    const pad = Math.max(1.5, (rawMax - rawMin) * 0.25);
-                    const minP = rawMin - pad;
-                    const maxP = rawMax + pad;
-                    const range = Math.max(0.01, maxP - minP);
-                    const spotBottomPct = Math.min(92, Math.max(8, ((goldPrice - minP) / range) * 100));
-
-                    return (
-                      <>
-                        {/* Candlesticks */}
-                        {candles.map((c, i) => {
-                          const isGreen = c.close >= c.open;
-                          const openPct = ((c.open - minP) / range) * 100;
-                          const closePct = ((c.close - minP) / range) * 100;
-                          const highPct = ((c.high - minP) / range) * 100;
-                          const lowPct = ((c.low - minP) / range) * 100;
-
-                          const bodyBottom = Math.min(openPct, closePct);
-                          const bodyHeight = Math.max(2, Math.abs(closePct - openPct));
-
-                          return (
-                            <div key={i} className="flex flex-col items-center flex-1 h-full relative justify-end">
-                              <div
-                                className={`absolute w-[1.5px] ${isGreen ? 'bg-emerald-400' : 'bg-rose-400'}`}
-                                style={{
-                                  bottom: `${lowPct}%`,
-                                  height: `${Math.max(4, highPct - lowPct)}%`,
-                                }}
-                              />
-                              <div
-                                className={`w-8 sm:w-12 rounded-xs z-10 ${isGreen ? 'bg-emerald-500' : 'bg-rose-500'}`}
-                                style={{
-                                  position: 'absolute',
-                                  bottom: `${bodyBottom}%`,
-                                  height: `${bodyHeight}%`,
-                                }}
-                              />
-                              <span className="text-[10px] text-slate-500 font-mono mt-2 absolute -bottom-2">
-                                {c.time}
-                              </span>
-                            </div>
-                          );
-                        })}
-
-                        {/* Active Current Price Dashed Line */}
-                        <div
-                          className="absolute left-0 right-0 border-t border-dashed border-amber-400 z-20 flex items-center justify-end pr-2"
-                          style={{ bottom: `${spotBottomPct}%` }}
-                        >
-                          <span className="text-[10px] font-mono font-bold bg-amber-500 text-slate-950 px-1.5 py-0.5 rounded shadow">
-                            SPOT ${goldPrice.toFixed(2)}
-                          </span>
-                        </div>
-                      </>
-                    );
-                  })()}
-
-                  {/* Take Profit Target Overlay */}
-                  <div
-                    className="absolute left-0 right-0 border-t border-emerald-500/60 z-10 flex items-center justify-end pr-2"
-                    style={{ bottom: '88%' }}
-                  >
-                    <span className="text-[9px] font-mono text-emerald-300 bg-emerald-950/80 px-1.5 py-0.5 rounded border border-emerald-500/30">
-                      TP (2.0x ATR): $4,108.10
-                    </span>
-                  </div>
-
-                  {/* Stop Loss Target Overlay */}
-                  <div
-                    className="absolute left-0 right-0 border-t border-rose-500/60 z-10 flex items-center justify-end pr-2"
-                    style={{ bottom: '22%' }}
-                  >
-                    <span className="text-[9px] font-mono text-rose-300 bg-rose-950/80 px-1.5 py-0.5 rounded border border-rose-500/30">
-                      SL (1.5x ATR): $4,094.80
-                    </span>
-                  </div>
-
-                  {/* Trailing Stop Overlay */}
-                  <div
-                    className="absolute left-0 right-0 border-t border-amber-500/60 z-10 flex items-center justify-end pr-2"
-                    style={{ bottom: '48%' }}
-                  >
-                    <span className="text-[9px] font-mono text-amber-300 bg-amber-950/80 px-1.5 py-0.5 rounded border border-amber-500/30">
-                      TRAILING STOP (1.0x ATR): $4,099.05
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Quick Real-Time Indicator Bar Under Chart */}
           <div className="pt-2 flex flex-wrap items-center justify-between gap-3 text-xs font-mono text-slate-400 border-t border-slate-800/80">

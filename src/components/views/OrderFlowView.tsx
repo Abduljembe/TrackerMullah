@@ -1,16 +1,5 @@
 import React, { useState } from 'react';
-import {
-  Layers,
-  Sparkles,
-  ArrowRight,
-  TrendingUp,
-  TrendingDown,
-  Activity,
-  Globe2,
-  Crosshair,
-  ShieldAlert,
-  Search,
-} from 'lucide-react';
+import { Layers, ArrowRight } from 'lucide-react';
 import { useFinance } from '../../context/FinanceContext.tsx';
 import { OrderFlowLiquidityDesk } from '../common/OrderFlowLiquidityDesk.tsx';
 import { useTradingViewQuotes, resolveTradingViewPrice } from '../../utils/tradingViewSync.ts';
@@ -18,22 +7,23 @@ import { useTradingViewQuotes, resolveTradingViewPrice } from '../../utils/tradi
 interface AssetPreset {
   ticker: string;
   name: string;
-  market: 'FOREX' | 'NSE' | 'US';
+  market: 'FOREX' | 'CRYPTO' | 'INDICES' | 'NSE' | 'US';
   currency: string;
   price: number;
 }
 
 const ASSET_PRESETS: AssetPreset[] = [
+  { ticker: 'XAU/USD', name: 'Spot Gold / US Dollar', market: 'FOREX', currency: 'USD', price: 3878.46 },
   { ticker: 'EUR/USD', name: 'Euro / US Dollar', market: 'FOREX', currency: 'USD', price: 1.1032 },
-  { ticker: 'USD/KES', name: 'US Dollar / Kenyan Shilling', market: 'FOREX', currency: 'KES', price: 129.86 },
   { ticker: 'GBP/USD', name: 'British Pound / US Dollar', market: 'FOREX', currency: 'USD', price: 1.3222 },
   { ticker: 'USD/JPY', name: 'US Dollar / Japanese Yen', market: 'FOREX', currency: 'JPY', price: 159.86 },
-  { ticker: 'XAU/USD', name: 'Spot Gold / US Dollar', market: 'FOREX', currency: 'USD', price: 3878.46 },
-  { ticker: 'GBP/KES', name: 'British Pound / Kenyan Shilling', market: 'FOREX', currency: 'KES', price: 171.70 },
+  { ticker: 'BTC/USD', name: 'Bitcoin / US Dollar (Binance Taker Delta)', market: 'CRYPTO', currency: 'USD', price: 94250 },
+  { ticker: 'ETH/USD', name: 'Ethereum / US Dollar (Binance Taker Delta)', market: 'CRYPTO', currency: 'USD', price: 3180 },
+  { ticker: 'NAS100', name: 'Nasdaq 100 Index', market: 'INDICES', currency: 'USD', price: 27744.26 },
+  { ticker: 'USD/KES', name: 'US Dollar / Kenyan Shilling', market: 'FOREX', currency: 'KES', price: 129.86 },
+  { ticker: 'R_100', name: 'Deriv Volatility 100 (24/7)', market: 'INDICES', currency: 'USD', price: 1450 },
+  { ticker: 'AAPL', name: 'Apple Inc.', market: 'US', currency: 'USD', price: 228.5 },
   { ticker: 'SCOM', name: 'Safaricom PLC', market: 'NSE', currency: 'KES', price: 17.65 },
-  { ticker: 'EQTY', name: 'Equity Group Holdings', market: 'NSE', currency: 'KES', price: 44.80 },
-  { ticker: 'KCB', name: 'KCB Group PLC', market: 'NSE', currency: 'KES', price: 34.25 },
-  { ticker: 'EABL', name: 'East African Breweries Ltd', market: 'NSE', currency: 'KES', price: 142.50 },
 ];
 
 export const OrderFlowView: React.FC = () => {
@@ -60,25 +50,20 @@ export const OrderFlowView: React.FC = () => {
             <Layers className="w-6 h-6" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-teal-400 font-mono font-bold uppercase tracking-wider">
-                Institutional Market Depth
-              </span>
-              <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-teal-500/20 text-[#0df2c9] border border-teal-500/30">
-                LEVEL 2 & VOLUME PROFILE
-              </span>
-            </div>
+            <span className="text-[10px] text-teal-400 font-mono font-bold uppercase tracking-wider">
+              Candle-Verified Institutional Market Depth
+            </span>
             <h1 className="text-xl md:text-2xl font-black text-white mt-0.5">
-              Order Flow & Liquidity Radar
+              Order Flow, Volume Profile & Liquidity Radar
             </h1>
-            <p className="text-xs text-slate-400 mt-1 max-w-xl">
-              Inspect where institutional banks and market participants are heavily buying and selling. Track horizontal Point of Control (POC), fresh order blocks, and retail stop hunt clusters.
+            <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+              Real OHLCV-computed Point of Control (POC), 70% Value Area, unmitigated Order Blocks, Fair Value Gaps (FVGs), Buy/Sell Volume Delta bars, and swing liquidity clusters.
             </p>
           </div>
         </div>
 
-        {/* Quick Return to Terminal */}
         <button
+          type="button"
           onClick={() => setActiveTab('stocks')}
           className="self-start md:self-auto px-3.5 py-2 rounded-xl bg-[#0e1c33] hover:bg-[#152a4d] border border-teal-500/40 text-teal-300 font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors shadow-sm"
         >
@@ -90,12 +75,10 @@ export const OrderFlowView: React.FC = () => {
       {/* Asset Selector Strip */}
       <div className="p-3 rounded-2xl bg-[#091120] border border-[#162744] flex flex-wrap items-center justify-between gap-3 shadow-md">
         <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono">
-          <span className="text-slate-400 font-bold text-[11px] mr-1 hidden sm:inline">
-            Active Asset:
-          </span>
           {filteredPresets.map((asset) => (
             <button
               key={asset.ticker}
+              type="button"
               onClick={() => setSelectedAsset(asset)}
               className={`px-3 py-1.5 rounded-xl font-bold transition-all cursor-pointer ${
                 selectedAsset.ticker === asset.ticker
@@ -108,13 +91,23 @@ export const OrderFlowView: React.FC = () => {
           ))}
         </div>
 
-        {/* Filter / Search input */}
-        <div className="relative w-full sm:w-48 text-xs font-mono">
+        <div className="relative w-full sm:w-52 text-xs font-mono">
           <input
             type="text"
-            placeholder="Search currency / stock..."
+            placeholder="Filter assets or type custom..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && searchQuery.trim() && filteredPresets.length === 0) {
+                setSelectedAsset({
+                  ticker: searchQuery.trim().toUpperCase(),
+                  name: searchQuery.trim().toUpperCase(),
+                  market: 'FOREX',
+                  currency: 'USD',
+                  price: liveAssetPrice || 100,
+                });
+              }
+            }}
             className="w-full px-3 py-1.5 rounded-xl bg-[#060c18] border border-[#14233c] text-white placeholder-slate-500 text-xs focus:outline-none focus:border-teal-500"
           />
         </div>
@@ -125,7 +118,18 @@ export const OrderFlowView: React.FC = () => {
         currentTicker={selectedAsset.ticker}
         currentPrice={liveAssetPrice}
         currency={selectedAsset.currency}
-        onApplyZoneToOrder={(_entry, _sl, _tp) => {
+        onApplyZoneToOrder={(entry, sl, tp) => {
+          try {
+            window.dispatchEvent(
+              new CustomEvent('njia-jarvis-focus-asset', {
+                detail: { symbol: selectedAsset.ticker, bottomTab: 'paper' },
+              })
+            );
+            sessionStorage.setItem(
+              'njia_jarvis_pending_focus',
+              JSON.stringify({ symbol: selectedAsset.ticker, bottomTab: 'paper', entry, sl, tp })
+            );
+          } catch {}
           setActiveTab('stocks');
         }}
       />

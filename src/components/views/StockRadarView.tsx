@@ -47,10 +47,11 @@ import {
   Bot,
   Users,
   Compass,
+  BarChart3,
 } from 'lucide-react';
 import { useFinance } from '../../context/FinanceContext.tsx';
 import { InvestmentItem } from '../../types/finance.ts';
-import { CandlestickChart } from '../common/CandlestickChart.tsx';
+import { CandlestickChart, ChartStyleType } from '../common/CandlestickChart.tsx';
 import { TradingViewWidget } from '../common/TradingViewWidget.tsx';
 import { PaperTradingDesk, PrefillOrderData } from '../common/PaperTradingDesk.tsx';
 import { ChartScreenshotAnalyzerModal } from '../common/ChartScreenshotAnalyzerModal.tsx';
@@ -75,6 +76,7 @@ import { AdrVolatilityExhaustionDesk } from '../common/AdrVolatilityExhaustionDe
 import { CotInstitutionalMatrix } from '../common/CotInstitutionalMatrix.tsx';
 import { MtfConfluenceMatrixDesk } from '../common/MtfConfluenceMatrixDesk.tsx';
 import { CamarillaPivotMatrix } from '../common/CamarillaPivotMatrix.tsx';
+import { BarchartAnalyticsDesk } from '../common/BarchartAnalyticsDesk.tsx';
 import { generateCandles, enrichCandlesWithIndicators, computePeriodStats, Timeframe, Candle } from '../../utils/stockCandles.ts';
 import { getMarketSession, getAssetMarketSession, MarketSessionInfo } from '../../utils/marketHours.ts';
 import { lookupTradingViewQuote, resolveTradingViewPrice, useTradingViewQuotes } from '../../utils/tradingViewSync.ts';
@@ -1690,10 +1692,12 @@ export const StockRadarView: React.FC = () => {
       setChartViewMode('tradingview');
     }
   }, [selectedStock.market, selectedStock.ticker]);
+  const [preferredChartStyle, setPreferredChartStyle] = useState<ChartStyleType | undefined>(undefined);
   const [bottomTab, setBottomTab] = useState<
     | 'paper'
     | 'scorecard'
     | 'orderflow'
+    | 'barchart'
     | 'livetv'
     | 'journal'
     | 'risk-calc'
@@ -1777,7 +1781,7 @@ export const StockRadarView: React.FC = () => {
       }
       if (detail.bottomTab) {
         const allowedTabs = new Set([
-          'paper', 'scorecard', 'orderflow', 'livetv', 'journal', 'risk-calc',
+          'paper', 'scorecard', 'orderflow', 'barchart', 'livetv', 'journal', 'risk-calc',
           'sessions', 'prop-guard', 'correlation', 'broker-arbiter', 'strength',
           'backtest', 'calendar', 'news', 'sentiment', 'dispatcher', 'intermarket',
           'adr', 'mtf-matrix', 'cot', 'camarilla',
@@ -3548,6 +3552,7 @@ Summary: ${sig.summary}`;
                   marketSession={activeStockSession}
                   chartType={chartType}
                   onChartTypeChange={setChartType}
+                  preferredChartStyle={preferredChartStyle}
                   isLiveStreaming={isLiveStreaming}
                   onToggleLiveStreaming={() => setIsLiveStreaming((p) => !p)}
                   currentLivePrice={currentDisplayPrice}
@@ -3655,6 +3660,18 @@ Summary: ${sig.summary}`;
                 >
                   <Layers className="w-3.5 h-3.5 text-cyan-400" />
                   <span>Order Flow & Liquidity</span>
+                </button>
+
+                <button
+                  onClick={() => setBottomTab('barchart')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    bottomTab === 'barchart'
+                      ? 'bg-teal-500/20 text-[#0df2c9] border border-teal-500/40 shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <BarChart3 className="w-3.5 h-3.5 text-[#0df2c9]" />
+                  <span>Barchart Opinions & Movers</span>
                 </button>
 
                 <button
@@ -3913,6 +3930,9 @@ Summary: ${sig.summary}`;
                 currentTicker={selectedStock.ticker}
                 currentPrice={currentDisplayPrice}
                 currency={selectedStock.currency}
+                candles={activeCandles}
+                timeframe={timeframe}
+                onTimeframeChange={setTimeframe}
                 onApplyZoneToOrder={(entry, sl, tp) => {
                   setPrefillOrder({
                     direction: entry >= currentDisplayPrice ? 'LONG' : 'SHORT',
@@ -3922,6 +3942,27 @@ Summary: ${sig.summary}`;
                     timestamp: Date.now(),
                   });
                   setBottomTab('paper');
+                }}
+              />
+            )}
+
+            {/* Tab: Barchart Technical Opinion Matrix, 52W Range & Movers Bar Chart */}
+            {bottomTab === 'barchart' && (
+              <BarchartAnalyticsDesk
+                currentTicker={selectedStock.ticker}
+                currentPrice={currentDisplayPrice}
+                candles={activeCandles}
+                timeframe={timeframe}
+                onSelectTicker={(symbol) => {
+                  const match = FEATURED_ASSETS.find(
+                    (a) => a.ticker === symbol || a.ticker.replace('/', '') === symbol.replace('/', '')
+                  );
+                  if (match) setSelectedStock(match);
+                }}
+                onSwitchToOhlcBars={() => {
+                  setChartViewMode('radar');
+                  setPreferredChartStyle('bars');
+                  window.scrollTo({ top: 140, behavior: 'smooth' });
                 }}
               />
             )}

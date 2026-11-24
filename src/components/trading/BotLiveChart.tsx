@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   createChart,
   CandlestickSeries,
+  BarSeries,
   ColorType,
   CrosshairMode,
   LineStyle,
@@ -10,7 +11,8 @@ import {
   IPriceLine,
   Time,
 } from 'lightweight-charts';
-import { generateCandles } from '../../utils/stockCandles.ts';
+import { generateCandles, Candle } from '../../utils/stockCandles.ts';
+import { computeRealVolumeProfile, detectRealOrderBlocksAndPools } from '../../utils/orderFlowEngine.ts';
 
 interface BotLiveChartProps {
   symbol: string;
@@ -21,8 +23,11 @@ interface BotLiveChartProps {
   entryPrice: number;
   takeProfit: number;
   stopLoss: number;
+  trailingStop?: number;
   isBreakEvenArmed: boolean;
   rrRatio: string;
+  height?: number;
+  defaultSeriesStyle?: 'candles' | 'bars';
   onLivePriceTick?: (price: number) => void;
 }
 
@@ -32,6 +37,7 @@ interface OhlcPoint {
   high: number;
   low: number;
   close: number;
+  volume?: number;
 }
 
 function tfToDerivGranularity(tf: string): number {
@@ -76,20 +82,27 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
   entryPrice,
   takeProfit,
   stopLoss,
+  trailingStop,
   isBreakEvenArmed,
   rrRatio,
+  height = 280,
+  defaultSeriesStyle = 'candles',
   onLivePriceTick,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const seriesRef = useRef<ISeriesApi<'Candlestick', Time> | null>(null);
+  const seriesRef = useRef<ISeriesApi<any, Time> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const barsRef = useRef<OhlcPoint[]>([]);
   const onLivePriceTickRef = useRef(onLivePriceTick);
   onLivePriceTickRef.current = onLivePriceTick;
-  const [feedSource, setFeedSource] = useState<'DERIV_WS' | 'LIVE_OHLCV' | 'ESTIMATED'>('LIVE_OHLCV');
 
-  // 1. Initialize Lightweight Charts instance once
+  const [feedSource, setFeedSource] = useState<'DERIV_WS' | 'LIVE_OHLCV' | 'ESTIMATED'>('LIVE_OHLCV');
+  const [seriesStyle, setSeriesStyle] = useState<'candles' | 'bars'>(defaultSeriesStyle);
+  const [showObPoc, setShowObPoc] = useState<boolean>(false);
+  const [barsRevision, setBarsRevision] = useState<number>(0);
+
+  // 1. Initialize or rebuild Lightweight Charts instance when style/height changes
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -119,24 +132,39 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
         secondsVisible: false,
       },
       width: containerRef.current.clientWidth,
-      height: 280,
+      height,
     });
 
-    const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#10b981',
-      downColor: '#f43f5e',
-      borderVisible: false,
-      wickUpColor: '#34d399',
-      wickDownColor: '#fb7185',
-      priceFormat: {
-        type: 'price',
-        precision: Math.min(5, Math.max(2, digits)),
-        minMove: Number((1 / Math.pow(10, Math.min(5, Math.max(2, digits)))).toFixed(5)),
-      },
-    });
+    const prec = Math.min(5, Math.max(2, digits));
+    const priceFormat = {
+      type: 'price' as const,
+      precision: prec,
+      minMove: Number((1 / Math.pow(10, prec)).toFixed(prec)),
+    };
+
+    const mainSeries =
+      seriesStyle === 'bars'
+        ? chart.addSeries(BarSeries, {
+            upColor: '#10b981',
+            downColor: '#f43f5e',
+            priceFormat,
+          })
+        : chart.addSeries(CandlestickSeries, {
+            upColor: '#10b981',
+            downColor: '#f43f5e',
+            borderVisible: false,
+            wickUpColor: '#34d399',
+            wickDownColor: '#fb7185',
+            priceFormat,
+          });
 
     chartRef.current = chart;
-    seriesRef.current = candleSeries;
+    seriesRef.current = mainSeries;
+
+    if (barsRef.current.length > 0) {
+      mainSeries.setData(barsRef.current);
+      chart.timeScale().fitContent();
+    }
 
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
@@ -154,7 +182,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
       seriesRef.current = null;
       priceLinesRef.current = [];
     };
-  }, []);
+  }, [seriesStyle, height]);
 
   // Update precision dynamically when digits change
   useEffect(() => {
@@ -169,7 +197,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
     });
   }, [digits]);
 
-  // 2. Load real historical candles (Deriv WS for 24/7 synthetics, Yahoo OHLCV for Forex/Metals/Indices/Crypto)
+  // 2. Load real historical candles (Deriv WS for 24/7 synthetics, Yahoo/Binance OHLCV for Forex/Metals/Indices/Crypto)
   useEffect(() => {
     let active = true;
     let ws: WebSocket | null = null;
@@ -179,6 +207,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
       barsRef.current = bars;
       seriesRef.current.setData(bars);
       chartRef.current?.timeScale().fitContent();
+      setBarsRevision((r) => r + 1);
     };
 
     if (category === 'DERIV_24_7') {
@@ -210,6 +239,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
                 high: Number(c.high),
                 low: Number(c.low),
                 close: Number(c.close),
+                volume: 0,
               }));
               setFeedSource('DERIV_WS');
               applyBars(mapped);
@@ -222,6 +252,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
                 high: Number(msg.ohlc.high),
                 low: Number(msg.ohlc.low),
                 close: Number(msg.ohlc.close),
+                volume: 0,
               };
               setFeedSource('DERIV_WS');
               seriesRef.current.update(bar);
@@ -248,6 +279,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
               high: c.high,
               low: c.low,
               close: c.close,
+              volume: c.volume,
             }))
           );
         };
@@ -261,6 +293,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
             high: c.high,
             low: c.low,
             close: c.close,
+            volume: c.volume,
           }))
         );
       }
@@ -284,6 +317,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
                   high: Number(c.high),
                   low: Number(c.low),
                   close: Number(c.close),
+                  volume: Number(c.volume) || 0,
                 });
               }
             }
@@ -300,6 +334,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
                 high: c.high,
                 low: c.low,
                 close: c.close,
+                volume: c.volume,
               }))
             );
           }
@@ -315,6 +350,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
               high: c.high,
               low: c.low,
               close: c.close,
+              volume: c.volume,
             }))
           );
         });
@@ -338,6 +374,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
       high: Math.max(last.high, livePrice),
       low: Math.min(last.low, livePrice),
       close: livePrice,
+      volume: last.volume,
     };
     barsRef.current[barsRef.current.length - 1] = updated;
     try {
@@ -347,7 +384,7 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
     }
   }, [livePrice]);
 
-  // 4. Overlay horizontal TP, Entry, and SL / Break-Even price lines directly on chart
+  // 4. Overlay horizontal TP, Entry, SL / Trailing, and Optional POC / Order Block price lines
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
@@ -383,6 +420,18 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
         })
       );
     }
+    if (trailingStop && trailingStop > 0) {
+      priceLinesRef.current.push(
+        series.createPriceLine({
+          price: trailingStop,
+          color: '#f59e0b',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dotted,
+          axisLabelVisible: true,
+          title: 'TRAIL SL',
+        })
+      );
+    }
     if (stopLoss > 0) {
       priceLinesRef.current.push(
         series.createPriceLine({
@@ -395,11 +444,65 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
         })
       );
     }
-  }, [entryPrice, takeProfit, stopLoss, isBreakEvenArmed, rrRatio]);
+
+    if (showObPoc && barsRef.current.length >= 8) {
+      const candlesForEngine: Candle[] = barsRef.current.map((b) => ({
+        time: Number(b.time),
+        timeLabel: new Date(Number(b.time) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+        fullDate: '',
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+        volume: b.volume || 0,
+      }));
+      const refSpot = livePrice > 0 ? livePrice : candlesForEngine[candlesForEngine.length - 1].close;
+      const vp = computeRealVolumeProfile(candlesForEngine, refSpot, symbol, 12);
+      const { orderBlocks } = detectRealOrderBlocksAndPools(candlesForEngine, refSpot, symbol);
+      if (vp.pocNode) {
+        priceLinesRef.current.push(
+          series.createPriceLine({
+            price: vp.pocNode.price,
+            color: '#fbbf24',
+            lineWidth: 1,
+            lineStyle: LineStyle.Solid,
+            axisLabelVisible: true,
+            title: 'POC',
+          })
+        );
+      }
+      const bullOb = orderBlocks.find((z) => z.type === 'BULLISH');
+      if (bullOb) {
+        priceLinesRef.current.push(
+          series.createPriceLine({
+            price: bullOb.midpoint,
+            color: '#14b8a6',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: 'Bull OB',
+          })
+        );
+      }
+      const bearOb = orderBlocks.find((z) => z.type === 'BEARISH');
+      if (bearOb) {
+        priceLinesRef.current.push(
+          series.createPriceLine({
+            price: bearOb.midpoint,
+            color: '#fb7185',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: 'Bear OB',
+          })
+        );
+      }
+    }
+  }, [entryPrice, takeProfit, stopLoss, trailingStop, isBreakEvenArmed, rrRatio, seriesStyle, showObPoc, barsRevision, symbol, livePrice]);
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between text-[10px] font-mono">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono">
         <span
           className={`px-2 py-0.5 rounded border font-bold ${
             feedSource === 'DERIV_WS'
@@ -410,16 +513,55 @@ export const BotLiveChart: React.FC<BotLiveChartProps> = ({
           }`}
         >
           {feedSource === 'DERIV_WS'
-            ? 'DERIV REAL-TIME WEBSOCKET CANDLES'
+            ? 'DERIV REAL-TIME WEBSOCKET FEED'
             : feedSource === 'LIVE_OHLCV'
             ? 'LIVE HISTORICAL OHLCV + TV LIVE TICKS'
             : 'STRUCTURAL MARKET BARS + TV TICKS'}
         </span>
-        <span className="text-slate-400">Scroll / Pinch to Zoom • Interactive Crosshair</span>
+
+        <div className="flex items-center gap-1.5">
+          <div className="flex items-center bg-[#060c18] p-0.5 rounded border border-[#162540]">
+            <button
+              type="button"
+              onClick={() => setSeriesStyle('candles')}
+              className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                seriesStyle === 'candles'
+                  ? 'bg-teal-500/20 text-[#0df2c9] font-bold'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Candles
+            </button>
+            <button
+              type="button"
+              onClick={() => setSeriesStyle('bars')}
+              className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                seriesStyle === 'bars'
+                  ? 'bg-teal-500/20 text-[#0df2c9] font-bold'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              OHLC Bars
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowObPoc((p) => !p)}
+            className={`px-2 py-0.5 rounded border transition-colors cursor-pointer ${
+              showObPoc
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold'
+                : 'bg-[#060c18] text-slate-400 border-[#162540] hover:text-white'
+            }`}
+            title="Toggle real detected POC & Order Block price levels"
+          >
+            OB / POC
+          </button>
+        </div>
       </div>
       <div
         ref={containerRef}
-        className="w-full h-[280px] rounded-2xl border border-[#132036] overflow-hidden bg-[#040812]"
+        className="w-full rounded-2xl border border-[#132036] overflow-hidden bg-[#040812]"
+        style={{ height }}
       />
     </div>
   );
