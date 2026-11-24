@@ -93,6 +93,7 @@ import { lookupTradingViewQuote, resolveTradingViewPrice, useTradingViewQuotes }
 import { computeTimeframeSignalLevels, getTimeframeProfile, resolveQuoteForTimeframe, sanitizeRiskRewardString, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
 import { SignalScorecardDesk } from '../common/SignalScorecardDesk.tsx';
 import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../utils/signalScorecard.ts';
+import { openPaperTradeFromSignal, parseNumericLevel } from '../../utils/paperTradeManager.ts';
 
 export interface TradingSignal {
   action: 'STRONG BUY' | 'BUY' | 'NEUTRAL' | 'HOLD' | 'SELL' | 'STRONG SELL';
@@ -1901,12 +1902,36 @@ export const StockRadarView: React.FC = () => {
     sl: string;
     tp: string;
   }) => {
+    const slNum = parseNumericLevel(trade.sl, 0);
+    const tpNum = parseNumericLevel(trade.tp, 0);
+    const tp2Num = parseNumericLevel(activeSignal?.takeProfit2, tpNum);
+    let didOpen = false;
+    if (currentDisplayPrice > 0 && slNum > 0 && tpNum > 0) {
+      const res = openPaperTradeFromSignal({
+        symbol: selectedStock.ticker,
+        name: selectedStock.name,
+        market: selectedStock.market,
+        currency: selectedStock.currency,
+        action: trade.direction === 'LONG' ? 'BUY' : 'SELL',
+        timeframe: activeSignal?.timeframe || timeframe,
+        spotPrice: currentDisplayPrice,
+        sl: slNum,
+        tp1: tpNum,
+        tp2: tp2Num,
+        strategy: activeSignal?.setupType || `Manual Signal (${timeframe})`,
+        confidenceScore: activeSignal?.confidenceScore,
+        explicitLots: trade.lots,
+        forceManual: true,
+      });
+      didOpen = res.opened;
+    }
     setPrefillOrder({
       direction: trade.direction,
       lots: trade.lots,
       sl: trade.sl,
       tp: trade.tp,
       timestamp: Date.now(),
+      autoExecuted: didOpen,
     });
     setBottomTab('paper');
     setTimeout(() => {
@@ -2007,7 +2032,10 @@ export const StockRadarView: React.FC = () => {
         return Number.isFinite(val) && val > 0 ? val : fallback;
       };
       const actUpper = String(sigObj.action || liveComputed.action).toUpperCase();
-      recordTrackedSignal({
+      const parsedSl = parseNum(sigObj.stopLoss, liveComputed.sl);
+      const parsedTp1 = parseNum(sigObj.takeProfit1, liveComputed.tp1);
+      const parsedTp2 = parseNum(sigObj.takeProfit2, liveComputed.tp2);
+      const trackedRec = recordTrackedSignal({
         symbol: stock.ticker,
         market: stock.market,
         timeframe: tfProfile.label,
@@ -2015,12 +2043,29 @@ export const StockRadarView: React.FC = () => {
         direction: actUpper.includes('SELL') ? 'SELL' : 'BUY',
         action: actUpper,
         entryPrice: liveSpotPrice,
-        sl: parseNum(sigObj.stopLoss, liveComputed.sl),
-        tp1: parseNum(sigObj.takeProfit1, liveComputed.tp1),
-        tp2: parseNum(sigObj.takeProfit2, liveComputed.tp2),
+        sl: parsedSl,
+        tp1: parsedTp1,
+        tp2: parsedTp2,
         riskReward: sigObj.riskReward || liveComputed.riskReward,
         confidenceScore: sigObj.confidenceScore || liveComputed.confidenceScore,
       });
+      if ((tvQuote && tvQuote.price > 0) || stock.market === 'NSE') {
+        openPaperTradeFromSignal({
+          symbol: stock.ticker,
+          name: stock.name,
+          market: stock.market,
+          currency: stock.currency,
+          action: actUpper,
+          timeframe: tfProfile.label,
+          spotPrice: liveSpotPrice,
+          sl: parsedSl,
+          tp1: parsedTp1,
+          tp2: parsedTp2,
+          strategy: sigObj.setupType || liveComputed.setupLabel,
+          signalId: trackedRec?.id,
+          confidenceScore: sigObj.confidenceScore || liveComputed.confidenceScore,
+        });
+      }
     } catch {
       // Deterministic analytical profile with rich signal strictly scaled to timeframe & max 1:5.0 R:R
       const isFx = stock.market === 'FOREX' || stock.market === 'METALS' || stock.market === 'INDICES';
@@ -2149,7 +2194,7 @@ export const StockRadarView: React.FC = () => {
         ],
       });
 
-      recordTrackedSignal({
+      const trackedFallback = recordTrackedSignal({
         symbol: stock.ticker,
         market: stock.market,
         timeframe: tfProfile.label,
@@ -2163,6 +2208,23 @@ export const StockRadarView: React.FC = () => {
         riskReward: computed.riskReward,
         confidenceScore: computed.confidenceScore,
       });
+      if ((tvQuote && tvQuote.price > 0) || stock.market === 'NSE') {
+        openPaperTradeFromSignal({
+          symbol: stock.ticker,
+          name: stock.name,
+          market: stock.market,
+          currency: stock.currency,
+          action: computed.action,
+          timeframe: tfProfile.label,
+          spotPrice: liveSpotPrice,
+          sl: computed.sl,
+          tp1: computed.tp1,
+          tp2: computed.tp2,
+          strategy: computed.setupLabel,
+          signalId: trackedFallback?.id,
+          confidenceScore: computed.confidenceScore,
+        });
+      }
     } finally {
       setIsAiLoading(false);
     }
@@ -2577,6 +2639,43 @@ Summary: ${sig.summary}`;
       },
     };
   }, [aiReport, selectedStock, currentDisplayPrice, currentTvQuote, timeframe, chartViewMode, activeCandles]);
+
+  // Automatically open a deduplicated Paper Trade whenever an indicated BUY/SELL signal is live
+  useEffect(() => {
+    const hasLiveQuote = selectedStock.market === 'NSE' || Boolean(currentTvQuote && currentTvQuote.price > 0);
+    if (!hasLiveQuote || !(currentDisplayPrice > 0) || !activeSignal) return;
+    const act = String(activeSignal.action || '').toUpperCase();
+    if (!act.includes('BUY') && !act.includes('SELL')) return;
+
+    const slVal = parseNumericLevel(activeSignal.stopLoss, 0);
+    const tp1Val = parseNumericLevel(activeSignal.takeProfit1, 0);
+    const tp2Val = parseNumericLevel(activeSignal.takeProfit2, tp1Val);
+    if (!(slVal > 0) || !(tp1Val > 0)) return;
+
+    openPaperTradeFromSignal({
+      symbol: selectedStock.ticker,
+      name: selectedStock.name,
+      market: selectedStock.market,
+      currency: selectedStock.currency,
+      action: act,
+      timeframe: activeSignal.timeframe || timeframe,
+      spotPrice: currentDisplayPrice,
+      sl: slVal,
+      tp1: tp1Val,
+      tp2: tp2Val,
+      strategy: activeSignal.setupType || `Radar ${act} (${activeSignal.timeframe || timeframe})`,
+      confidenceScore: activeSignal.confidenceScore,
+    });
+  }, [
+    selectedStock.ticker,
+    selectedStock.name,
+    selectedStock.market,
+    selectedStock.currency,
+    timeframe,
+    activeSignal,
+    currentDisplayPrice,
+    currentTvQuote?.price,
+  ]);
 
   return (
     <div className="space-y-6">

@@ -6,6 +6,11 @@ import { scheduleTradingCloudPush } from './tradingCloudSync.ts';
 
 export const PAPER_TRADE_ALERT_EVENT = 'njia-paper-trade-auto-event';
 export const MULLAH_PROACTIVE_ALERT_EVENT = 'mullah-proactive-speak';
+export const AUTO_SIGNAL_PAPER_KEY = 'njia_auto_paper_on_signal';
+export const AUTO_SIGNAL_COOLDOWN_KEY = 'njia_auto_paper_cooldown_v1';
+export const AUTO_SIGNAL_PAPER_TOGGLE_EVENT = 'njia-auto-paper-toggle';
+
+export type CloseReason = 'TP_HIT' | 'TP1_PARTIAL' | 'SL_HIT' | 'MANUAL';
 
 export interface ManagedPaperPosition {
   id: string;
@@ -27,6 +32,13 @@ export interface ManagedPaperPosition {
   executionType?: string;
   brokerServer?: string;
   isBreakEvenLocked?: boolean;
+  isAutoSignal?: boolean;
+  strategy?: string;
+  timeframe?: string;
+  signalId?: string;
+  confidenceScore?: number;
+  mindset?: 'DISCIPLINED' | 'FOMO' | 'REVENGE' | 'TIRED';
+  setupGrade?: 'A+' | 'B' | 'C';
 }
 
 export interface ManagedClosedTrade {
@@ -41,16 +53,45 @@ export interface ManagedClosedTrade {
   pnlPercent: number;
   timestamp: string;
   outcome: 'WIN' | 'LOSS';
+  isAutoSignal?: boolean;
+  strategy?: string;
+  timeframe?: string;
+  signalId?: string;
+  confidenceScore?: number;
+  closeReason?: CloseReason;
+  mindset?: 'DISCIPLINED' | 'FOMO' | 'REVENGE' | 'TIRED';
+  setupGrade?: 'A+' | 'B' | 'C';
 }
 
 export interface PaperTradeAlertDetail {
   id: string;
   ticker: string;
-  eventType: 'TP1_BREAKEVEN' | 'TP_HIT' | 'SL_HIT' | 'MANUAL_CLOSE';
+  eventType: 'AUTO_OPENED' | 'TP1_BREAKEVEN' | 'TP_HIT' | 'SL_HIT' | 'MANUAL_CLOSE';
   direction: 'LONG' | 'SHORT';
   exitPrice: number;
   realizedPnl: number;
   timestamp: string;
+  strategy?: string;
+  timeframe?: string;
+}
+
+export function isAutoOpenOnSignalEnabled(): boolean {
+  if (typeof window === 'undefined') return true;
+  try {
+    return localStorage.getItem(AUTO_SIGNAL_PAPER_KEY) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+export function setAutoOpenOnSignalEnabled(enabled: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(AUTO_SIGNAL_PAPER_KEY, enabled ? 'true' : 'false');
+    window.dispatchEvent(new CustomEvent(AUTO_SIGNAL_PAPER_TOGGLE_EVENT, { detail: { enabled } }));
+  } catch {
+    // ignore storage errors
+  }
 }
 
 export function emitMullahProactiveSpeech(text: string): void {
@@ -58,18 +99,85 @@ export function emitMullahProactiveSpeech(text: string): void {
   window.dispatchEvent(new CustomEvent(MULLAH_PROACTIVE_ALERT_EVENT, { detail: { text } }));
 }
 
-function getContractMultiplier(ticker: string, market: string, lots: number): number {
-  const upper = ticker.toUpperCase();
-  if (upper.includes('XAU')) return 100 * lots;
-  if (upper.includes('XAG')) return 5000 * lots;
-  if (market === 'FOREX' || market === 'METALS') return 100000 * lots;
-  return lots;
+export function inferAssetMarket(
+  ticker: string,
+  explicitMarket?: 'NSE' | 'US' | 'FOREX' | 'METALS' | 'INDICES'
+): 'NSE' | 'US' | 'FOREX' | 'METALS' | 'INDICES' {
+  if (explicitMarket) return explicitMarket;
+  const clean = ticker.toUpperCase().replace(/[/_\s-]/g, '');
+  if (clean.includes('XAU') || clean.includes('XAG') || clean.includes('XPT') || clean.includes('XPD') || clean.includes('COPPER')) {
+    return 'METALS';
+  }
+  if (clean.includes('NAS') || clean.includes('US500') || clean.includes('US30') || clean.includes('SPX') || clean === 'DXY') {
+    return 'INDICES';
+  }
+  if (['SCOM', 'EQTY', 'KCB', 'EABL', 'COOP', 'ABSA', 'NCBA', 'BATK', 'BAMB', 'KNRE'].includes(clean)) {
+    return 'NSE';
+  }
+  if (clean.length === 6 || ticker.includes('/')) {
+    return 'FOREX';
+  }
+  return 'US';
 }
 
-function getSpreadForSymbol(ticker: string, market: string, price: number): number {
-  if (ticker.toUpperCase().includes('XAU')) return 0.35;
+export function getAssetPriceDigits(ticker: string, market: string, price: number): number {
+  const upper = ticker.toUpperCase();
+  if (upper.includes('XAU')) return 2;
+  if (upper.includes('JPY')) return 3;
+  if (upper.includes('KES') || upper.includes('UGX') || upper.includes('TZS')) {
+    return price >= 100 ? 2 : 3;
+  }
+  if ((market === 'FOREX' || market === 'METALS') && price > 0 && price < 10) return 5;
+  return 2;
+}
+
+export function getAssetSpread(ticker: string, market: string, price: number): number {
+  const upper = ticker.toUpperCase();
+  if (upper.includes('XAU')) return 0.35;
+  if (upper.includes('JPY')) return 0.018;
+  if (upper.includes('KES') || upper.includes('UGX') || upper.includes('TZS')) return 0.15;
   if ((market === 'FOREX' || market === 'METALS') && price < 10) return 0.00018;
+  if (market === 'INDICES') return 1.5;
   return 0.05;
+}
+
+export function getUsdContractMultiplier(ticker: string, market: string, price: number): number {
+  const upper = ticker.toUpperCase();
+  const clean = upper.replace(/[/_\s-]/g, '');
+
+  if (clean.includes('XAU')) return 100;
+  if (clean.includes('XAG')) return 5000;
+  if (clean.includes('BTC') || clean.includes('ETH') || clean.includes('SOL')) return 1;
+  if (market === 'INDICES' || clean.includes('NAS') || clean.includes('US30') || clean.includes('US500') || clean.includes('SPX')) {
+    return 1;
+  }
+  if (market === 'FOREX' || market === 'METALS') {
+    if (clean.includes('JPY')) return 100000 / Math.max(price || 150, 80);
+    if (clean.includes('KES') || clean.includes('UGX') || clean.includes('TZS') || clean.includes('ZAR') || clean.includes('TRY') || clean.includes('MXN')) {
+      return 100000 / Math.max(price || 129, 10);
+    }
+    if (clean.startsWith('USD') && !clean.endsWith('USD') && price > 0) {
+      return 100000 / Math.max(price, 0.5);
+    }
+    return 100000;
+  }
+  return 1;
+}
+
+export function calculatePositionPnL(
+  ticker: string,
+  market: string,
+  direction: 'LONG' | 'SHORT',
+  lots: number,
+  entryPrice: number,
+  exitPrice: number
+): { pnl: number; pnlPercent: number } {
+  const safeEntry = entryPrice > 0 ? entryPrice : 1;
+  const mult = getUsdContractMultiplier(ticker, market, exitPrice || safeEntry) * lots;
+  const diff = direction === 'LONG' ? exitPrice - safeEntry : safeEntry - exitPrice;
+  const pnl = Math.round(diff * mult * 100) / 100;
+  const pnlPercent = Math.round((diff / safeEntry) * 10000) / 100;
+  return { pnl, pnlPercent };
 }
 
 export function loadManagedPaperPositions(): ManagedPaperPosition[] {
@@ -106,22 +214,22 @@ export function executePaperMarketOrder(params: {
   tp1?: number;
   takeProfit?: number;
   source?: string;
+  isAutoSignal?: boolean;
+  strategy?: string;
+  timeframe?: string;
+  signalId?: string;
+  confidenceScore?: number;
+  mindset?: 'DISCIPLINED' | 'FOMO' | 'REVENGE' | 'TIRED';
+  setupGrade?: 'A+' | 'B' | 'C';
 }): { ok: boolean; error?: string; position?: ManagedPaperPosition } {
   const ticker = params.ticker.toUpperCase();
-  const clean = ticker.replace(/[/_\s-]/g, '');
-  const market: ManagedPaperPosition['market'] =
-    params.market ||
-    (clean.includes('XAU') || clean.includes('XAG')
-      ? 'METALS'
-      : clean.includes('NAS') || clean.includes('US500') || clean.includes('WALL')
-      ? 'INDICES'
-      : 'FOREX');
+  const market = inferAssetMarket(ticker, params.market);
 
   const session = getAssetMarketSession(ticker, market);
   if (!session.isOpen) {
     return {
       ok: false,
-      error: `${ticker} market is currently closed for the weekend. No fills allowed until Sunday 22:00 UTC.`,
+      error: `${ticker} market is currently closed. No fills allowed until session reopens (${session.nextSessionText}).`,
     };
   }
 
@@ -133,19 +241,27 @@ export function executePaperMarketOrder(params: {
     };
   }
 
-  const isGold = clean.includes('XAU');
-  const digits = isGold ? 2 : (market === 'FOREX' || market === 'METALS') && params.spotPrice < 10 ? 5 : 2;
-  const spread = getSpreadForSymbol(ticker, market, params.spotPrice);
+  const digits = getAssetPriceDigits(ticker, market, params.spotPrice);
+  const spread = getAssetSpread(ticker, market, params.spotPrice);
   const fillPrice = Number(
     (params.direction === 'LONG' ? params.spotPrice + spread / 2 : params.spotPrice - spread / 2).toFixed(digits)
   );
   const lots = Math.max(0.01, Number(params.lots) || 0.1);
-  const mult = getContractMultiplier(ticker, market, lots);
-  const initialSpreadPnl = -Math.round(spread * mult * 100) / 100;
-  const ticket = 98000000 + (Date.now() % 900000);
+  const marketMark = Number(
+    (params.direction === 'LONG' ? params.spotPrice - spread / 2 : params.spotPrice + spread / 2).toFixed(digits)
+  );
+  const { pnl: initialSpreadPnl, pnlPercent } = calculatePositionPnL(
+    ticker,
+    market,
+    params.direction,
+    lots,
+    fillPrice,
+    marketMark
+  );
+  const ticket = 98000000 + Math.floor((Date.now() + Math.random() * 1000) % 900000);
 
   const newPos: ManagedPaperPosition = {
-    id: `pos-${ticket}`,
+    id: `pos-${ticket}-${Math.floor(Math.random() * 900 + 100)}`,
     ticket,
     ticker,
     name: params.name || ticker,
@@ -154,27 +270,225 @@ export function executePaperMarketOrder(params: {
     direction: params.direction,
     lots,
     entryPrice: fillPrice,
-    currentPrice: params.spotPrice,
-    stopLoss: params.stopLoss,
-    tp1: params.tp1,
-    takeProfit: params.takeProfit,
+    currentPrice: marketMark,
+    stopLoss: params.stopLoss ? Number(params.stopLoss.toFixed(digits)) : undefined,
+    tp1: params.tp1 ? Number(params.tp1.toFixed(digits)) : undefined,
+    takeProfit: params.takeProfit ? Number(params.takeProfit.toFixed(digits)) : undefined,
     pnl: initialSpreadPnl,
-    pnlPercent: Math.round((-spread / fillPrice) * 10000) / 100,
+    pnlPercent,
     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-    executionType: params.source || 'Market Execution',
+    executionType: params.source || (params.isAutoSignal ? 'Auto Signal Execution' : 'Market Execution'),
     brokerServer: 'JustMarkets (Raw Spread / Pro)',
+    isAutoSignal: Boolean(params.isAutoSignal),
+    strategy: params.strategy,
+    timeframe: params.timeframe,
+    signalId: params.signalId,
+    confidenceScore: params.confidenceScore,
+    mindset: params.mindset || 'DISCIPLINED',
+    setupGrade: params.setupGrade || 'A+',
   };
 
   try {
     const existing = loadManagedPaperPositions();
-    localStorage.setItem('njia_paper_positions', JSON.stringify([newPos, ...existing]));
+    localStorage.setItem('njia_paper_positions', JSON.stringify([newPos, ...existing].slice(0, 100)));
     emitPaperPositionsUpdated();
     scheduleTradingCloudPush();
   } catch {
     return { ok: false, error: 'Failed to persist paper position locally.' };
   }
 
+  fetch('/api/ea/open-trade', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      symbol: ticker.replace('/', ''),
+      type: params.direction === 'LONG' ? 'BUY' : 'SELL',
+      lots,
+      price: fillPrice,
+      sl: newPos.stopLoss,
+      tp: newPos.takeProfit,
+    }),
+  }).catch(() => {});
+
   return { ok: true, position: newPos };
+}
+
+function readAutoSignalCooldowns(): Record<string, number> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(AUTO_SIGNAL_COOLDOWN_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAutoSignalCooldown(key: string, ts: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const map = readAutoSignalCooldowns();
+    const cutoff = ts - 6 * 60 * 60 * 1000;
+    const pruned: Record<string, number> = {};
+    for (const [k, v] of Object.entries(map)) {
+      if (typeof v === 'number' && v >= cutoff) pruned[k] = v;
+    }
+    pruned[key] = ts;
+    localStorage.setItem(AUTO_SIGNAL_COOLDOWN_KEY, JSON.stringify(pruned));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function parseNumericLevel(val: string | number | undefined, fallback = 0): number {
+  if (typeof val === 'number') return Number.isFinite(val) && val > 0 ? val : fallback;
+  if (typeof val !== 'string') return fallback;
+  const match = val.replace(/,/g, '').match(/-?\d+(\.\d+)?/);
+  const num = match ? parseFloat(match[0]) : NaN;
+  return Number.isFinite(num) && num > 0 ? num : fallback;
+}
+
+/**
+ * Automatically opens a Paper Trade whenever an actionable BUY/SELL signal is indicated,
+ * strictly deduplicated per (symbol, direction) & 15-minute cooldown so ticks never create duplicates.
+ */
+export function openPaperTradeFromSignal(input: {
+  symbol: string;
+  name?: string;
+  market?: 'NSE' | 'US' | 'FOREX' | 'METALS' | 'INDICES';
+  currency?: string;
+  action: string;
+  timeframe: string;
+  spotPrice: number;
+  sl: number;
+  tp1: number;
+  tp2?: number;
+  strategy?: string;
+  signalId?: string;
+  confidenceScore?: number;
+  explicitLots?: number;
+  forceManual?: boolean;
+}): { opened: boolean; reason?: string; position?: ManagedPaperPosition } {
+  if (typeof window === 'undefined') return { opened: false, reason: 'No browser context' };
+  if (!input.forceManual && !isAutoOpenOnSignalEnabled()) {
+    return { opened: false, reason: 'Auto-signal paper trading paused' };
+  }
+
+  const actionUpper = String(input.action || '').toUpperCase().trim();
+  const isBuy = actionUpper.includes('BUY');
+  const isSell = actionUpper.includes('SELL');
+  if (!isBuy && !isSell) {
+    return { opened: false, reason: 'Neutral/hold signal' };
+  }
+  const direction: 'LONG' | 'SHORT' = isBuy ? 'LONG' : 'SHORT';
+
+  if (!(input.spotPrice > 0) || !(input.sl > 0) || !(input.tp1 > 0)) {
+    return { opened: false, reason: 'Incomplete price/SL/TP levels' };
+  }
+
+  const ticker = input.symbol.trim().toUpperCase();
+  const cleanSym = ticker.replace(/[/_\s-]/g, '');
+  const market = inferAssetMarket(ticker, input.market);
+  const tf = (input.timeframe || '15m').toUpperCase();
+
+  // Validate SL/TP orientation relative to spotPrice
+  const slValid = direction === 'LONG' ? input.sl < input.spotPrice : input.sl > input.spotPrice;
+  const tpValid = direction === 'LONG' ? input.tp1 > input.spotPrice : input.tp1 < input.spotPrice;
+  if (!slValid || !tpValid) {
+    return { opened: false, reason: 'Signal SL/TP levels invalid for entry price' };
+  }
+
+  const existingPositions = loadManagedPaperPositions();
+
+  if (!input.forceManual) {
+    // 1. Prevent duplicate open trade in the same direction for the same symbol
+    const alreadyOpen = existingPositions.find(
+      (p) => p.ticker.toUpperCase().replace(/[/_\s-]/g, '') === cleanSym && p.direction === direction
+    );
+    if (alreadyOpen) {
+      return { opened: false, reason: `Position already open (${ticker} ${direction})` };
+    }
+
+    // 2. Cap concurrent auto-opened positions to protect demo margin
+    const autoOpenCount = existingPositions.filter((p) => p.isAutoSignal).length;
+    if (autoOpenCount >= 12) {
+      return { opened: false, reason: 'Max 12 concurrent auto-signal positions reached' };
+    }
+
+    // 3. Enforce 15-minute cooldown per symbol + timeframe + direction
+    const cooldownKey = `${cleanSym}_${tf}_${direction}`;
+    const cooldowns = readAutoSignalCooldowns();
+    const lastTs = cooldowns[cooldownKey] || 0;
+    if (Date.now() - lastTs < 15 * 60 * 1000) {
+      return { opened: false, reason: `Cooldown active for ${ticker} ${tf} ${direction}` };
+    }
+  }
+
+  const balance = parseFloat(localStorage.getItem('njia_paper_balance') || '10000') || 10000;
+  const riskCash = Math.max(10, balance * 0.01); // 1% risk per signal trade
+  const slDist = Math.abs(input.spotPrice - input.sl);
+  const mult = getUsdContractMultiplier(ticker, market, input.spotPrice);
+
+  let computedLots = input.explicitLots && input.explicitLots > 0 ? input.explicitLots : 0.1;
+  if (!input.explicitLots) {
+    const rawQty = slDist > 0 && mult > 0 ? riskCash / (slDist * mult) : 0.1;
+    if (market === 'NSE' || market === 'US') {
+      computedLots = Math.max(1, Math.min(200, Math.round(rawQty)));
+    } else {
+      computedLots = Math.max(0.01, Math.min(2.0, Math.round(rawQty * 100) / 100));
+    }
+  }
+
+  const finalTp = input.tp2 && (direction === 'LONG' ? input.tp2 > input.tp1 : input.tp2 < input.tp1)
+    ? input.tp2
+    : input.tp1;
+  const conf = input.confidenceScore ?? 85;
+  const strategyLabel = input.strategy || `Radar ${actionUpper} (${tf})`;
+
+  const res = executePaperMarketOrder({
+    ticker,
+    name: input.name || ticker,
+    direction,
+    lots: computedLots,
+    spotPrice: input.spotPrice,
+    market,
+    currency: input.currency || (market === 'NSE' ? 'KES' : 'USD'),
+    stopLoss: input.sl,
+    tp1: input.tp1,
+    takeProfit: finalTp,
+    source: input.forceManual ? '1-Click Signal Execution' : 'Auto Signal Engine',
+    isAutoSignal: true,
+    strategy: strategyLabel,
+    timeframe: tf,
+    signalId: input.signalId,
+    confidenceScore: conf,
+    mindset: 'DISCIPLINED',
+    setupGrade: conf >= 82 ? 'A+' : 'B',
+  });
+
+  if (!res.ok || !res.position) {
+    return { opened: false, reason: res.error };
+  }
+
+  if (!input.forceManual) {
+    writeAutoSignalCooldown(`${cleanSym}_${tf}_${direction}`, Date.now());
+  }
+
+  const detail: PaperTradeAlertDetail = {
+    id: res.position.id,
+    ticker: res.position.ticker,
+    eventType: 'AUTO_OPENED',
+    direction: res.position.direction,
+    exitPrice: res.position.entryPrice,
+    realizedPnl: 0,
+    timestamp: new Date().toISOString(),
+    strategy: strategyLabel,
+    timeframe: tf,
+  };
+  window.dispatchEvent(new CustomEvent<PaperTradeAlertDetail>(PAPER_TRADE_ALERT_EVENT, { detail }));
+
+  return { opened: true, position: res.position };
 }
 
 export function closePaperPositionsByQuery(
@@ -205,12 +519,17 @@ export function closePaperPositionsByQuery(
 
     const q = lookupTradingViewQuote(liveQuotes, pos.ticker);
     const liveSpot = q && q.price > 0 ? q.price : pos.currentPrice || pos.entryPrice;
-    const spread = getSpreadForSymbol(pos.ticker, pos.market, liveSpot);
+    const digits = getAssetPriceDigits(pos.ticker, pos.market, pos.entryPrice);
+    const spread = getAssetSpread(pos.ticker, pos.market, liveSpot);
     const exitPrice = pos.direction === 'LONG' ? liveSpot - spread / 2 : liveSpot + spread / 2;
-    const mult = getContractMultiplier(pos.ticker, pos.market, pos.lots);
-    const diff = pos.direction === 'LONG' ? exitPrice - pos.entryPrice : pos.entryPrice - exitPrice;
-    const pnl = Math.round(diff * mult * 100) / 100;
-    const pnlPercent = Math.round((diff / pos.entryPrice) * 10000) / 100;
+    const { pnl, pnlPercent } = calculatePositionPnL(
+      pos.ticker,
+      pos.market,
+      pos.direction,
+      pos.lots,
+      pos.entryPrice,
+      exitPrice
+    );
 
     balance = Math.round((balance + pnl) * 100) / 100;
     totalRealized = Math.round((totalRealized + pnl) * 100) / 100;
@@ -222,12 +541,20 @@ export function closePaperPositionsByQuery(
       direction: pos.direction,
       lots: pos.lots,
       entryPrice: pos.entryPrice,
-      exitPrice: Number(exitPrice.toFixed(pos.entryPrice < 10 ? 5 : 2)),
+      exitPrice: Number(exitPrice.toFixed(digits)),
       currency: pos.currency,
       pnl,
       pnlPercent,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       outcome: pnl >= 0 ? 'WIN' : 'LOSS',
+      isAutoSignal: pos.isAutoSignal,
+      strategy: pos.strategy,
+      timeframe: pos.timeframe,
+      signalId: pos.signalId,
+      confidenceScore: pos.confidenceScore,
+      closeReason: 'MANUAL',
+      mindset: pos.mindset || 'DISCIPLINED',
+      setupGrade: pos.setupGrade || 'A+',
     });
 
     syncRealizedTradePnlToProp(pnl);
@@ -250,7 +577,8 @@ export function closePaperPositionsByQuery(
 
 /**
  * Global background watchdog: updates live PnL across all open paper positions,
- * automatically secures 50% + moves SL to Breakeven at TP1, and executes SL/TP fills.
+ * automatically secures 50% + moves SL to Breakeven at TP1, and executes SL/TP fills
+ * directly into the Forex Journal (`njia_paper_trades`).
  */
 export function evaluateOpenPaperPositionsAgainstQuotes(quotes: Record<string, LiveTvQuote>): boolean {
   if (typeof window === 'undefined' || !quotes || Object.keys(quotes).length === 0) return false;
@@ -276,15 +604,19 @@ export function evaluateOpenPaperPositionsAgainstQuotes(quotes: Record<string, L
       continue;
     }
 
-    const digits = pos.ticker.toUpperCase().includes('XAU') ? 2 : pos.entryPrice < 10 ? 5 : 2;
-    const spread = getSpreadForSymbol(pos.ticker, pos.market, q.price);
+    const digits = getAssetPriceDigits(pos.ticker, pos.market, pos.entryPrice);
+    const spread = getAssetSpread(pos.ticker, pos.market, q.price);
     const marketExit = Number(
       (pos.direction === 'LONG' ? q.price - spread / 2 : q.price + spread / 2).toFixed(digits)
     );
-    const mult = getContractMultiplier(pos.ticker, pos.market, pos.lots);
-    const diff = pos.direction === 'LONG' ? marketExit - pos.entryPrice : pos.entryPrice - marketExit;
-    const livePnl = Math.round(diff * mult * 100) / 100;
-    const livePnlPct = Math.round((diff / pos.entryPrice) * 10000) / 100;
+    const { pnl: livePnl, pnlPercent: livePnlPct } = calculatePositionPnL(
+      pos.ticker,
+      pos.market,
+      pos.direction,
+      pos.lots,
+      pos.entryPrice,
+      marketExit
+    );
 
     // 1. Check Full SL / Full TP Hit first
     const slHit =
@@ -300,9 +632,14 @@ export function evaluateOpenPaperPositionsAgainstQuotes(quotes: Record<string, L
     if (slHit || tpHit) {
       changed = true;
       const fillPrice = tpHit ? pos.takeProfit! : pos.stopLoss!;
-      const closeDiff = pos.direction === 'LONG' ? fillPrice - pos.entryPrice : pos.entryPrice - fillPrice;
-      const realizedPnl = Math.round(closeDiff * mult * 100) / 100;
-      const realizedPct = Math.round((closeDiff / pos.entryPrice) * 10000) / 100;
+      const { pnl: realizedPnl, pnlPercent: realizedPct } = calculatePositionPnL(
+        pos.ticker,
+        pos.market,
+        pos.direction,
+        pos.lots,
+        pos.entryPrice,
+        fillPrice
+      );
 
       balance = Math.round((balance + realizedPnl) * 100) / 100;
       closedList.unshift({
@@ -317,6 +654,14 @@ export function evaluateOpenPaperPositionsAgainstQuotes(quotes: Record<string, L
         pnlPercent: realizedPct,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         outcome: realizedPnl >= 0 ? 'WIN' : 'LOSS',
+        isAutoSignal: pos.isAutoSignal,
+        strategy: pos.strategy,
+        timeframe: pos.timeframe,
+        signalId: pos.signalId,
+        confidenceScore: pos.confidenceScore,
+        closeReason: tpHit ? 'TP_HIT' : 'SL_HIT',
+        mindset: pos.mindset || 'DISCIPLINED',
+        setupGrade: pos.setupGrade || 'A+',
       });
 
       syncRealizedTradePnlToProp(realizedPnl);
@@ -329,6 +674,8 @@ export function evaluateOpenPaperPositionsAgainstQuotes(quotes: Record<string, L
         exitPrice: fillPrice,
         realizedPnl,
         timestamp: new Date().toISOString(),
+        strategy: pos.strategy,
+        timeframe: pos.timeframe,
       };
       alerts.push(alertDetail);
       emitMullahProactiveSpeech(
@@ -372,6 +719,14 @@ export function evaluateOpenPaperPositionsAgainstQuotes(quotes: Record<string, L
         pnlPercent: livePnlPct,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         outcome: partialPnl >= 0 ? 'WIN' : 'LOSS',
+        isAutoSignal: pos.isAutoSignal,
+        strategy: pos.strategy,
+        timeframe: pos.timeframe,
+        signalId: pos.signalId,
+        confidenceScore: pos.confidenceScore,
+        closeReason: 'TP1_PARTIAL',
+        mindset: pos.mindset || 'DISCIPLINED',
+        setupGrade: pos.setupGrade || 'A+',
       });
 
       syncRealizedTradePnlToProp(partialPnl);
@@ -397,6 +752,8 @@ export function evaluateOpenPaperPositionsAgainstQuotes(quotes: Record<string, L
         exitPrice: marketExit,
         realizedPnl: partialPnl,
         timestamp: new Date().toISOString(),
+        strategy: pos.strategy,
+        timeframe: pos.timeframe,
       };
       alerts.push(alertDetail);
       emitMullahProactiveSpeech(

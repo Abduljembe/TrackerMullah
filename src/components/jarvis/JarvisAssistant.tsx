@@ -1838,10 +1838,10 @@ export const JarvisAssistant: React.FC = () => {
         const closed = JSON.parse(closedRaw);
         if (Array.isArray(closed)) {
           closedTradesCount = closed.length;
-          const wins = closed.filter((t) => Number(t.realizedPnl) > 0).length;
+          const wins = closed.filter((t) => Number(t.pnl ?? t.realizedPnl) > 0).length;
           closedWinRatePct = closed.length > 0 ? Math.round((wins / closed.length) * 100) : 0;
           closedNetPnl = Number(
-            closed.reduce((sum, t) => sum + (Number(t.realizedPnl) || 0), 0).toFixed(2)
+            closed.reduce((sum, t) => sum + (Number(t.pnl ?? t.realizedPnl) || 0), 0).toFixed(2)
           );
         }
       }

@@ -30,6 +30,15 @@ import { getAssetMarketSession } from '../../utils/marketHours.ts';
 import { evaluatePortfolioExposure, emitPaperPositionsUpdated, PAPER_POSITIONS_EVENT } from '../../utils/portfolioGuard.ts';
 import { scheduleTradingCloudPush, CLOUD_TRADING_HYDRATED_EVENT } from '../../utils/tradingCloudSync.ts';
 import { evaluatePropTradeBlock, syncRealizedTradePnlToProp, PROP_GUARD_EVENT, PropBlockStatus } from '../../utils/propGuardian.ts';
+import {
+  calculatePositionPnL,
+  getAssetPriceDigits,
+  getAssetSpread,
+  isAutoOpenOnSignalEnabled,
+  setAutoOpenOnSignalEnabled,
+  AUTO_SIGNAL_PAPER_TOGGLE_EVENT,
+  CloseReason,
+} from '../../utils/paperTradeManager.ts';
 
 export type TradeMindset = 'DISCIPLINED' | 'FOMO' | 'REVENGE' | 'TIRED';
 export type SetupGrade = 'A+' | 'B' | 'C';
@@ -46,6 +55,7 @@ export interface Position {
   entryPrice: number;
   currentPrice: number;
   stopLoss?: number;
+  tp1?: number;
   takeProfit?: number;
   pnl: number;
   pnlPercent: number;
@@ -53,6 +63,11 @@ export interface Position {
   executionType?: string;
   brokerServer?: string;
   isBreakEvenLocked?: boolean;
+  isAutoSignal?: boolean;
+  strategy?: string;
+  timeframe?: string;
+  signalId?: string;
+  confidenceScore?: number;
   mindset?: TradeMindset;
   setupGrade?: SetupGrade;
 }
@@ -69,6 +84,12 @@ export interface ClosedTrade {
   pnlPercent: number;
   timestamp: string;
   outcome: 'WIN' | 'LOSS';
+  isAutoSignal?: boolean;
+  strategy?: string;
+  timeframe?: string;
+  signalId?: string;
+  confidenceScore?: number;
+  closeReason?: CloseReason;
   mindset?: TradeMindset;
   setupGrade?: SetupGrade;
 }
@@ -79,6 +100,7 @@ export interface PrefillOrderData {
   sl: string;
   tp: string;
   timestamp: number;
+  autoExecuted?: boolean;
 }
 
 interface PaperTradingDeskProps {
@@ -201,11 +223,12 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
       if (prefillOrder.lots > 0) setOrderLots(prefillOrder.lots);
       if (prefillOrder.sl) setCustomSl(prefillOrder.sl);
       if (prefillOrder.tp) setCustomTp(prefillOrder.tp);
-      setActiveTab('order');
+      setActiveTab(prefillOrder.autoExecuted ? 'positions' : 'order');
     }
   }, [prefillOrder]);
 
   const [propBlock, setPropBlock] = useState<PropBlockStatus>(() => evaluatePropTradeBlock());
+  const [autoSignalEnabled, setAutoSignalEnabled] = useState<boolean>(() => isAutoOpenOnSignalEnabled());
 
   // Reload from localStorage whenever cloud state hydrates or external watchdog updates positions
   useEffect(() => {
@@ -234,13 +257,16 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
       }
     };
     const syncProp = () => setPropBlock(evaluatePropTradeBlock());
+    const syncAutoToggle = () => setAutoSignalEnabled(isAutoOpenOnSignalEnabled());
     window.addEventListener(CLOUD_TRADING_HYDRATED_EVENT, syncStorage);
     window.addEventListener(PAPER_POSITIONS_EVENT, syncStorage);
     window.addEventListener(PROP_GUARD_EVENT, syncProp);
+    window.addEventListener(AUTO_SIGNAL_PAPER_TOGGLE_EVENT, syncAutoToggle);
     return () => {
       window.removeEventListener(CLOUD_TRADING_HYDRATED_EVENT, syncStorage);
       window.removeEventListener(PAPER_POSITIONS_EVENT, syncStorage);
       window.removeEventListener(PROP_GUARD_EVENT, syncProp);
+      window.removeEventListener(AUTO_SIGNAL_PAPER_TOGGLE_EVENT, syncAutoToggle);
     };
   }, []);
 
@@ -278,9 +304,8 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
 
   // Calculate live Ask and Bid with authentic broker spreads
   const isGold = ticker.includes('XAU');
-  const isForex = market === 'FOREX' || market === 'METALS';
-  const digits = isGold ? 2 : (isForex && currentPrice < 10 ? 4 : 2);
-  const spread = isGold ? 0.35 : (isForex && currentPrice < 10 ? 0.00018 : 0.05);
+  const digits = getAssetPriceDigits(ticker, market, currentPrice);
+  const spread = getAssetSpread(ticker, market, currentPrice);
   const liveAsk = Number((currentPrice + spread / 2).toFixed(digits));
   const liveBid = Number((currentPrice - spread / 2).toFixed(digits));
 
@@ -293,15 +318,16 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
       if (prevPositions.length === 0) return prevPositions;
       let didChange = false;
       const next = prevPositions.map((pos) => {
-        if (pos.ticker !== ticker) return pos;
-        const isPosGold = pos.ticker.includes('XAU');
-        const isPosForex = pos.market === 'FOREX' || pos.market === 'METALS';
-        // Standard gold contract: 100 troy oz per lot; standard forex: 100,000 units
-        const mult = isPosGold ? 100 * pos.lots : (isPosForex ? 100000 * pos.lots : pos.lots);
+        if (pos.ticker.toUpperCase().replace(/[/_\s-]/g, '') !== ticker.toUpperCase().replace(/[/_\s-]/g, '')) return pos;
         const marketExitPrice = pos.direction === 'LONG' ? liveBid : liveAsk;
-        const diff = pos.direction === 'LONG' ? marketExitPrice - pos.entryPrice : pos.entryPrice - marketExitPrice;
-        const pnl = Math.round(diff * mult * 100) / 100;
-        const pnlPercent = Math.round((diff / pos.entryPrice) * 100 * 100) / 100;
+        const { pnl, pnlPercent } = calculatePositionPnL(
+          pos.ticker,
+          pos.market,
+          pos.direction,
+          pos.lots,
+          pos.entryPrice,
+          marketExitPrice
+        );
 
         if (pos.currentPrice === marketExitPrice && pos.pnl === pnl && pos.pnlPercent === pnlPercent) {
           return pos;
@@ -330,9 +356,16 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
     const tp = parseFloat(customTp) || (defaultTp ? parseFloat(defaultTp.replace(/[^0-9.]/g, '')) : undefined);
 
     const fillPrice = dir === 'LONG' ? liveAsk : liveBid;
+    const marketMark = dir === 'LONG' ? liveBid : liveAsk;
     const ticket = 98000000 + (Date.now() % 900000);
-    const mult = isGold ? 100 * orderLots : (isForex ? 100000 * orderLots : orderLots);
-    const initialSpreadPnl = -Math.round(spread * mult * 100) / 100;
+    const { pnl: initialSpreadPnl, pnlPercent } = calculatePositionPnL(
+      ticker,
+      market,
+      dir,
+      orderLots,
+      fillPrice,
+      marketMark
+    );
 
     const newPos: Position = {
       id: `pos-${ticket}`,
@@ -344,14 +377,16 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
       direction: dir,
       lots: orderLots,
       entryPrice: fillPrice,
-      currentPrice: dir === 'LONG' ? liveBid : liveAsk,
+      currentPrice: marketMark,
       stopLoss: sl,
       takeProfit: tp,
       pnl: initialSpreadPnl,
-      pnlPercent: Math.round((-spread / fillPrice) * 10000) / 100,
+      pnlPercent,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       executionType: 'Market Execution',
       brokerServer: activeBroker,
+      isAutoSignal: false,
+      strategy: 'Manual Terminal Order',
       mindset: tradeMindset,
       setupGrade,
     };
@@ -394,14 +429,13 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
     setPositions((prev) =>
       prev.map((pos) => {
         if (pos.id !== id) return pos;
-        const isPosGold = pos.ticker.includes('XAU');
-        const isPosFx = pos.market === 'FOREX' || pos.market === 'METALS';
-        const offset = isPosGold ? 0.35 : (isPosFx && pos.entryPrice < 10 ? 0.0002 : 0.05);
-        const newSl = pos.direction === 'LONG' ? pos.entryPrice + offset : pos.entryPrice - offset;
+        const rowDigits = getAssetPriceDigits(pos.ticker, pos.market, pos.entryPrice);
+        const rowSpread = getAssetSpread(pos.ticker, pos.market, pos.entryPrice);
+        const newSl = pos.direction === 'LONG' ? pos.entryPrice + rowSpread : pos.entryPrice - rowSpread;
         playTradeSound('open');
         return {
           ...pos,
-          stopLoss: Number(newSl.toFixed(digits)),
+          stopLoss: Number(newSl.toFixed(rowDigits)),
           isBreakEvenLocked: true,
         };
       })
@@ -434,6 +468,12 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
       pnlPercent: pos.pnlPercent,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       outcome: realizedPortionPnl >= 0 ? 'WIN' : 'LOSS',
+      isAutoSignal: pos.isAutoSignal,
+      strategy: pos.strategy,
+      timeframe: pos.timeframe,
+      signalId: pos.signalId,
+      confidenceScore: pos.confidenceScore,
+      closeReason: 'TP1_PARTIAL',
       mindset: pos.mindset || 'DISCIPLINED',
       setupGrade: pos.setupGrade || 'A+',
     };
@@ -480,6 +520,12 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
       pnlPercent: pos.pnlPercent,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       outcome: isWin ? 'WIN' : 'LOSS',
+      isAutoSignal: pos.isAutoSignal,
+      strategy: pos.strategy,
+      timeframe: pos.timeframe,
+      signalId: pos.signalId,
+      confidenceScore: pos.confidenceScore,
+      closeReason: 'MANUAL',
       mindset: pos.mindset || 'DISCIPLINED',
       setupGrade: pos.setupGrade || 'A+',
     };
@@ -560,8 +606,26 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
           </div>
         </div>
 
-        {/* Virtual Account Balance Pill */}
-        <div className="flex items-center gap-3">
+        {/* Auto-Signal Toggle + Virtual Account Balance */}
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !autoSignalEnabled;
+              setAutoOpenOnSignalEnabled(next);
+              setAutoSignalEnabled(next);
+            }}
+            title="Automatically open a Paper Trade whenever a BUY/SELL signal is indicated and log outcomes to Forex Journal"
+            className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-mono font-bold transition-colors cursor-pointer flex items-center gap-1.5 ${
+              autoSignalEnabled
+                ? 'bg-[#0df2c9]/15 text-[#0df2c9] border-[#0df2c9]/40'
+                : 'bg-[#121c2e] text-slate-400 border-[#223454] hover:text-white'
+            }`}
+          >
+            <Zap className="w-3 h-3" />
+            <span>Auto-Open Signals: {autoSignalEnabled ? 'ON' : 'OFF'}</span>
+          </button>
+
           <div className="text-right">
             <span className="text-[10px] text-slate-500 uppercase block font-mono">Demo MT5 Equity</span>
             <div className="flex items-baseline gap-1.5">
@@ -948,15 +1012,21 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
                 <tbody className="divide-y divide-[#141f33] font-mono">
                   {positions.map((pos) => {
                     const isProfit = pos.pnl >= 0;
+                    const rowDigits = getAssetPriceDigits(pos.ticker, pos.market, pos.entryPrice);
                     return (
                       <tr key={pos.id} className="hover:bg-[#080d18]/50">
                         <td className="py-2.5">
-                          <div className="font-bold text-white flex items-center gap-1.5">
+                          <div className="font-bold text-white flex items-center gap-1.5 flex-wrap">
                             <span>{pos.ticker}</span>
                             <span className="text-[10px] text-teal-400 font-mono">#{pos.ticket}</span>
+                            {pos.isAutoSignal && (
+                              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#0df2c9]/15 text-[#0df2c9] border border-[#0df2c9]/30">
+                                AUTO {pos.timeframe || ''}
+                              </span>
+                            )}
                           </div>
-                          <span className="text-[9px] text-slate-500 block truncate max-w-[120px]">
-                            {pos.brokerServer?.split(' ')[0] || 'MT5-Live'} • {pos.timestamp}
+                          <span className="text-[9px] text-slate-500 block truncate max-w-[170px]">
+                            {pos.strategy || pos.brokerServer?.split(' ')[0] || 'MT5-Live'} • {pos.timestamp}
                           </span>
                         </td>
                         <td className="py-2.5">
@@ -971,13 +1041,13 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
                           </span>
                         </td>
                         <td className="py-2.5 text-slate-300">
-                          {pos.lots} {pos.market === 'FOREX' || pos.market === 'METALS' ? 'Lots' : 'shs'}
+                          {pos.lots} {pos.market === 'FOREX' || pos.market === 'METALS' || pos.market === 'INDICES' ? 'Lots' : 'shs'}
                         </td>
                         <td className="py-2.5 text-slate-400">
-                          {pos.entryPrice.toFixed(digits)}
+                          {pos.entryPrice.toFixed(rowDigits)}
                         </td>
                         <td className="py-2.5 text-white font-semibold">
-                          {pos.currentPrice.toFixed(digits)}
+                          {pos.currentPrice.toFixed(rowDigits)}
                         </td>
                         <td className="py-2.5 text-[10px]">
                           {pos.isBreakEvenLocked ? (
@@ -986,8 +1056,9 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
                             </span>
                           ) : (
                             <div className="space-y-0.5 text-slate-400">
-                              <div>SL: {pos.stopLoss ? pos.stopLoss.toFixed(digits) : 'None'}</div>
-                              <div>TP: {pos.takeProfit ? pos.takeProfit.toFixed(digits) : 'None'}</div>
+                              <div>SL: {pos.stopLoss ? pos.stopLoss.toFixed(rowDigits) : 'None'}</div>
+                              {pos.tp1 && <div>TP1: {pos.tp1.toFixed(rowDigits)}</div>}
+                              <div>TP: {pos.takeProfit ? pos.takeProfit.toFixed(rowDigits) : 'None'}</div>
                             </div>
                           )}
                         </td>
@@ -1065,28 +1136,33 @@ export const PaperTradingDesk: React.FC<PaperTradingDeskProps> = ({
                 {closedTrades.map((trade) => (
                   <div
                     key={trade.id}
-                    className="p-2 rounded-xl bg-[#080d18] border border-[#141f33] flex items-center justify-between text-xs"
+                    className="p-2 rounded-xl bg-[#080d18] border border-[#141f33] flex items-center justify-between gap-2 text-xs"
                   >
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap min-w-0">
                       <span
-                        className={`w-2 h-2 rounded-full ${
+                        className={`w-2 h-2 rounded-full shrink-0 ${
                           trade.outcome === 'WIN' ? 'bg-emerald-400' : 'bg-rose-400'
                         }`}
                       />
-                      <span className="font-bold text-white font-mono">{trade.ticker}</span>
-                      <span className="text-[10px] text-slate-500">{trade.direction}</span>
-                      <span className="text-[10px] text-slate-600">• {trade.timestamp}</span>
+                      <span className="font-bold text-white font-mono truncate">{trade.ticker}</span>
+                      <span className="text-[10px] text-slate-400">{trade.direction}</span>
+                      {trade.isAutoSignal && (
+                        <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#0df2c9]/15 text-[#0df2c9] border border-[#0df2c9]/30">
+                          AUTO {trade.timeframe || ''}
+                        </span>
+                      )}
+                      <span className="text-[10px] text-slate-500">• {trade.timestamp}</span>
                     </div>
-                    <div className="flex items-center gap-3 font-mono">
+                    <div className="flex items-center gap-3 font-mono shrink-0">
                       <span className="text-[11px] text-slate-400">
-                        {trade.entryPrice.toFixed(trade.entryPrice < 10 ? 4 : 2)} → {trade.exitPrice.toFixed(trade.exitPrice < 10 ? 4 : 2)}
+                        {trade.entryPrice.toFixed(trade.entryPrice < 10 ? 5 : 2)} → {trade.exitPrice.toFixed(trade.exitPrice < 10 ? 5 : 2)}
                       </span>
                       <span
                         className={`font-bold ${
                           trade.outcome === 'WIN' ? 'text-emerald-400' : 'text-rose-400'
                         }`}
                       >
-                        {trade.outcome === 'WIN' ? '+' : ''}${trade.pnl.toFixed(2)}
+                        {trade.pnl >= 0 ? '+' : '-'}${Math.abs(trade.pnl).toFixed(2)}
                       </span>
                     </div>
                   </div>

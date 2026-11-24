@@ -78,6 +78,7 @@ import { getAssetMarketSession } from '../../utils/marketHours.ts';
 import { computeTimeframeSignalLevels, evaluateDirectionalConfluence, getTimeframeProfile, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
 import { BotLiveChart } from '../trading/BotLiveChart.tsx';
 import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../utils/signalScorecard.ts';
+import { openPaperTradeFromSignal } from '../../utils/paperTradeManager.ts';
 import { useNewsGuard } from '../../utils/newsGuard.ts';
 import { scheduleTradingCloudPush, CLOUD_TRADING_HYDRATED_EVENT } from '../../utils/tradingCloudSync.ts';
 import { generateCandles } from '../../utils/stockCandles.ts';
@@ -620,7 +621,7 @@ export const BotStudioView: React.FC = () => {
         (newSig.takeProfit - newSig.entryPrice) * 0.55
       ).toFixed(activeAsset.digits)
     );
-    recordTrackedSignal({
+    const trackedBotSig = recordTrackedSignal({
       symbol: activeAsset.symbol,
       market: activeAsset.category,
       timeframe: selectedTimeframe,
@@ -633,6 +634,20 @@ export const BotStudioView: React.FC = () => {
       tp2: newSig.takeProfit,
       riskReward: newSig.rrRatio,
       confidenceScore: newSig.confluenceScore,
+    });
+    openPaperTradeFromSignal({
+      symbol: activeAsset.symbol,
+      name: activeAsset.name || activeAsset.symbol,
+      action: actualDirection === 'BUY' ? 'STRONG BUY' : 'STRONG SELL',
+      timeframe: selectedTimeframe,
+      spotPrice: newSig.entryPrice,
+      sl: newSig.stopLoss,
+      tp1: halfWayTp,
+      tp2: newSig.takeProfit,
+      strategy: `${selectedBot.name} (${selectedTimeframe})`,
+      signalId: trackedBotSig?.id,
+      confidenceScore: newSig.confluenceScore,
+      explicitLots: selectedLots > 0 ? selectedLots : undefined,
     });
 
     // If Auto-Pilot is active and no red-folder news hazard blocks execution, auto-dispatch order immediately

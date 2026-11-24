@@ -92,6 +92,7 @@ import { evaluatePropTradeBlock, PROP_GUARD_EVENT } from '../../utils/propGuardi
 import { computeTimeframeSignalLevels, resolveQuoteForTimeframe, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
 import { lookupTradingViewQuote, LiveTvQuote } from '../../utils/tradingViewSync.ts';
 import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../utils/signalScorecard.ts';
+import { openPaperTradeFromSignal } from '../../utils/paperTradeManager.ts';
 
 export interface ScannedOpportunity {
   symbol: string;
@@ -1254,7 +1255,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
         setScannedOpportunities(data.opportunities);
         const topPick = data.bestTrade || data.opportunities[0];
         if (topPick && topPick.basePrice > 0) {
-          recordTrackedSignal({
+          const trackedTop = recordTrackedSignal({
             symbol: topPick.symbol,
             market: topPick.category || 'FOREX',
             timeframe: topPick.timeframe || scanTimeframe,
@@ -1267,6 +1268,20 @@ export const Mt5EaScalperStudio: React.FC = () => {
             tp2: topPick.tp2,
             riskReward: topPick.riskReward || '1:2.5',
             confidenceScore: topPick.score || 88,
+          });
+          openPaperTradeFromSignal({
+            symbol: topPick.symbol,
+            name: topPick.name || topPick.symbol,
+            action: topPick.type === 'SELL' ? 'STRONG SELL' : 'STRONG BUY',
+            timeframe: topPick.timeframe || scanTimeframe,
+            spotPrice: topPick.basePrice,
+            sl: topPick.sl,
+            tp1: topPick.tp1,
+            tp2: topPick.tp2,
+            strategy: `MT5 AI Sniper (${topPick.grade || scanTimeframe})`,
+            signalId: trackedTop?.id,
+            confidenceScore: topPick.score || 88,
+            explicitLots: activeTradingLot > 0 ? activeTradingLot : undefined,
           });
         }
       }

@@ -197,26 +197,30 @@ export const GlobalSignalToast: React.FC = () => {
     const onPaperTradeEvent = (evt: Event) => {
       const detail = (evt as CustomEvent<PaperTradeAlertDetail>).detail;
       if (!detail || !detail.ticker) return;
-      const isWin = detail.realizedPnl >= 0;
+      const isOpened = detail.eventType === 'AUTO_OPENED';
+      const isWin = isOpened || detail.realizedPnl >= 0;
       const isTp2 = detail.eventType === 'TP_HIT';
-      const badgeText =
-        detail.eventType === 'TP1_BREAKEVEN'
-          ? '50% TP1 + BE LOCKED'
-          : detail.eventType === 'TP_HIT'
-          ? 'PAPER TP FILLED'
-          : 'PAPER SL FILLED';
+      const badgeText = isOpened
+        ? 'SIGNAL → PAPER OPENED'
+        : detail.eventType === 'TP1_BREAKEVEN'
+        ? '50% TP1 + BE LOCKED'
+        : detail.eventType === 'TP_HIT'
+        ? 'PAPER TP FILLED'
+        : 'PAPER SL FILLED';
       const priceText = detail.exitPrice < 10 ? detail.exitPrice.toFixed(5) : detail.exitPrice.toFixed(2);
 
       pushToast({
         toastId: `paper-${detail.id}-${detail.eventType}-${Date.now()}`,
         symbol: detail.ticker,
-        timeframe: 'AUTO',
+        timeframe: detail.timeframe || 'AUTO',
         direction: detail.direction,
         badgeText,
         isWin,
         isTp2,
         priceText,
-        outcomeText: `${detail.realizedPnl >= 0 ? '+' : ''}$${detail.realizedPnl}`,
+        outcomeText: isOpened
+          ? detail.strategy || 'Tracked in Journal'
+          : `${detail.realizedPnl >= 0 ? '+' : ''}$${detail.realizedPnl}`,
       });
     };
 
