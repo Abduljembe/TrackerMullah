@@ -166,9 +166,9 @@ const FEATURED_ASSETS: StockProfile[] = [
     name: 'Euro / US Dollar',
     market: 'FOREX',
     currency: 'USD',
-    currentPrice: 1.1032,
-    changePercent: 0.32,
-    changeValue: 0.0035,
+    currentPrice: 1.0963,
+    changePercent: 0.55,
+    changeValue: 0.0060,
     peRatio: 0,
     dividendYield: 2.8,
     marketCap: '$2.4 Trillion Daily',
@@ -180,7 +180,7 @@ const FEATURED_ASSETS: StockProfile[] = [
       score: 84,
       setup: 'Bullish Trend Continuation & FVG Retest',
     },
-    historicalPoints: [1.0880, 1.0910, 1.0940, 1.0965, 1.0950, 1.0990, 1.0980, 1.1005, 1.1035, 1.1015, 1.1025, 1.1032],
+    historicalPoints: [1.0880, 1.0910, 1.0940, 1.0965, 1.0950, 1.0990, 1.0980, 1.1005, 1.1035, 1.1015, 1.0955, 1.0963],
   },
   {
     ticker: 'GBP/USD',
@@ -900,9 +900,9 @@ const FEATURED_ASSETS: StockProfile[] = [
     name: 'Spot Gold / US Dollar',
     market: 'METALS',
     currency: 'USD',
-    currentPrice: 3878.46,
-    changePercent: 0.98,
-    changeValue: 37.64,
+    currentPrice: 3620.00,
+    changePercent: -0.40,
+    changeValue: -14.50,
     peRatio: 0,
     dividendYield: 0,
     marketCap: '$17.8 Trillion Global Reserves',
@@ -910,11 +910,11 @@ const FEATURED_ASSETS: StockProfile[] = [
     isMetal: true,
     pipSpread: '$0.25 (25 pts)',
     defaultSignal: {
-      action: 'STRONG BUY',
-      score: 95,
-      setup: 'Institutional 3,878 Demand Zone Defense & Bullish Expansion',
+      action: 'SELL',
+      score: 86,
+      setup: 'Institutional Liquidity Sweep & Session Equilibrium',
     },
-    historicalPoints: [3650, 3690, 3720, 3750, 3775, 3795, 3815, 3832, 3848, 3860, 3871, 3878.46],
+    historicalPoints: [3480, 3520, 3580, 3640, 3690, 3740, 3780, 3750, 3710, 3675, 3638, 3620],
   },
   {
     ticker: 'XAG/USD',
@@ -3499,13 +3499,22 @@ Summary: ${sig.summary}`;
                       <ArrowDownRight className="w-4 h-4" />
                     )}
                     <span>
-                      {currentDisplayChangePercent >= 0 ? '+' : ''}
+                      {currentDisplayChangeValue >= 0 ? '+' : ''}
                       {formatPriceVal(currentDisplayChangeValue)} (
                       {currentDisplayChangePercent >= 0 ? '+' : ''}
                       {currentDisplayChangePercent.toFixed(2)}%)
                     </span>
                   </div>
                 </div>
+                {currentTvQuote?.bid && currentTvQuote?.ask && (
+                  <div className="flex items-center gap-3 mt-1 text-[11px] font-mono text-slate-400">
+                    <span>Bid <strong className="text-slate-200">{formatPriceVal(currentTvQuote.bid)}</strong></span>
+                    <span className="text-slate-600">|</span>
+                    <span>Ask <strong className="text-slate-200">{formatPriceVal(currentTvQuote.ask)}</strong></span>
+                    <span className="text-slate-600">|</span>
+                    <span className="text-teal-400">{currentTvQuote.symbol}</span>
+                  </div>
+                )}
               </div>
 
               {/* Market Schedule Banner */}

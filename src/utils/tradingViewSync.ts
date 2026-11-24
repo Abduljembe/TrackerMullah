@@ -23,6 +23,7 @@ export interface LiveTvQuote {
   low?: number;
   open?: number;
   time?: string;
+  isFallback?: boolean;
   recommendAll?: number;
   recommendMa?: number;
   recommendOther?: number;
@@ -49,8 +50,8 @@ export interface LiveTvQuote {
  */
 export const TV_BENCHMARK_PRICES: Record<string, number> = {
   // Forex Majors
-  'EUR/USD': 1.1032,
-  EURUSD: 1.1032,
+  'EUR/USD': 1.0963,
+  EURUSD: 1.0963,
   'GBP/USD': 1.3222,
   GBPUSD: 1.3222,
   'USD/JPY': 159.86,
@@ -129,9 +130,9 @@ export const TV_BENCHMARK_PRICES: Record<string, number> = {
   USDSGD: 1.2881,
 
   // Metals & Commodities
-  'XAU/USD': 3878.46,
-  XAUUSD: 3878.46,
-  GOLD: 3878.46,
+  'XAU/USD': 3620.00,
+  XAUUSD: 3620.00,
+  GOLD: 3620.00,
   'XAG/USD': 49.14,
   XAGUSD: 49.14,
   SILVER: 49.14,
@@ -177,8 +178,8 @@ export const TV_BENCHMARK_PRICES: Record<string, number> = {
   US10Y: 5.13,
 
   // Cryptocurrencies
-  BTCUSD: 68208.49,
-  'BTC/USD': 68208.49,
+  BTCUSD: 60200.00,
+  'BTC/USD': 60200.00,
   ETHUSD: 1919.20,
   'ETH/USD': 1919.20,
   SOLUSD: 79.30,
@@ -220,6 +221,20 @@ let sharedEventSource: EventSource | null = null;
 let lastSseMessageAt = 0;
 const subscribers = new Set<(quotes: Record<string, LiveTvQuote>) => void>();
 
+function mergeQuotesSafely(
+  prev: Record<string, LiveTvQuote>,
+  incoming: Record<string, LiveTvQuote>
+): Record<string, LiveTvQuote> {
+  const next: Record<string, LiveTvQuote> = { ...prev };
+  for (const [k, q] of Object.entries(incoming)) {
+    if (!q || typeof q.price !== 'number' || q.price <= 0) continue;
+    const existing = next[k];
+    if (existing && !existing.isFallback && q.isFallback) continue;
+    next[k] = q;
+  }
+  return next;
+}
+
 function notifySubscribers() {
   const snapshot = { ...sharedQuotesCache };
   for (const cb of subscribers) {
@@ -237,8 +252,8 @@ function ensureSharedStream() {
     es.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data?.quotes && typeof data.quotes === 'object') {
-          sharedQuotesCache = data.quotes;
+        if (data?.quotes && typeof data.quotes === 'object' && Object.keys(data.quotes).length > 0) {
+          sharedQuotesCache = mergeQuotesSafely(sharedQuotesCache, data.quotes);
           lastSharedFetch = Date.now();
           lastSseMessageAt = Date.now();
           notifySubscribers();
@@ -261,7 +276,8 @@ function ensureSharedStream() {
 
 async function fetchSharedQuotes(force = false): Promise<Record<string, LiveTvQuote>> {
   const now = Date.now();
-  if (!force && now - lastSharedFetch < 900 && Object.keys(sharedQuotesCache).length > 0) {
+  const hasLiveGold = Boolean(sharedQuotesCache['OANDA:XAUUSD'] && !sharedQuotesCache['OANDA:XAUUSD'].isFallback);
+  if (!force && hasLiveGold && now - lastSharedFetch < 900 && Object.keys(sharedQuotesCache).length > 0) {
     return sharedQuotesCache;
   }
   if (!force && inflightPromise) return inflightPromise;
@@ -270,8 +286,8 @@ async function fetchSharedQuotes(force = false): Promise<Record<string, LiveTvQu
     .then(async (res) => {
       if (!res.ok) return sharedQuotesCache;
       const data = await res.json();
-      if (data?.quotes && typeof data.quotes === 'object') {
-        sharedQuotesCache = data.quotes;
+      if (data?.quotes && typeof data.quotes === 'object' && Object.keys(data.quotes).length > 0) {
+        sharedQuotesCache = mergeQuotesSafely(sharedQuotesCache, data.quotes);
         lastSharedFetch = Date.now();
         notifySubscribers();
       }
@@ -420,10 +436,11 @@ export function useTradingViewQuotes(pollMs: number = 2500): Record<string, Live
       fetchSharedQuotes();
     }
 
-    // Fallback poll only when SSE hasn't delivered a tick recently
+    // Fallback poll when SSE hasn't delivered a tick recently OR when TradingView live feed hasn't hydrated yet
     const timer = setInterval(() => {
-      if (Date.now() - lastSseMessageAt > Math.max(pollMs, 3500)) {
-        fetchSharedQuotes();
+      const hasLiveGold = Boolean(sharedQuotesCache['OANDA:XAUUSD'] && !sharedQuotesCache['OANDA:XAUUSD'].isFallback);
+      if (!hasLiveGold || Date.now() - lastSseMessageAt > Math.max(pollMs, 3500)) {
+        fetchSharedQuotes(!hasLiveGold);
       }
     }, pollMs);
 

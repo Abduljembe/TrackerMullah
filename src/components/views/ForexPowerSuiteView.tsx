@@ -283,12 +283,12 @@ export const ForexPowerSuiteView: React.FC = () => {
   const isIndex = selectedAsset.includes('NAS') || selectedAsset.includes('US30') || selectedAsset.includes('SPX');
 
   const fallbackPrice = isGold
-    ? 3878.46
+    ? 3620.00
     : isIndex
     ? (selectedAsset.includes('30') ? 52225.33 : selectedAsset.includes('500') ? 7519.06 : 27744.26)
     : isJpy
     ? 159.86
-    : 1.1032;
+    : 1.0963;
   const currentPrice = resolveTradingViewPrice(liveQuotes, selectedAsset, fallbackPrice);
   const atr = activeQuote?.atr || (isGold ? 18.5 : isIndex ? 140 : isJpy ? 0.95 : 0.0065);
   const isBullish = activeQuote?.rsi ? activeQuote.rsi > 48 : true;

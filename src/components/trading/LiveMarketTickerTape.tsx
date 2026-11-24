@@ -27,15 +27,15 @@ interface LiveMarketTickerTapeProps {
 }
 
 const DEFAULT_TICKERS: TickerItem[] = [
-  { symbol: 'XAUUSD', name: 'Gold Spot', price: 3878.46, changePercent: +1.42, category: 'METALS', is24_7: false, digits: 2 },
-  { symbol: 'BTCUSD', name: 'Bitcoin', price: 68208.49, changePercent: +3.18, category: 'CRYPTO', is24_7: true, digits: 2 },
+  { symbol: 'XAUUSD', name: 'Gold Spot', price: 3620.00, changePercent: -0.40, category: 'METALS', is24_7: false, digits: 2 },
+  { symbol: 'BTCUSD', name: 'Bitcoin', price: 60200.00, changePercent: -1.78, category: 'CRYPTO', is24_7: true, digits: 2 },
   { symbol: 'R_75', name: 'Deriv Vol 75', price: 428950.40, changePercent: +2.85, category: 'DERIV_24_7', is24_7: true, digits: 2 },
   { symbol: 'BOOM1000', name: 'Boom 1000', price: 15420.30, changePercent: +0.94, category: 'DERIV_24_7', is24_7: true, digits: 2 },
   { symbol: 'CRASH1000', name: 'Crash 1000', price: 8750.60, changePercent: -1.24, category: 'DERIV_24_7', is24_7: true, digits: 2 },
   { symbol: 'STP', name: 'Step Index', price: 8420.10, changePercent: +0.45, category: 'DERIV_24_7', is24_7: true, digits: 1 },
   { symbol: '1HZ100V', name: 'Vol 100 (1s)', price: 1240.85, changePercent: +4.12, category: 'DERIV_24_7', is24_7: true, digits: 2 },
   { symbol: 'ETHUSD', name: 'Ethereum', price: 1919.20, changePercent: +2.15, category: 'CRYPTO', is24_7: true, digits: 2 },
-  { symbol: 'EURUSD', name: 'EUR / USD', price: 1.1032, changePercent: -0.18, category: 'FOREX', is24_7: false, digits: 4 },
+  { symbol: 'EURUSD', name: 'EUR / USD', price: 1.0963, changePercent: +0.55, category: 'FOREX', is24_7: false, digits: 4 },
   { symbol: 'USDKES', name: 'USD / KES', price: 129.86, changePercent: +0.08, category: 'FOREX', is24_7: false, digits: 2 },
 ];
 

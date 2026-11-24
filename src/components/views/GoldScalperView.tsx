@@ -278,35 +278,43 @@ export const GoldScalperView: React.FC = () => {
   // -------------------------------------------------------------------------
   // 3. LIVE GOLD PRICE ACTION & CHART DATA
   // -------------------------------------------------------------------------
-  const [goldPrice, setGoldPrice] = useState<number>(3878.46);
-  const [bidPrice, setBidPrice] = useState<number>(3878.31);
-  const [askPrice, setAskPrice] = useState<number>(3878.61);
+  const [goldPrice, setGoldPrice] = useState<number>(3620.00);
+  const [bidPrice, setBidPrice] = useState<number>(3619.85);
+  const [askPrice, setAskPrice] = useState<number>(3620.15);
   const [spreadPoints, setSpreadPoints] = useState<number>(30); // 30 points = 0.30 pips
 
   // Technical indicator calculated values
-  const [fastEmaVal, setFastEmaVal] = useState<number>(3879.20);
-  const [slowEmaVal, setSlowEmaVal] = useState<number>(3877.10);
-  const [rsiVal, setRsiVal] = useState<number>(56.2);
+  const [fastEmaVal, setFastEmaVal] = useState<number>(3621.20);
+  const [slowEmaVal, setSlowEmaVal] = useState<number>(3618.90);
+  const [rsiVal, setRsiVal] = useState<number>(44.8);
   const [atrVal, setAtrVal] = useState<number>(3.80);
 
   // M1 Candlestick series for chart visualizer
   const [candles, setCandles] = useState<CandleBar[]>([
-    { time: '18:14', open: 3871.80, high: 3874.40, low: 3871.10, close: 3874.00 },
-    { time: '18:15', open: 3874.00, high: 3875.70, low: 3873.40, close: 3875.20 },
-    { time: '18:16', open: 3875.20, high: 3877.10, low: 3874.50, close: 3876.40 },
-    { time: '18:17', open: 3876.40, high: 3877.80, low: 3875.70, close: 3877.50 },
-    { time: '18:18', open: 3877.50, high: 3879.10, low: 3876.80, close: 3878.70 },
-    { time: '18:19', open: 3878.70, high: 3879.80, low: 3877.90, close: 3878.46 },
+    { time: '18:14', open: 3616.80, high: 3618.40, low: 3616.10, close: 3618.00 },
+    { time: '18:15', open: 3618.00, high: 3619.70, low: 3617.40, close: 3619.20 },
+    { time: '18:16', open: 3619.20, high: 3621.10, low: 3618.50, close: 3620.40 },
+    { time: '18:17', open: 3620.40, high: 3621.80, low: 3619.70, close: 3621.50 },
+    { time: '18:18', open: 3621.50, high: 3622.10, low: 3619.80, close: 3620.70 },
+    { time: '18:19', open: 3620.70, high: 3621.80, low: 3619.50, close: 3620.00 },
   ]);
 
   // Anchor Gold Scalper spot price & indicators strictly to live TradingView XAU/USD feed
-  const liveTvQuotes = useTradingViewQuotes(3200);
+  const liveTvQuotes = useTradingViewQuotes(2000);
   useEffect(() => {
     const tvGold = lookupTradingViewQuote(liveTvQuotes, 'XAUUSD');
     if (tvGold && tvGold.price > 0) {
       setGoldPrice(tvGold.price);
-      setBidPrice(Number((tvGold.price - spreadPoints * 0.01).toFixed(2)));
-      setAskPrice(Number((tvGold.price + spreadPoints * 0.01).toFixed(2)));
+      setBidPrice(
+        typeof tvGold.bid === 'number' && tvGold.bid > 0
+          ? Number(tvGold.bid.toFixed(2))
+          : Number((tvGold.price - spreadPoints * 0.01).toFixed(2))
+      );
+      setAskPrice(
+        typeof tvGold.ask === 'number' && tvGold.ask > 0
+          ? Number(tvGold.ask.toFixed(2))
+          : Number((tvGold.price + spreadPoints * 0.01).toFixed(2))
+      );
 
       const tfMap: Record<string, string> = { '1': 'M1', '5': 'M5', '15': 'M15', '60': 'H1', '240': 'H4', 'D': 'D1' };
       const activeTf = tfMap[tvInterval] || 'M1';

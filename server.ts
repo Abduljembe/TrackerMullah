@@ -102,6 +102,7 @@ interface TradingViewQuote {
   low: number;
   open: number;
   time: string;
+  isFallback?: boolean;
   recommendAll?: number;
   recommendMa?: number;
   recommendOther?: number;
@@ -374,30 +375,53 @@ const TV_WS_SYMBOLS = [
   "NYMEX:CL1!","ICEEUR:BRN1!","COMEX:HG1!","TVC:US10Y","TVC:US02Y"
 ];
 
+const TV_REQUEST_HEADERS = {
+  'Content-Type': 'application/json',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  Origin: 'https://www.tradingview.com',
+  Referer: 'https://www.tradingview.com/',
+  Accept: 'application/json, text/plain, */*',
+};
+
 function startTradingViewWebSocketStream() {
   if (process.env.VERCEL || tvWsStarted || tvWsConnecting || typeof WebSocket === 'undefined') return;
   tvWsStarted = true;
+
+  let activeWs: WebSocket | null = null;
+  let watchdogTimer: NodeJS.Timeout | null = null;
 
   const connect = () => {
     if (tvWsConnecting) return;
     tvWsConnecting = true;
     try {
-      const ws = new (WebSocket as any)("wss://data.tradingview.com/socket.io/websocket", {
-        headers: { Origin: "https://www.tradingview.com" },
+      const ws = new (WebSocket as any)('wss://data.tradingview.com/socket.io/websocket', {
+        headers: {
+          Origin: 'https://www.tradingview.com',
+          'User-Agent': TV_REQUEST_HEADERS['User-Agent'],
+        },
       });
+      activeWs = ws;
       const pack = (m: string, p: any[]) => {
         const s = JSON.stringify({ m, p });
         return `~m~${s.length}~m~${s}`;
       };
       const session = `qs_${Math.random().toString(36).slice(2, 10)}`;
 
+      if (watchdogTimer) clearInterval(watchdogTimer);
+      watchdogTimer = setInterval(() => {
+        if (tvWsConnected && tvWsLastTickAt > 0 && Date.now() - tvWsLastTickAt > 45000) {
+          try { activeWs?.terminate?.(); } catch {}
+        }
+      }, 15000);
+
       ws.onopen = () => {
         tvWsConnected = true;
         tvWsConnecting = false;
-        ws.send(pack("set_auth_token", ["unauthorized_user_token"]));
-        ws.send(pack("quote_create_session", [session]));
-        ws.send(pack("quote_set_fields", [session, "lp", "ch", "chp", "high_price", "low_price", "open_price"]));
-        ws.send(pack("quote_add_symbols", [session, ...TV_WS_SYMBOLS]));
+        tvWsLastTickAt = Date.now();
+        ws.send(pack('set_auth_token', ['unauthorized_user_token']));
+        ws.send(pack('quote_create_session', [session]));
+        ws.send(pack('quote_set_fields', [session, 'lp', 'ch', 'chp', 'high_price', 'low_price', 'open_price', 'bid', 'ask']));
+        ws.send(pack('quote_add_symbols', [session, ...TV_WS_SYMBOLS]));
       };
 
       ws.onmessage = (event: any) => {
@@ -426,23 +450,33 @@ function startTradingViewWebSocketStream() {
               const v = msg.p[1].v || {};
               if (!rawSym) continue;
               const prev = tvQuotesCache[rawSym];
-              const price = typeof v.lp === 'number' ? v.lp : prev?.price;
+              const bidVal = typeof v.bid === 'number' && v.bid > 0 ? v.bid : prev?.bid;
+              const askVal = typeof v.ask === 'number' && v.ask > 0 ? v.ask : prev?.ask;
+              const lpPrice = typeof v.lp === 'number' && v.lp > 0 ? v.lp : undefined;
+              const prevLivePrice = prev && !prev.isFallback && prev.price > 0 ? prev.price : undefined;
+              const midFallback = bidVal && askVal ? Number(((bidVal + askVal) / 2).toFixed(rawSym.includes('JPY') ? 3 : rawSym.includes('XAU') ? 3 : 5)) : undefined;
+              const price = lpPrice ?? prevLivePrice ?? midFallback;
               if (typeof price !== 'number' || price <= 0) continue;
 
               const merged: TradingViewQuote = {
                 ...(prev || {}),
                 symbol: rawSym,
                 price,
-                changePercent: typeof v.chp === 'number' ? Math.round(v.chp * 100) / 100 : (prev?.changePercent ?? 0),
-                changeValue: typeof v.ch === 'number' ? v.ch : (prev?.changeValue ?? 0),
-                high: typeof v.high_price === 'number' ? v.high_price : (prev?.high ?? price),
-                low: typeof v.low_price === 'number' ? v.low_price : (prev?.low ?? price),
-                open: typeof v.open_price === 'number' ? v.open_price : (prev?.open ?? price),
+                bid: bidVal,
+                ask: askVal,
+                changePercent: typeof v.chp === 'number' ? Math.round(v.chp * 100) / 100 : (prev && !prev.isFallback ? prev.changePercent : 0),
+                changeValue: typeof v.ch === 'number' ? v.ch : (prev && !prev.isFallback ? prev.changeValue : 0),
+                high: typeof v.high_price === 'number' ? v.high_price : (prev && !prev.isFallback ? prev.high : price),
+                low: typeof v.low_price === 'number' ? v.low_price : (prev && !prev.isFallback ? prev.low : price),
+                open: typeof v.open_price === 'number' ? v.open_price : (prev && !prev.isFallback ? prev.open : price),
                 time: timeIso,
+                isFallback: false,
               };
 
               applyTvQuoteAliases(tvQuotesCache, rawSym, merged);
-              tvWsLastTickBySymbol[rawSym] = nowMs;
+              if (lpPrice !== undefined) {
+                tvWsLastTickBySymbol[rawSym] = nowMs;
+              }
               tvWsLastTickAt = nowMs;
               updatedAny = true;
             }
@@ -472,6 +506,10 @@ function startTradingViewWebSocketStream() {
       ws.onclose = () => {
         tvWsConnected = false;
         tvWsConnecting = false;
+        if (watchdogTimer) {
+          clearInterval(watchdogTimer);
+          watchdogTimer = null;
+        }
         setTimeout(connect, 3000);
       };
     } catch {
@@ -482,6 +520,98 @@ function startTradingViewWebSocketStream() {
   };
 
   connect();
+}
+
+async function fetchTradingViewWsSnapshot(symbols: string[], timeoutMs = 3200): Promise<Record<string, TradingViewQuote>> {
+  const result: Record<string, TradingViewQuote> = {};
+  if (typeof WebSocket === 'undefined' || symbols.length === 0) return result;
+  return new Promise((resolve) => {
+    let settled = false;
+    let ws: WebSocket | null = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      try { ws?.close(); } catch {}
+      resolve(result);
+    };
+    const timer = setTimeout(finish, timeoutMs);
+
+    try {
+      const socket = new (WebSocket as any)('wss://data.tradingview.com/socket.io/websocket', {
+        headers: {
+          Origin: 'https://www.tradingview.com',
+          'User-Agent': TV_REQUEST_HEADERS['User-Agent'],
+        },
+      });
+      ws = socket;
+      const pack = (m: string, p: any[]) => {
+        const s = JSON.stringify({ m, p });
+        return `~m~${s.length}~m~${s}`;
+      };
+      const session = `qs_snap_${Math.random().toString(36).slice(2, 9)}`;
+      let completedCount = 0;
+
+      socket.onopen = () => {
+        socket.send(pack('set_auth_token', ['unauthorized_user_token']));
+        socket.send(pack('quote_create_session', [session]));
+        socket.send(pack('quote_set_fields', [session, 'lp', 'ch', 'chp', 'high_price', 'low_price', 'open_price', 'bid', 'ask']));
+        socket.send(pack('quote_add_symbols', [session, ...symbols]));
+      };
+
+      socket.onmessage = (event: any) => {
+        const raw = typeof event.data === 'string' ? event.data : String(event.data || '');
+        if (!raw) return;
+        const parts = raw.split(/~m~\d+~m~/).filter(Boolean);
+        const timeIso = new Date().toISOString();
+        for (const part of parts) {
+          if (!part.startsWith('{')) continue;
+          try {
+            const msg = JSON.parse(part);
+            if (msg.m === 'qsd' && Array.isArray(msg.p) && msg.p[1]?.s === 'ok') {
+              const rawSym = String(msg.p[1].n || '');
+              const v = msg.p[1].v || {};
+              if (!rawSym) continue;
+              const prev = result[rawSym];
+              const bidVal = typeof v.bid === 'number' && v.bid > 0 ? v.bid : prev?.bid;
+              const askVal = typeof v.ask === 'number' && v.ask > 0 ? v.ask : prev?.ask;
+              const price = typeof v.lp === 'number' && v.lp > 0 ? v.lp : prev?.price;
+              if (typeof price === 'number' && price > 0) {
+                const merged: TradingViewQuote = {
+                  ...(prev || {}),
+                  symbol: rawSym,
+                  price,
+                  bid: bidVal,
+                  ask: askVal,
+                  changePercent: typeof v.chp === 'number' ? Math.round(v.chp * 100) / 100 : (prev?.changePercent ?? 0),
+                  changeValue: typeof v.ch === 'number' ? v.ch : (prev?.changeValue ?? 0),
+                  high: typeof v.high_price === 'number' ? v.high_price : (prev?.high ?? price),
+                  low: typeof v.low_price === 'number' ? v.low_price : (prev?.low ?? price),
+                  open: typeof v.open_price === 'number' ? v.open_price : (prev?.open ?? price),
+                  time: timeIso,
+                  isFallback: false,
+                };
+                applyTvQuoteAliases(result, rawSym, merged);
+              }
+            } else if (msg.m === 'quote_completed') {
+              completedCount++;
+              if (completedCount >= Math.min(symbols.length, 40) && Object.keys(result).length > 0) {
+                clearTimeout(timer);
+                finish();
+              }
+            }
+          } catch {}
+        }
+      };
+
+      socket.onerror = () => {
+        clearTimeout(timer);
+        finish();
+      };
+    } catch {
+      clearTimeout(timer);
+      finish();
+    }
+  });
 }
 
 function injectDerivQuotes(target: Record<string, TradingViewQuote>, timeIso: string) {
@@ -617,10 +747,10 @@ function injectDerivQuotes(target: Record<string, TradingViewQuote>, timeIso: st
 export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<Record<string, TradingViewQuote>> {
   startTradingViewWebSocketStream();
   const now = Date.now();
-  const wsFresh = tvWsConnected && now - tvWsLastTickAt < 15000;
+  const wsFresh = tvWsConnected && now - tvWsLastTickAt < 15000 && Boolean(tvQuotesCache['OANDA:XAUUSD'] && !tvQuotesCache['OANDA:XAUUSD'].isFallback);
   // When live TradingView WebSocket is streaming ticks, only refresh REST technical indicators every 5s unless forced
   const cacheTtl = wsFresh ? 5000 : 800;
-  if (!forceRefresh && now - lastTvQuotesFetch < cacheTtl && Object.keys(tvQuotesCache).length > 0) {
+  if (!forceRefresh && now - lastTvQuotesFetch < cacheTtl && tvQuotesCache['OANDA:XAUUSD'] && !tvQuotesCache['OANDA:XAUUSD'].isFallback) {
     return tvQuotesCache;
   }
 
@@ -667,57 +797,55 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
   const tvColumns = [...baseTvColumns, ...tfColumns, 'bid', 'ask'];
   const stockColumns = [...baseTvColumns, ...stockExtraColumns, ...tfColumns, 'bid', 'ask'];
 
+  const scanPost = (url: string, tickers: string[], columns: string[]) =>
+    fetch(url, {
+      method: 'POST',
+      headers: TV_REQUEST_HEADERS,
+      body: JSON.stringify({ symbols: { tickers }, columns }),
+      signal: AbortSignal.timeout(5500),
+    })
+      .then((r) => (r.ok ? r.json() : { data: [] }))
+      .catch(() => ({ data: [] }));
+
   try {
     const [forexRes, cfdRes, americaRes, kenyaRes, cryptoRes, futuresRes, bondRes] = await Promise.all([
-      fetch("https://scanner.tradingview.com/forex/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: { tickers: forexTickers }, columns: tvColumns }),
-      }).then((r) => (r.ok ? r.json() : { data: [] })).catch(() => ({ data: [] })),
-      fetch("https://scanner.tradingview.com/cfd/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: { tickers: cfdTickers }, columns: tvColumns }),
-      }).then((r) => (r.ok ? r.json() : { data: [] })).catch(() => ({ data: [] })),
-      fetch("https://scanner.tradingview.com/america/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: { tickers: americaTickers }, columns: stockColumns }),
-      }).then((r) => (r.ok ? r.json() : { data: [] })).catch(() => ({ data: [] })),
-      fetch("https://scanner.tradingview.com/kenya/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: { tickers: kenyaTickers }, columns: stockColumns }),
-      }).then((r) => (r.ok ? r.json() : { data: [] })).catch(() => ({ data: [] })),
-      fetch("https://scanner.tradingview.com/crypto/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: { tickers: cryptoTickers }, columns: tvColumns }),
-      }).then((r) => (r.ok ? r.json() : { data: [] })).catch(() => ({ data: [] })),
-      fetch("https://scanner.tradingview.com/futures/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: { tickers: futuresTickers }, columns: tvColumns }),
-      }).then((r) => (r.ok ? r.json() : { data: [] })).catch(() => ({ data: [] })),
-      fetch("https://scanner.tradingview.com/bonds/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: { tickers: bondTickers }, columns: tvColumns }),
-      }).then((r) => (r.ok ? r.json() : { data: [] })).catch(() => ({ data: [] })),
+      scanPost('https://scanner.tradingview.com/forex/scan', forexTickers, tvColumns),
+      scanPost('https://scanner.tradingview.com/cfd/scan', cfdTickers, tvColumns),
+      scanPost('https://scanner.tradingview.com/america/scan', americaTickers, stockColumns),
+      scanPost('https://scanner.tradingview.com/kenya/scan', kenyaTickers, stockColumns),
+      scanPost('https://scanner.tradingview.com/crypto/scan', cryptoTickers, tvColumns),
+      scanPost('https://scanner.tradingview.com/futures/scan', futuresTickers, tvColumns),
+      scanPost('https://scanner.tradingview.com/bonds/scan', bondTickers, tvColumns),
     ]);
 
-    const updated: Record<string, TradingViewQuote> = { ...tvQuotesCache };
+    const updated: Record<string, TradingViewQuote> = {};
+    for (const [k, v] of Object.entries(tvQuotesCache)) {
+      if (v && !v.isFallback && v.price > 0) {
+        updated[k] = v;
+      }
+    }
     const timeIso = new Date().toISOString();
+    let liveTvCount = 0;
 
     const processData = (arr: any[], isStock = false) => {
       if (!Array.isArray(arr)) return;
       const tfOffset = isStock ? baseTvColumns.length + stockExtraColumns.length : baseTvColumns.length;
       for (const item of arr) {
         if (!item?.s || !Array.isArray(item.d)) continue;
+        const scannerPrice = Number(item.d[0]);
+        if (!Number.isFinite(scannerPrice) || scannerPrice <= 0) continue;
+
         const rawSym = String(item.s);
         const existing = updated[rawSym];
         const isLiveSym = isServerMarketOpen(rawSym.split(':')[1] || rawSym);
-        const hasFreshWsTick = isLiveSym && existing && tvWsLastTickBySymbol[rawSym] && (Date.now() - tvWsLastTickBySymbol[rawSym] < 15000);
+        const hasFreshWsTick =
+          isLiveSym &&
+          existing &&
+          !existing.isFallback &&
+          tvWsLastTickBySymbol[rawSym] &&
+          Date.now() - tvWsLastTickBySymbol[rawSym] < 15000;
+
+        liveTvCount++;
 
         const timeframeSignals: NonNullable<TradingViewQuote['timeframeSignals']> = {
           ...(existing?.timeframeSignals || {}),
@@ -752,18 +880,22 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
         const bidAskOffset = tfOffset + tfColumns.length;
         const rawBid = typeof item.d[bidAskOffset] === 'number' ? Number(item.d[bidAskOffset]) : existing?.bid;
         const rawAsk = typeof item.d[bidAskOffset + 1] === 'number' ? Number(item.d[bidAskOffset + 1]) : existing?.ask;
+        const scannerChp = typeof item.d[1] === 'number' && Number.isFinite(Number(item.d[1])) ? Math.round(Number(item.d[1]) * 100) / 100 : 0;
+        const scannerCh = typeof item.d[2] === 'number' && Number.isFinite(Number(item.d[2])) ? Number(item.d[2]) : 0;
+        const useWsChange = hasFreshWsTick && (existing.changePercent !== 0 || existing.changeValue !== 0 || scannerCh === 0);
 
         const q: TradingViewQuote = {
           symbol: rawSym,
-          price: hasFreshWsTick ? existing.price : Number(item.d[0]),
+          price: hasFreshWsTick ? existing.price : scannerPrice,
           bid: typeof rawBid === 'number' && rawBid > 0 ? rawBid : existing?.bid,
           ask: typeof rawAsk === 'number' && rawAsk > 0 ? rawAsk : existing?.ask,
-          changePercent: hasFreshWsTick ? existing.changePercent : Math.round(Number(item.d[1]) * 100) / 100,
-          changeValue: hasFreshWsTick ? existing.changeValue : Number(item.d[2]),
-          high: hasFreshWsTick ? Math.max(existing.high, Number(item.d[3])) : Number(item.d[3]),
-          low: hasFreshWsTick ? Math.min(existing.low, Number(item.d[4])) : Number(item.d[4]),
-          open: hasFreshWsTick ? existing.open : Number(item.d[5]),
+          changePercent: useWsChange ? existing.changePercent : scannerChp,
+          changeValue: useWsChange ? existing.changeValue : scannerCh,
+          high: hasFreshWsTick && existing.high > 0 ? Math.max(existing.high, Number(item.d[3]) || existing.high) : Number(item.d[3]) || scannerPrice,
+          low: hasFreshWsTick && existing.low > 0 ? Math.min(existing.low, Number(item.d[4]) || existing.low) : Number(item.d[4]) || scannerPrice,
+          open: hasFreshWsTick && existing.open > 0 ? existing.open : Number(item.d[5]) || scannerPrice,
           time: hasFreshWsTick ? existing.time : timeIso,
+          isFallback: false,
           recommendAll: timeframeSignals['1D'].recommendAll,
           recommendMa: timeframeSignals['1D'].recommendMa,
           recommendOther: timeframeSignals['1D'].recommendOther,
@@ -795,6 +927,17 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
     processData(futuresRes.data, false);
     processData(bondRes.data, false);
 
+    // If REST scanner failed/throttled, pull exact TradingView prices via one-shot WebSocket snapshot
+    if (liveTvCount === 0 && !updated['OANDA:XAUUSD']) {
+      const wsSnapshot = await fetchTradingViewWsSnapshot(TV_WS_SYMBOLS, 3200);
+      for (const [k, v] of Object.entries(wsSnapshot)) {
+        updated[k] = { ...v, isFallback: false };
+      }
+      if (wsSnapshot['OANDA:XAUUSD'] || wsSnapshot['FX:EURUSD']) {
+        liveTvCount += Object.keys(wsSnapshot).length;
+      }
+    }
+
     // Compute live derived XAU/EUR and XAU/KES from TradingView XAUUSD, EURUSD, and USDKES
     if (!updated['OANDA:XAUEUR'] && updated['XAUUSD'] && updated['EURUSD'] && updated['EURUSD'].price > 0) {
       const xauEurPrice = Number((updated['XAUUSD'].price / updated['EURUSD'].price).toFixed(2));
@@ -807,29 +950,45 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
       updated['XAU/KES'] = updated['XAUKES'];
     }
 
-    // Multi-source fallback: If TradingView returned 429 or empty data, pull real spot FX & PaxG Gold feeds
-    if (Object.keys(updated).length === 0) {
+    // Multi-source live fallback ONLY when both TradingView Scanner & WebSocket returned no live quotes
+    if (liveTvCount === 0 && !updated['OANDA:XAUUSD']) {
       try {
-        const [erRes, paxgRes] = await Promise.all([
-          fetch("https://open.er-api.com/v6/latest/USD").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-          fetch("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        const [erRes, sqXauRes, sqXagRes, yahooGcfRes, krakenRes] = await Promise.all([
+          fetch('https://open.er-api.com/v6/latest/USD', { signal: AbortSignal.timeout(4000) }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+          fetch('https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD', { signal: AbortSignal.timeout(4000) }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+          fetch('https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAG/USD', { signal: AbortSignal.timeout(4000) }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+          fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1d&range=5d', { headers: { 'User-Agent': TV_REQUEST_HEADERS['User-Agent'] }, signal: AbortSignal.timeout(4000) }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+          fetch('https://api.kraken.com/0/public/Ticker?pair=PAXGUSD,XBTUSD,ETHUSD,SOLUSD', { signal: AbortSignal.timeout(4000) }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
         ]);
 
         const rates = erRes?.rates || {};
-        const goldSpot = paxgRes?.price ? parseFloat(paxgRes.price) : 3878.46;
+        const sqGoldEntry = Array.isArray(sqXauRes) ? sqXauRes[0]?.spreadProfilePrices?.[0] : null;
+        const sqGoldMid = sqGoldEntry?.bid && sqGoldEntry?.ask ? (sqGoldEntry.bid + sqGoldEntry.ask) / 2 : 0;
+        const yGoldMeta = yahooGcfRes?.chart?.result?.[0]?.meta;
+        const yGoldPrice = typeof yGoldMeta?.regularMarketPrice === 'number' ? yGoldMeta.regularMarketPrice : 0;
+        const krakenGold = krakenRes?.result?.PAXGUSD?.c?.[0] ? parseFloat(krakenRes.result.PAXGUSD.c[0]) : 0;
+        const goldSpot = sqGoldMid > 0 ? sqGoldMid : krakenGold > 0 ? krakenGold : yGoldPrice > 0 ? yGoldPrice : 3620.0;
+        const goldPrevClose = typeof yGoldMeta?.chartPreviousClose === 'number' && yGoldMeta.chartPreviousClose > 0 ? yGoldMeta.chartPreviousClose : goldSpot;
+        const goldCh = yGoldPrice > 0 && goldPrevClose > 0 ? Number((goldSpot - goldPrevClose).toFixed(3)) : 0;
+        const goldChp = goldPrevClose > 0 && goldCh !== 0 ? Number(((goldCh / goldPrevClose) * 100).toFixed(2)) : 0;
 
-        const populateQuote = (clean: string, price: number, atr: number, rsi: number = 52.4) => {
+        const populateQuote = (clean: string, price: number, atr: number, rsi: number = 52.4, chVal = 0, chPct = 0, bid?: number, ask?: number) => {
+          if (updated[clean] && !updated[clean].isFallback) return;
           const isSynth = isServer24x7Symbol(clean);
           const spread = price * 0.0015;
+          const digits = clean.includes('JPY') ? 3 : clean.includes('XAU') || clean.includes('NAS') || clean.includes('US30') ? 3 : 5;
           const q: TradingViewQuote = {
             symbol: clean,
-            price: Number(price.toFixed(clean.includes('JPY') ? 3 : clean.includes('XAU') || clean.includes('NAS') || clean.includes('US30') ? 2 : 5)),
-            changePercent: isSynth ? Number(((Math.random() * 0.8) - 0.35).toFixed(2)) : 0,
-            changeValue: isSynth ? Number((price * 0.002).toFixed(4)) : 0,
-            high: Number((price + spread).toFixed(clean.includes('JPY') ? 3 : clean.includes('XAU') || clean.includes('NAS') || clean.includes('US30') ? 2 : 5)),
-            low: Number((price - spread).toFixed(clean.includes('JPY') ? 3 : clean.includes('XAU') || clean.includes('NAS') || clean.includes('US30') ? 2 : 5)),
-            open: Number((price - (spread * 0.4)).toFixed(clean.includes('JPY') ? 3 : clean.includes('XAU') || clean.includes('NAS') || clean.includes('US30') ? 2 : 5)),
+            price: Number(price.toFixed(digits)),
+            bid: typeof bid === 'number' && bid > 0 ? bid : undefined,
+            ask: typeof ask === 'number' && ask > 0 ? ask : undefined,
+            changePercent: isSynth ? Number(((Math.random() * 0.8) - 0.35).toFixed(2)) : chPct,
+            changeValue: isSynth ? Number((price * 0.002).toFixed(4)) : chVal,
+            high: Number((price + spread).toFixed(digits)),
+            low: Number((price - spread).toFixed(digits)),
+            open: Number((price - spread * 0.4).toFixed(digits)),
             time: timeIso,
+            isFallback: true,
             recommendAll: rsi > 55 ? 0.45 : rsi < 45 ? -0.45 : 0.1,
             recommendMa: rsi > 50 ? 0.5 : -0.5,
             recommendOther: 0.2,
@@ -839,7 +998,7 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
             ema20: Number((price * 0.998).toFixed(4)),
             ema50: Number((price * 0.995).toFixed(4)),
             ema200: Number((price * 0.985).toFixed(4)),
-            atr: Number(atr.toFixed(clean.includes('JPY') ? 3 : clean.includes('XAU') || clean.includes('NAS') || clean.includes('US30') ? 2 : 5)),
+            atr: Number(atr.toFixed(digits)),
             adx: 28.4,
           };
 
@@ -850,13 +1009,14 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
           }
         };
 
-        // Populate Gold & Silver
-        populateQuote('XAUUSD', goldSpot, 89.2, 52.1);
+        // Populate Gold & Silver from Swissquote/Yahoo/Kraken live spot
+        populateQuote('XAUUSD', goldSpot, 89.2, 52.1, goldCh, goldChp, sqGoldEntry?.bid, sqGoldEntry?.ask);
         updated['XAU/USD'] = updated['XAUUSD'];
         updated['GOLD'] = updated['XAUUSD'];
 
-        const silverSpot = 49.14;
-        populateQuote('XAGUSD', silverSpot, 2.11, 46.4);
+        const sqSilverEntry = Array.isArray(sqXagRes) ? sqXagRes[0]?.spreadProfilePrices?.[0] : null;
+        const silverSpot = sqSilverEntry?.bid && sqSilverEntry?.ask ? (sqSilverEntry.bid + sqSilverEntry.ask) / 2 : 49.14;
+        populateQuote('XAGUSD', silverSpot, 2.11, 46.4, 0, 0, sqSilverEntry?.bid, sqSilverEntry?.ask);
         updated['XAG/USD'] = updated['XAGUSD'];
         updated['SILVER'] = updated['XAGUSD'];
 
@@ -996,15 +1156,19 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
         // ==========================================
         // DERIV CRYPTOCURRENCIES (24/7)
         // ==========================================
-        populateQuote('BTCUSD', 68208.49, 2400.0, 42.5);
+        const krakenBtc = krakenRes?.result?.XXBTZUSD?.c?.[0] ? parseFloat(krakenRes.result.XXBTZUSD.c[0]) : 60200.0;
+        const krakenEth = krakenRes?.result?.XETHZUSD?.c?.[0] ? parseFloat(krakenRes.result.XETHZUSD.c[0]) : 1919.20;
+        const krakenSol = krakenRes?.result?.SOLUSD?.c?.[0] ? parseFloat(krakenRes.result.SOLUSD.c[0]) : 79.30;
+
+        populateQuote('BTCUSD', krakenBtc, 2400.0, 42.5);
         updated['BTC/USD'] = updated['BTCUSD'];
         updated['BTC'] = updated['BTCUSD'];
 
-        populateQuote('ETHUSD', 1919.20, 98.0, 39.8);
+        populateQuote('ETHUSD', krakenEth, 98.0, 39.8);
         updated['ETH/USD'] = updated['ETHUSD'];
         updated['ETH'] = updated['ETHUSD'];
 
-        populateQuote('SOLUSD', 79.30, 4.3, 41.2);
+        populateQuote('SOLUSD', krakenSol, 4.3, 41.2);
         updated['SOL/USD'] = updated['SOLUSD'];
         updated['SOL'] = updated['SOLUSD'];
 
@@ -1029,7 +1193,7 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
         populateQuote('UK_100', 10895.20, 115.0, 54.0);
         populateQuote('JAP_225', 61142.13, 1618.0, 56.0);
         populateQuote('OIL_CRUDE', 89.08, 2.25, 54.0);
-        populateQuote('XAGUSD', 49.14, 2.11, 48.0);
+        if (!updated['XAGUSD']) populateQuote('XAGUSD', silverSpot, 2.11, 48.0);
       } catch (err) {
         console.warn('Fallback quotes error:', err);
       }
@@ -1351,7 +1515,7 @@ app.get('/api/ea/signal', async (req, res) => {
 
   let basePrice = quote?.price || 1.1032;
   if (!quote) {
-    if (isGold) basePrice = 3878.46;
+    if (isGold) basePrice = 3620.00;
     else if (isJpy) basePrice = 159.86;
     else if (symbol.includes('GBP')) basePrice = 1.3222;
     else if (isIndex) basePrice = 27744.26;
@@ -1426,7 +1590,7 @@ app.post('/api/ea/ai-scan-and-open', async (req, res) => {
       {
         symbol: 'XAUUSD',
         name: 'Spot Gold / US Dollar',
-        fallbackPrice: 3878.46,
+        fallbackPrice: 3620.00,
         category: 'COMMODITIES',
         market: 'METALS',
         marketHours: 'WEEKDAYS',
@@ -1703,7 +1867,7 @@ app.post('/api/ea/open-trade', async (req, res) => {
   const isSol = cleanSym.includes('SOL');
 
   let defaultPrice = 1.1032;
-  if (isGold) defaultPrice = 3878.46;
+  if (isGold) defaultPrice = 3620.00;
   else if (isIndex) defaultPrice = 27744.26;
   else if (isVol75) defaultPrice = 428950.40;
   else if (isVol100) defaultPrice = 1684.20;
@@ -2100,7 +2264,7 @@ app.post('/api/ea/queue-order', (req, res) => {
   mt5QueuedOrders.push(newOrder);
 
   // Instantly reflect in realMt5Positions list at live TradingView price
-  const estOpen = cleanSymbol.includes('XAU') ? 3878.46 : cleanSymbol.includes('JPY') ? 159.86 : cleanSymbol.includes('GBP') ? 1.3222 : 1.1032;
+  const estOpen = cleanSymbol.includes('XAU') ? 3620.00 : cleanSymbol.includes('JPY') ? 159.86 : cleanSymbol.includes('GBP') ? 1.3222 : 1.1032;
   const newTicket = Math.floor(Math.random() * 8000000 + 1000000);
   const immediatePosition = {
     ticket: newTicket,
@@ -2199,7 +2363,7 @@ app.post('/api/stocks/analyze', async (req, res) => {
         ? currentPrice
         : isForex
         ? ticker.includes('XAU')
-          ? 3878.46
+          ? 3620.00
           : ticker.includes('KES')
           ? 129.86
           : ticker.includes('JPY')
@@ -6587,6 +6751,7 @@ async function startServer() {
 
   if (!process.env.VERCEL) {
     startTradingViewWebSocketStream();
+    fetchLiveTradingViewQuotes(true).catch(() => {});
     const httpServer = createServer(app);
     attachMullahLiveWebSocket(httpServer);
     httpServer.listen(PORT, '0.0.0.0', () => {

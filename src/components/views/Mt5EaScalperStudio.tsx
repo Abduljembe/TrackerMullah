@@ -276,7 +276,7 @@ export const INITIAL_SCANNED_OPPORTUNITIES: ScannedOpportunity[] = [
   {
     symbol: 'XAUUSD',
     name: 'Spot Gold / US Dollar',
-    basePrice: 3878.46,
+    basePrice: 3620.00,
     timeframe: 'M5',
     type: 'BUY',
     score: 95,
@@ -846,7 +846,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
   const [connectionSuccessMsg, setConnectionSuccessMsg] = useState<string | null>(null);
 
   // Live Real-Time Positions & Telemetry (Anchored to TradingView scanner feed)
-  const [livePrice, setLivePrice] = useState<number>(3878.46);
+  const [livePrice, setLivePrice] = useState<number>(3620.00);
   const [priceFlash, setPriceFlash] = useState<'up' | 'down' | null>(null);
   const [activePositions, setActivePositions] = useState<OpenPosition[]>(() => {
     const saved = localStorage.getItem('mullah_active_positions');
