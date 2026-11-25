@@ -13,6 +13,16 @@ interface StrategyBacktesterProps {
   currentPrice: number;
 }
 
+type SessionBucket = 'Asian' | 'London' | 'LDN/NY Overlap' | 'New York';
+
+interface SessionStat {
+  session: SessionBucket;
+  trades: number;
+  wins: number;
+  winRate: number;
+  netPnl: number;
+}
+
 interface BacktestTradeLog {
   index: number;
   direction: 'BUY' | 'SELL';
@@ -23,9 +33,11 @@ interface BacktestTradeLog {
   outcome: 'WIN' | 'LOSS';
   pnlDollars: number;
   timeLabel: string;
+  session: SessionBucket;
 }
 
 interface BacktestResult {
+  strategyKey: 'trend' | 'breakout' | 'meanrevert' | 'momentum';
   strategyName: string;
   timeframe: string;
   barsEvaluated: number;
@@ -41,6 +53,10 @@ interface BacktestResult {
   profitFactor: number;
   maxDrawdown: number;
   sharpeRatio: number;
+  expectancyPerTrade: number;
+  maxConsecutiveWins: number;
+  maxConsecutiveLosses: number;
+  sessionStats: SessionStat[];
   equityCurve: number[];
   recentTrades: BacktestTradeLog[];
   aiAnalysis: {
@@ -49,6 +65,14 @@ interface BacktestResult {
     primaryRisk: string;
     recommendedSettings: string;
   };
+}
+
+function classifyUtcSession(unixSec: number): SessionBucket {
+  const hour = new Date((unixSec || 0) * 1000).getUTCHours();
+  if (hour >= 7 && hour < 13) return 'London';
+  if (hour >= 13 && hour < 17) return 'LDN/NY Overlap';
+  if (hour >= 17 && hour < 22) return 'New York';
+  return 'Asian';
 }
 
 function calcRsiSeries(closes: number[], period = 14): number[] {
@@ -203,6 +227,7 @@ function runHistoricalCandleBacktest(
       }
       capital += pnl;
       tradeReturns.push(rMultiple * riskPct);
+      const session = classifyUtcSession(c.time);
       tradeLogs.push({
         index: tradeLogs.length + 1,
         direction: signalDir,
@@ -213,6 +238,7 @@ function runHistoricalCandleBacktest(
         outcome,
         pnlDollars: pnl,
         timeLabel: c.timeLabel || `Bar ${i}`,
+        session,
       });
       equity.push(Math.round(capital));
       if (capital > peak) peak = capital;
@@ -248,11 +274,47 @@ function runHistoricalCandleBacktest(
       outcome,
       pnlDollars: pnl,
       timeLabel: c.timeLabel || `Bar ${i}`,
+      session: classifyUtcSession(c.time),
     });
 
     // Advance past resolved exit bar so trades don't overlap identically
     i = exitBarIdx + 1;
   }
+
+  let curWinStreak = 0;
+  let curLossStreak = 0;
+  let maxConsecutiveWins = 0;
+  let maxConsecutiveLosses = 0;
+  const sessionMap = new Map<SessionBucket, { trades: number; wins: number; netPnl: number }>([
+    ['Asian', { trades: 0, wins: 0, netPnl: 0 }],
+    ['London', { trades: 0, wins: 0, netPnl: 0 }],
+    ['LDN/NY Overlap', { trades: 0, wins: 0, netPnl: 0 }],
+    ['New York', { trades: 0, wins: 0, netPnl: 0 }],
+  ]);
+
+  for (const t of tradeLogs) {
+    if (t.outcome === 'WIN') {
+      curWinStreak++;
+      curLossStreak = 0;
+      if (curWinStreak > maxConsecutiveWins) maxConsecutiveWins = curWinStreak;
+    } else {
+      curLossStreak++;
+      curWinStreak = 0;
+      if (curLossStreak > maxConsecutiveLosses) maxConsecutiveLosses = curLossStreak;
+    }
+    const bucket = sessionMap.get(t.session)!;
+    bucket.trades += 1;
+    if (t.outcome === 'WIN') bucket.wins += 1;
+    bucket.netPnl = Math.round((bucket.netPnl + t.pnlDollars) * 100) / 100;
+  }
+
+  const sessionStats: SessionStat[] = Array.from(sessionMap.entries()).map(([session, s]) => ({
+    session,
+    trades: s.trades,
+    wins: s.wins,
+    winRate: s.trades > 0 ? Math.round((s.wins / s.trades) * 100) : 0,
+    netPnl: s.netPnl,
+  }));
 
   const totalTrades = wins + losses;
   const netProfit = Number((capital - 10000).toFixed(2));
@@ -268,7 +330,10 @@ function runHistoricalCandleBacktest(
   const stdDev = Math.sqrt(variance) || 1;
   const sharpe = totalTrades > 0 ? Number(((meanRet / stdDev) * Math.sqrt(Math.min(252, totalTrades))).toFixed(2)) : 0;
 
+  const expectancyPerTrade = totalTrades > 0 ? Math.round((netProfit / totalTrades) * 100) / 100 : 0;
+
   return {
+    strategyKey: strat,
     strategyName: stratTitle,
     timeframe: tf,
     barsEvaluated: enriched.length,
@@ -284,6 +349,10 @@ function runHistoricalCandleBacktest(
     profitFactor,
     maxDrawdown: Number(maxDd.toFixed(1)),
     sharpeRatio: sharpe,
+    expectancyPerTrade,
+    maxConsecutiveWins,
+    maxConsecutiveLosses,
+    sessionStats,
     equityCurve: equity,
     recentTrades: tradeLogs.slice(-8).reverse(),
     aiAnalysis: {
@@ -319,45 +388,35 @@ export const StrategyBacktester: React.FC<StrategyBacktesterProps> = ({
   const [targetRr, setTargetRr] = useState<'1:1.5' | '1:2.0' | '1:2.5' | '1:3.0' | '1:4.0' | '1:5.0'>('1:2.0');
   const [riskPerTrade, setRiskPerTrade] = useState<number>(1.5);
   const [isRunning, setIsRunning] = useState<boolean>(false);
+  const [isOptimizing, setIsOptimizing] = useState<boolean>(false);
+  const [optimizerSummary, setOptimizerSummary] = useState<string | null>(null);
   const [result, setResult] = useState<BacktestResult | null>(null);
 
-  const executeHistoricalBacktest = useCallback(async () => {
-    setIsRunning(true);
+  const fetchCandlesForBacktest = useCallback(async (): Promise<{ candles: Candle[]; source: 'LIVE_OHLCV' | 'SYNTHETIC_FALLBACK' }> => {
     try {
       const res = await fetch(
         `/api/stocks/history?ticker=${encodeURIComponent(currentTicker)}&timeframe=${encodeURIComponent(timeframe)}`
       );
       const data = res.ok ? await res.json() : null;
       if (data?.success && Array.isArray(data.candles) && data.candles.length >= 25) {
-        const computed = runHistoricalCandleBacktest(
-          currentTicker,
-          data.candles,
-          'LIVE_OHLCV',
-          strategy,
-          timeframe,
-          targetRr,
-          riskPerTrade
-        );
-        setResult(computed);
-      } else {
-        const fallback = generateCandles(currentTicker, currentPrice || 100, 0, timeframe as Timeframe);
-        const computed = runHistoricalCandleBacktest(
-          currentTicker,
-          fallback,
-          'SYNTHETIC_FALLBACK',
-          strategy,
-          timeframe,
-          targetRr,
-          riskPerTrade
-        );
-        setResult(computed);
+        return { candles: data.candles, source: 'LIVE_OHLCV' };
       }
-    } catch {
-      const fallback = generateCandles(currentTicker, currentPrice || 100, 0, timeframe as Timeframe);
+    } catch {}
+    return {
+      candles: generateCandles(currentTicker, currentPrice || 100, 0, timeframe as Timeframe),
+      source: 'SYNTHETIC_FALLBACK',
+    };
+  }, [currentTicker, currentPrice, timeframe]);
+
+  const executeHistoricalBacktest = useCallback(async () => {
+    setIsRunning(true);
+    setOptimizerSummary(null);
+    try {
+      const { candles, source } = await fetchCandlesForBacktest();
       const computed = runHistoricalCandleBacktest(
         currentTicker,
-        fallback,
-        'SYNTHETIC_FALLBACK',
+        candles,
+        source,
         strategy,
         timeframe,
         targetRr,
@@ -367,7 +426,34 @@ export const StrategyBacktester: React.FC<StrategyBacktesterProps> = ({
     } finally {
       setIsRunning(false);
     }
-  }, [currentTicker, currentPrice, strategy, timeframe, targetRr, riskPerTrade]);
+  }, [currentTicker, strategy, timeframe, targetRr, riskPerTrade, fetchCandlesForBacktest]);
+
+  const executeStrategyOptimizer = useCallback(async () => {
+    setIsOptimizing(true);
+    try {
+      const { candles, source } = await fetchCandlesForBacktest();
+      const allStrats: Array<'trend' | 'breakout' | 'meanrevert' | 'momentum'> = [
+        'trend',
+        'breakout',
+        'meanrevert',
+        'momentum',
+      ];
+      const candidates = allStrats.map((s) =>
+        runHistoricalCandleBacktest(currentTicker, candles, source, s, timeframe, targetRr, riskPerTrade)
+      );
+      candidates.sort((a, b) => b.netProfit - a.netProfit || b.winRate - a.winRate);
+      const winner = candidates[0];
+      if (winner) {
+        setStrategy(winner.strategyKey);
+        setResult(winner);
+        setOptimizerSummary(
+          `Best Edge Selected: ${winner.strategyName} (${winner.returnPercent >= 0 ? '+' : ''}${winner.returnPercent}% | ${winner.winRate}% Win Rate across ${winner.totalTrades} trades)`
+        );
+      }
+    } finally {
+      setIsOptimizing(false);
+    }
+  }, [currentTicker, timeframe, targetRr, riskPerTrade, fetchCandlesForBacktest]);
 
   // Auto-run when ticker changes so metrics always belong to the active chart
   useEffect(() => {
@@ -424,15 +510,33 @@ export const StrategyBacktester: React.FC<StrategyBacktesterProps> = ({
           </div>
         </div>
 
-        <button
-          onClick={executeHistoricalBacktest}
-          disabled={isRunning}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-[#070b13] font-bold text-xs shadow-lg shadow-emerald-500/20 transition-all cursor-pointer disabled:opacity-50 self-start sm:self-auto"
-        >
-          <Play className="w-3.5 h-3.5 fill-current" />
-          {isRunning ? 'Backtesting Candles...' : 'Run Historical Backtest'}
-        </button>
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={executeStrategyOptimizer}
+            disabled={isRunning || isOptimizing}
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#101c31] hover:bg-[#162744] border border-teal-500/40 text-[#0df2c9] font-semibold text-xs transition-all cursor-pointer disabled:opacity-50"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            {isOptimizing ? 'Scanning Strategies...' : 'Auto-Find Best Edge'}
+          </button>
+
+          <button
+            onClick={executeHistoricalBacktest}
+            disabled={isRunning || isOptimizing}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-[#070b13] font-bold text-xs shadow-lg shadow-emerald-500/20 transition-all cursor-pointer disabled:opacity-50"
+          >
+            <Play className="w-3.5 h-3.5 fill-current" />
+            {isRunning ? 'Backtesting Candles...' : 'Run Historical Backtest'}
+          </button>
+        </div>
       </div>
+
+      {optimizerSummary && (
+        <div className="px-3.5 py-2 rounded-xl bg-teal-950/35 border border-teal-500/40 text-[#0df2c9] text-xs font-mono">
+          {optimizerSummary}
+        </div>
+      )}
 
       {/* Control Parameters Bar */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 p-3.5 rounded-xl bg-[#0d1627] border border-[#182744] text-xs">
@@ -600,6 +704,51 @@ export const StrategyBacktester: React.FC<StrategyBacktesterProps> = ({
                   strokeLinecap="round"
                 />
               </svg>
+            </div>
+          </div>
+
+          {/* Session Analytics & Streak Health */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <div className="p-3.5 rounded-xl bg-[#0c1424] border border-[#182744] space-y-2">
+              <span className="text-[11px] font-bold text-white uppercase tracking-wider block">
+                Expectancy &amp; Streaks
+              </span>
+              <div className="grid grid-cols-3 gap-2 text-xs font-mono tabular-nums pt-1">
+                <div className="p-2 rounded-lg bg-[#080f1d] border border-[#142036]">
+                  <span className="text-[10px] text-slate-400 block">Expectancy</span>
+                  <span className={`font-bold ${result.expectancyPerTrade >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {result.expectancyPerTrade >= 0 ? '+' : '-'}${Math.abs(result.expectancyPerTrade)}
+                  </span>
+                </div>
+                <div className="p-2 rounded-lg bg-[#080f1d] border border-[#142036]">
+                  <span className="text-[10px] text-slate-400 block">Max Win Strk</span>
+                  <span className="font-bold text-emerald-300">{result.maxConsecutiveWins}W</span>
+                </div>
+                <div className="p-2 rounded-lg bg-[#080f1d] border border-[#142036]">
+                  <span className="text-[10px] text-slate-400 block">Max Loss Strk</span>
+                  <span className="font-bold text-rose-300">{result.maxConsecutiveLosses}L</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="lg:col-span-2 p-3.5 rounded-xl bg-[#0c1424] border border-[#182744] space-y-2">
+              <span className="text-[11px] font-bold text-white uppercase tracking-wider block">
+                Session Performance Breakdown (UTC)
+              </span>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono tabular-nums">
+                {result.sessionStats.map((s) => (
+                  <div key={s.session} className="p-2 rounded-lg bg-[#080f1d] border border-[#142036]">
+                    <span className="text-[10px] text-slate-400 block truncate">{s.session}</span>
+                    <div className="flex items-baseline justify-between mt-0.5">
+                      <span className="font-bold text-white">{s.winRate}%</span>
+                      <span className={`text-[11px] font-bold ${s.netPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {s.netPnl >= 0 ? `+$${s.netPnl}` : `-$${Math.abs(s.netPnl)}`}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-slate-500">{s.trades} trades</span>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
 

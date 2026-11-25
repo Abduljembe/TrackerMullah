@@ -19,6 +19,7 @@ import {
   isAutoOpenOnSignalEnabled,
   AUTO_SIGNAL_PAPER_TOGGLE_EVENT,
 } from '../../utils/paperTradeManager.ts';
+import { WealthProfitBridgeCard } from './WealthProfitBridgeCard.tsx';
 
 interface TradingJournalDeskProps {
   currentTicker?: string;
@@ -882,6 +883,9 @@ export const TradingJournalDesk: React.FC<TradingJournalDeskProps> = ({ currentT
           </div>
         )}
       </div>
+
+      {/* Trading Profits -> Real Wealth Bridge */}
+      <WealthProfitBridgeCard compact />
     </div>
   );
 };

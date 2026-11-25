@@ -2325,6 +2325,261 @@ app.post('/api/ea/close-all', (_req, res) => {
   });
 });
 
+// ============================================================================
+// 24/7 BACKGROUND EXECUTION DAEMON & SECURE ALERT RELAY
+// ============================================================================
+interface DaemonClosedTrade {
+  id: string;
+  ticket: number;
+  symbol: string;
+  type: 'BUY' | 'SELL';
+  lots: number;
+  openPrice: number;
+  closePrice: number;
+  pnl: number;
+  reason: 'TP_HIT' | 'SL_HIT';
+  closedAt: string;
+}
+
+const daemonClosedTrades: DaemonClosedTrade[] = [];
+let daemonTicksProcessed = 0;
+let daemonLastRunAt: string | null = null;
+let daemonAlertsConfig: { telegramToken?: string; telegramChatId?: string; discordWebhook?: string } = {};
+
+function getDaemonContractMultiplier(symbol: string, lots: number): number {
+  const clean = symbol.replace('/', '').replace('_', '').toUpperCase();
+  if (clean.includes('XAU')) return 100 * lots;
+  if (clean.includes('XAG')) return 5000 * lots;
+  if (
+    clean.includes('NAS') ||
+    clean.includes('US30') ||
+    clean.includes('US500') ||
+    clean.includes('GER40') ||
+    clean.includes('TECH') ||
+    clean.includes('WALLST') ||
+    clean.includes('BTC') ||
+    clean.includes('ETH') ||
+    clean.includes('SOL') ||
+    clean.includes('XRP') ||
+    clean.includes('LTC') ||
+    clean.includes('DOGE') ||
+    clean.includes('ADA') ||
+    clean.includes('BNB') ||
+    clean.startsWith('R') ||
+    clean.includes('HZ') ||
+    clean.includes('BOOM') ||
+    clean.includes('CRASH') ||
+    clean.includes('STP') ||
+    clean.includes('JD') ||
+    clean.includes('RB')
+  ) {
+    return 1.0 * lots;
+  }
+  return 100000 * lots;
+}
+
+async function dispatchAllowedExternalAlert(params: {
+  message: string;
+  telegramToken?: string;
+  telegramChatId?: string;
+  discordWebhook?: string;
+}): Promise<{ telegramSent: boolean; discordSent: boolean }> {
+  let telegramSent = false;
+  let discordSent = false;
+  const text = String(params.message || '').trim().slice(0, 3500);
+  if (!text) return { telegramSent, discordSent };
+
+  const tgToken = String(params.telegramToken || '').trim();
+  const tgChatId = String(params.telegramChatId || '').trim();
+  if (tgToken && tgChatId && /^\d{6,15}:[A-Za-z0-9_-]{20,80}$/.test(tgToken) && /^-?[A-Za-z0-9_@]{3,64}$/.test(tgChatId)) {
+    try {
+      const tgResp = await fetch(`https://api.telegram.org/bot${encodeURIComponent(tgToken)}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: tgChatId,
+          text,
+          parse_mode: 'Markdown',
+        }),
+        signal: AbortSignal.timeout(4000),
+      });
+      telegramSent = tgResp.ok;
+    } catch {
+      telegramSent = false;
+    }
+  }
+
+  const webhookRaw = String(params.discordWebhook || '').trim();
+  if (webhookRaw) {
+    try {
+      const parsed = new URL(webhookRaw);
+      const isAllowedHost =
+        parsed.protocol === 'https:' &&
+        (parsed.hostname === 'discord.com' || parsed.hostname === 'discordapp.com') &&
+        parsed.pathname.startsWith('/api/webhooks/');
+      if (isAllowedHost) {
+        const dResp = await fetch(parsed.toString(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: text }),
+          signal: AbortSignal.timeout(4000),
+        });
+        discordSent = dResp.ok;
+      }
+    } catch {
+      discordSent = false;
+    }
+  }
+
+  return { telegramSent, discordSent };
+}
+
+// 24/7 background server loop: monitors open server positions against real-time quotes
+setInterval(async () => {
+  if (!botState.isRunning || botState.circuitBreakerTripped) return;
+  daemonLastRunAt = new Date().toISOString();
+  daemonTicksProcessed++;
+
+  if (botState.activePositions.length === 0) return;
+
+  try {
+    const liveQuotes = await fetchLiveTradingViewQuotes();
+    const remaining: typeof botState.activePositions = [];
+
+    for (const pos of botState.activePositions) {
+      if (!isServerMarketOpen(pos.symbol)) {
+        remaining.push(pos);
+        continue;
+      }
+      const clean = pos.symbol.replace('/', '').replace('_', '').toUpperCase();
+      const q = liveQuotes[clean] || liveQuotes[pos.symbol] || liveQuotes[`OANDA:${clean}`] || liveQuotes[`FX:${clean}`];
+      if (!q || !(q.price > 0)) {
+        remaining.push(pos);
+        continue;
+      }
+
+      const mult = getDaemonContractMultiplier(pos.symbol, pos.lots);
+      const diff = pos.type === 'BUY' ? q.price - pos.openPrice : pos.openPrice - q.price;
+      const livePnl = Math.round(diff * mult * 100) / 100;
+
+      const slHit = pos.sl > 0 && (pos.type === 'BUY' ? q.price <= pos.sl : q.price >= pos.sl);
+      const tpHit = pos.tp > 0 && (pos.type === 'BUY' ? q.price >= pos.tp : q.price <= pos.tp);
+
+      if (slHit || tpHit) {
+        const closePrice = tpHit ? pos.tp : pos.sl;
+        const closeDiff = pos.type === 'BUY' ? closePrice - pos.openPrice : pos.openPrice - closePrice;
+        const realizedPnl = Math.round(closeDiff * mult * 100) / 100;
+        botState.dailyStats.realizedPnl = Math.round((botState.dailyStats.realizedPnl + realizedPnl) * 100) / 100;
+        botState.dailyStats.tradesCount += 1;
+        if (realizedPnl >= 0) botState.dailyStats.winningTrades += 1;
+
+        const closedEntry: DaemonClosedTrade = {
+          id: `srv-close-${pos.ticket}-${Date.now()}`,
+          ticket: pos.ticket,
+          symbol: pos.symbol,
+          type: pos.type,
+          lots: pos.lots,
+          openPrice: pos.openPrice,
+          closePrice,
+          pnl: realizedPnl,
+          reason: tpHit ? 'TP_HIT' : 'SL_HIT',
+          closedAt: new Date().toISOString(),
+        };
+        daemonClosedTrades.unshift(closedEntry);
+        if (daemonClosedTrades.length > 100) daemonClosedTrades.length = 100;
+
+        if (daemonAlertsConfig.telegramToken || daemonAlertsConfig.discordWebhook) {
+          dispatchAllowedExternalAlert({
+            ...daemonAlertsConfig,
+            message: `*24/7 ENGINE ${tpHit ? 'TP HIT' : 'SL HIT'}*\n${pos.symbol} ${pos.type} (${pos.lots} lots)\nClose: \`${closePrice}\` | PnL: *${realizedPnl >= 0 ? '+' : ''}$${realizedPnl}*`,
+          }).catch(() => {});
+        }
+        continue;
+      }
+
+      // Break-even protection at +1.5R
+      let nextSl = pos.sl;
+      if (botState.breakEvenEnabled && diff > 0) {
+        const riskDist = Math.abs(pos.openPrice - pos.sl);
+        if (riskDist > 0 && diff >= riskDist * 1.5) {
+          const buffer = pos.openPrice * 0.0002;
+          if (pos.type === 'BUY' && pos.sl < pos.openPrice) {
+            nextSl = Number((pos.openPrice + buffer).toFixed(pos.openPrice > 100 ? 2 : 4));
+          } else if (pos.type === 'SELL' && pos.sl > pos.openPrice) {
+            nextSl = Number((pos.openPrice - buffer).toFixed(pos.openPrice > 100 ? 2 : 4));
+          }
+        }
+      }
+
+      remaining.push({
+        ...pos,
+        currentPrice: q.price,
+        sl: nextSl,
+        pnl: livePnl,
+      });
+    }
+
+    botState.activePositions = remaining;
+    const sumFloating = botState.activePositions.reduce((acc, p) => acc + p.pnl, 0);
+    if (botState.dailyStats.realizedPnl + sumFloating <= -botState.maxDailyLoss) {
+      botState.circuitBreakerTripped = true;
+      botState.isRunning = false;
+      botState.lastCommand = 'STOP';
+    }
+  } catch {
+    // Ignore transient feed hiccup inside background daemon
+  }
+}, 5000);
+
+app.get('/api/ea/daemon-status', (_req, res) => {
+  return res.json({
+    success: true,
+    isRunning: botState.isRunning,
+    circuitBreakerTripped: botState.circuitBreakerTripped,
+    ticksProcessed: daemonTicksProcessed,
+    lastRunAt: daemonLastRunAt,
+    activePositionsCount: botState.activePositions.length,
+    closedTrades: daemonClosedTrades.slice(0, 30),
+    dailyStats: botState.dailyStats,
+  });
+});
+
+app.post('/api/ea/daemon-sync', (req, res) => {
+  const { telegramToken, telegramChatId, discordWebhook } = req.body || {};
+  if (typeof telegramToken === 'string') daemonAlertsConfig.telegramToken = telegramToken.trim();
+  if (typeof telegramChatId === 'string') daemonAlertsConfig.telegramChatId = telegramChatId.trim();
+  if (typeof discordWebhook === 'string') daemonAlertsConfig.discordWebhook = discordWebhook.trim();
+
+  return res.json({
+    success: true,
+    isRunning: botState.isRunning,
+    ticksProcessed: daemonTicksProcessed,
+    lastRunAt: daemonLastRunAt,
+    closedTrades: daemonClosedTrades.slice(0, 30),
+  });
+});
+
+app.post('/api/alerts/dispatch', async (req, res) => {
+  try {
+    const { message, telegramToken, telegramChatId, discordWebhook } = req.body || {};
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ success: false, error: 'Alert message is required' });
+    }
+    const result = await dispatchAllowedExternalAlert({
+      message,
+      telegramToken,
+      telegramChatId,
+      discordWebhook,
+    });
+    return res.json({
+      success: result.telegramSent || result.discordSent,
+      ...result,
+    });
+  } catch {
+    return res.status(500).json({ success: false, error: 'Failed to dispatch alert' });
+  }
+});
+
 // Endpoint 1: Stock & Forex deep analysis with trading signals, news & technical indicators
 app.post('/api/stocks/analyze', async (req, res) => {
   try {

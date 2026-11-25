@@ -14,6 +14,11 @@ import {
 } from '../../utils/paperTradeManager.ts';
 import { fetchSharedCalendarEvents } from '../../utils/newsGuard.ts';
 import { useFinance } from '../../context/FinanceContext.tsx';
+import {
+  getSavedAlertChannels,
+  relayExternalAlert,
+  sendBrowserPushNotification,
+} from '../../utils/alertDispatcher.ts';
 
 interface ToastItem {
   toastId: string;
@@ -134,9 +139,12 @@ export const GlobalSignalToast: React.FC = () => {
           const minsAway = Math.round((evMs - now) / 60000);
           if (minsAway > 0 && minsAway <= 15 && !warnedNewsIdsRef.current.has(ev.id)) {
             warnedNewsIdsRef.current.add(ev.id);
-            emitMullahProactiveSpeech(
-              `Macro news alert: High impact ${ev.currency} ${ev.title} releases in ${minsAway} minute${minsAway === 1 ? '' : 's'}. Exercise caution on related pairs.`
-            );
+            const newsAlertText = `Macro news alert: High impact ${ev.currency} ${ev.title} releases in ${minsAway} minute${minsAway === 1 ? '' : 's'}. Exercise caution on related pairs.`;
+            emitMullahProactiveSpeech(newsAlertText);
+            sendBrowserPushNotification('High-Impact Macro Alert', newsAlertText);
+            if (getSavedAlertChannels().autoBroadcast) {
+              relayExternalAlert({ message: `*HIGH-IMPACT NEWS (${minsAway}m)*\n${ev.currency}: ${ev.title}` });
+            }
             break;
           }
         }
@@ -187,11 +195,17 @@ export const GlobalSignalToast: React.FC = () => {
         outcomeText: detail.realizedR >= 0 ? `+${detail.realizedR}R` : `${detail.realizedR}R`,
       });
 
-      emitMullahProactiveSpeech(
-        isWin
-          ? `Signal update: ${detail.symbol} ${detail.direction} hit ${isTp2 ? 'target two' : 'target one'} at ${priceText}, locking in ${detail.realizedR} R.`
-          : `Signal alert: ${detail.symbol} ${detail.direction} stopped out at ${priceText}.`
-      );
+      const speechMsg = isWin
+        ? `Signal update: ${detail.symbol} ${detail.direction} hit ${isTp2 ? 'target two' : 'target one'} at ${priceText}, locking in ${detail.realizedR} R.`
+        : `Signal alert: ${detail.symbol} ${detail.direction} stopped out at ${priceText}.`;
+
+      emitMullahProactiveSpeech(speechMsg);
+      sendBrowserPushNotification(`${detail.symbol} ${badgeText}`, `${detail.direction} @ ${priceText} (${detail.realizedR >= 0 ? '+' : ''}${detail.realizedR}R)`);
+      if (getSavedAlertChannels().autoBroadcast) {
+        relayExternalAlert({
+          message: `*${badgeText}*: #${detail.symbol.replace('/', '')} (${detail.timeframe})\n${detail.direction} @ \`${priceText}\` | Result: *${detail.realizedR >= 0 ? '+' : ''}${detail.realizedR}R*`,
+        });
+      }
     };
 
     const onPaperTradeEvent = (evt: Event) => {
@@ -201,13 +215,16 @@ export const GlobalSignalToast: React.FC = () => {
       const isWin = isOpened || detail.realizedPnl >= 0;
       const isTp2 = detail.eventType === 'TP_HIT';
       const badgeText = isOpened
-        ? 'SIGNAL → PAPER OPENED'
+        ? 'SIGNAL -> PAPER OPENED'
         : detail.eventType === 'TP1_BREAKEVEN'
         ? '50% TP1 + BE LOCKED'
         : detail.eventType === 'TP_HIT'
         ? 'PAPER TP FILLED'
         : 'PAPER SL FILLED';
       const priceText = detail.exitPrice < 10 ? detail.exitPrice.toFixed(5) : detail.exitPrice.toFixed(2);
+      const outcomeText = isOpened
+        ? detail.strategy || 'Tracked in Journal'
+        : `${detail.realizedPnl >= 0 ? '+' : ''}$${detail.realizedPnl}`;
 
       pushToast({
         toastId: `paper-${detail.id}-${detail.eventType}-${Date.now()}`,
@@ -218,10 +235,15 @@ export const GlobalSignalToast: React.FC = () => {
         isWin,
         isTp2,
         priceText,
-        outcomeText: isOpened
-          ? detail.strategy || 'Tracked in Journal'
-          : `${detail.realizedPnl >= 0 ? '+' : ''}$${detail.realizedPnl}`,
+        outcomeText,
       });
+
+      sendBrowserPushNotification(`${detail.ticker} ${badgeText}`, `${detail.direction} @ ${priceText} · ${outcomeText}`);
+      if (getSavedAlertChannels().autoBroadcast) {
+        relayExternalAlert({
+          message: `*${badgeText}*: #${detail.ticker.replace('/', '')}\n${detail.direction} @ \`${priceText}\` | ${outcomeText}`,
+        });
+      }
     };
 
     window.addEventListener(SIGNAL_HIT_ALERT_EVENT, onSignalHit);

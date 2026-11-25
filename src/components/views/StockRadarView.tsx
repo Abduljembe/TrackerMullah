@@ -89,7 +89,12 @@ import {
 } from '../common/TradingToolsHubDrawer.tsx';
 import { generateCandles, enrichCandlesWithIndicators, computePeriodStats, Timeframe, Candle } from '../../utils/stockCandles.ts';
 import { getMarketSession, getAssetMarketSession, MarketSessionInfo } from '../../utils/marketHours.ts';
-import { lookupTradingViewQuote, resolveTradingViewPrice, useTradingViewQuotes } from '../../utils/tradingViewSync.ts';
+import {
+  forceRefreshTradingViewQuotes,
+  lookupTradingViewQuote,
+  resolveTradingViewPrice,
+  useTradingViewQuotes,
+} from '../../utils/tradingViewSync.ts';
 import { computeTimeframeSignalLevels, getTimeframeProfile, resolveQuoteForTimeframe, sanitizeRiskRewardString, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
 import { SignalScorecardDesk } from '../common/SignalScorecardDesk.tsx';
 import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../utils/signalScorecard.ts';
@@ -2449,6 +2454,41 @@ Summary: ${sig.summary}`;
   const currentDisplayChangeValue =
     currentTvQuote ? currentTvQuote.changeValue : selectedStock.changeValue;
 
+  // Fast Pro Trading Hotkeys: Shift+B (Buy), Shift+S (Sell), Shift+R (Refresh Quotes)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toUpperCase() || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
+
+      const key = e.key.toUpperCase();
+      if (key === 'B' || key === 'S') {
+        e.preventDefault();
+        const dir = key === 'B' ? 'LONG' : 'SHORT';
+        const price = currentDisplayPrice > 0 ? currentDisplayPrice : selectedStock.currentPrice;
+        const slDist = Math.max(price * 0.004, price < 10 ? 0.0025 : 4.5);
+        const digits = price < 10 ? 5 : 2;
+        setPrefillOrder({
+          direction: dir,
+          lots: 0.1,
+          sl: (dir === 'LONG' ? price - slDist : price + slDist).toFixed(digits),
+          tp: (dir === 'LONG' ? price + slDist * 2.5 : price - slDist * 2.5).toFixed(digits),
+          timestamp: Date.now(),
+        });
+        setBottomTab('paper');
+        setTimeout(() => {
+          document.getElementById('trading-workbench')?.scrollIntoView({ behavior: 'smooth' });
+        }, 40);
+      } else if (key === 'R') {
+        e.preventDefault();
+        forceRefreshTradingViewQuotes();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [currentDisplayPrice, selectedStock.currentPrice]);
+
   const formatPriceVal = (p: number) => {
     if (selectedStock.market === 'FOREX') {
       if (selectedStock.ticker.includes('JPY')) return p.toFixed(3);
@@ -2700,7 +2740,10 @@ Summary: ${sig.summary}`;
             AI Stocks & Forex Radar • Live Signals & Market Charts
           </h1>
           <p className="text-sm text-slate-400 mt-1">
-            Real-time algorithmic trading signals (Buy/Sell, Entry, TP, SL), institutional forex analysis, and interactive TradingView charts.
+            Real-time algorithmic trading signals (Buy/Sell, Entry, TP, SL), institutional forex analysis, and interactive TradingView charts.{' '}
+            <span className="hidden xl:inline text-xs font-mono text-slate-500">
+              Hotkeys: Shift+B Buy · Shift+S Sell · Shift+R Refresh
+            </span>
           </p>
         </div>
 

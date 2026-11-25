@@ -12,7 +12,15 @@ import {
   ExternalLink,
   Smartphone,
   CheckCircle2,
+  Bell,
 } from 'lucide-react';
+import {
+  disableBrowserPush,
+  isBrowserPushEnabled,
+  relayExternalAlert,
+  requestBrowserPushPermission,
+  syncDaemonAlertChannels,
+} from '../../utils/alertDispatcher.ts';
 
 interface SignalPayload {
   symbol: string;
@@ -65,6 +73,7 @@ export const TelegramSignalDispatcher: React.FC<TelegramSignalDispatcherProps> =
   const [autoBroadcast, setAutoBroadcast] = useState<boolean>(() => {
     return localStorage.getItem('mullah_auto_broadcast') === 'true';
   });
+  const [browserPush, setBrowserPush] = useState<boolean>(() => isBrowserPushEnabled());
 
   const [copied, setCopied] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -84,7 +93,25 @@ export const TelegramSignalDispatcher: React.FC<TelegramSignalDispatcherProps> =
 
   useEffect(() => {
     localStorage.setItem('mullah_auto_broadcast', String(autoBroadcast));
-  }, [autoBroadcast]);
+    syncDaemonAlertChannels();
+  }, [autoBroadcast, telegramToken, telegramChatId, discordWebhook]);
+
+  const handleToggleBrowserPush = async () => {
+    if (browserPush) {
+      disableBrowserPush();
+      setBrowserPush(false);
+      return;
+    }
+    const status = await requestBrowserPushPermission();
+    if (status === 'granted') {
+      setBrowserPush(true);
+      setDispatchStatus('Browser push notifications enabled for signal hits, TP/SL fills, and 15m red-folder news alerts.');
+    } else if (status === 'unsupported') {
+      setDispatchStatus('Browser push notifications are not supported on this device/iframe.');
+    } else {
+      setDispatchStatus('Browser notification permission was blocked. Allow notifications in browser site settings.');
+    }
+  };
 
   // Generate formatted Telegram / Discord Markdown
   const formattedMessage = `⚡️ *MULLAHTRACKER INSTITUTIONAL SIGNAL* ⚡️
@@ -116,43 +143,28 @@ ${signal.confluences}
     setDispatchStatus(null);
 
     try {
-      // If Telegram credentials are provided, attempt real Bot API call
-      if (telegramToken && telegramChatId) {
-        try {
-          await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: telegramChatId,
-              text: formattedMessage,
-              parse_mode: 'Markdown',
-            }),
-          });
-        } catch (e) {
-          console.warn('Direct client telegram dispatch exception:', e);
+      await syncDaemonAlertChannels();
+      if (telegramToken || discordWebhook) {
+        const res = await relayExternalAlert({
+          message: formattedMessage,
+          telegramToken,
+          telegramChatId,
+          discordWebhook,
+        });
+        const channels: string[] = [];
+        if (res.telegramSent) channels.push('Telegram');
+        if (res.discordSent) channels.push('Discord');
+        if (channels.length > 0) {
+          setDispatchStatus(`Broadcast delivered via server relay to ${channels.join(' & ')}.`);
+        } else {
+          setDispatchStatus('Credentials checked — verify your Telegram Bot Token / Chat ID or Discord Webhook URL.');
         }
+      } else {
+        setDispatchStatus('Formatted ticket copied/ready. Add Telegram or Discord credentials to relay live pushes.');
       }
-
-      // If Discord Webhook is provided
-      if (discordWebhook) {
-        try {
-          await fetch(discordWebhook, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              content: formattedMessage,
-            }),
-          });
-        } catch (e) {
-          console.warn('Direct client discord dispatch exception:', e);
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, 600));
-      setDispatchStatus('SUCCESS: Broadcast dispatched to VIP channels & MT5 bridge!');
       if (onDispatched) onDispatched('Telegram & Discord Channels');
     } catch {
-      setDispatchStatus('Simulated dispatch complete: Signal ready for distribution.');
+      setDispatchStatus('Unable to dispatch external alert right now.');
     } finally {
       setIsSending(false);
     }
@@ -270,10 +282,11 @@ ${signal.confluences}
 
             <div className="pt-2 flex items-center justify-between border-t border-[#14233a]">
               <div>
-                <span className="text-white font-bold block">Auto-Broadcast on A+ Scalp Scans</span>
-                <span className="text-[11px] text-slate-500">Automatically broadcast whenever bot scans 90%+ setup</span>
+                <span className="text-white font-bold block">Auto-Broadcast Live Events</span>
+                <span className="text-[11px] text-slate-500">Relay A+ signals, TP/SL hits &amp; 15m red-folder news alerts</span>
               </div>
               <button
+                type="button"
                 onClick={() => setAutoBroadcast(!autoBroadcast)}
                 className={`w-10 h-5 rounded-full transition-colors relative cursor-pointer ${
                   autoBroadcast ? 'bg-teal-500' : 'bg-slate-700'
@@ -282,6 +295,29 @@ ${signal.confluences}
                 <div
                   className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${
                     autoBroadcast ? 'translate-x-5' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="pt-2 flex items-center justify-between border-t border-[#14233a]">
+              <div>
+                <span className="text-white font-bold flex items-center gap-1.5">
+                  <Bell className="w-3.5 h-3.5 text-amber-400" />
+                  Browser Push Notifications
+                </span>
+                <span className="text-[11px] text-slate-500">Show native OS alerts even when minimized</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleToggleBrowserPush}
+                className={`w-10 h-5 rounded-full transition-colors relative cursor-pointer ${
+                  browserPush ? 'bg-emerald-500' : 'bg-slate-700'
+                }`}
+              >
+                <div
+                  className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${
+                    browserPush ? 'translate-x-5' : 'translate-x-1'
                   }`}
                 />
               </button>

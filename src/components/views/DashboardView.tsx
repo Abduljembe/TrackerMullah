@@ -24,6 +24,8 @@ import {
   Flame,
 } from 'lucide-react';
 import { useFinance } from '../../context/FinanceContext.tsx';
+import { MorningBriefingCard } from '../common/MorningBriefingCard.tsx';
+import { WealthProfitBridgeCard } from '../common/WealthProfitBridgeCard.tsx';
 
 export const DashboardView: React.FC = () => {
   const {
@@ -93,6 +95,9 @@ export const DashboardView: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* Executive Morning Briefing Cockpit */}
+      <MorningBriefingCard />
+
       {/* Top Smart Intelligence Banner: Safe to Spend, M-Pesa, Currency Converter, & Badges */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {/* Widget 1: Daily Safe to Spend */}
@@ -576,6 +581,9 @@ export const DashboardView: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Automated Trading Profits to Personal Wealth Bridge */}
+      <WealthProfitBridgeCard />
     </div>
   );
 };

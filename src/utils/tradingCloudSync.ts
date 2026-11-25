@@ -1,4 +1,4 @@
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot, setDoc, Unsubscribe } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase.ts';
 
 export const CLOUD_TRADING_HYDRATED_EVENT = 'mullah-cloud-trading-hydrated';
@@ -11,6 +11,8 @@ const CUSTOM_BOTS_KEY = 'njia_custom_scalping_eas';
 
 let pushTimer: ReturnType<typeof setTimeout> | null = null;
 let lastHydratedUid: string | null = null;
+let activeUnsubscribe: Unsubscribe | null = null;
+let lastPushedUpdatedAt = '';
 
 function readJsonArray<T>(key: string): T[] {
   try {
@@ -38,9 +40,54 @@ function mergeById<T extends { id?: string }>(cloudArr: T[], localArr: T[], limi
   return out;
 }
 
+function applyCloudTradingSnapshot(data: Record<string, unknown>, preferRemote = false): void {
+  if (typeof data.paperBalance === 'number') {
+    if (preferRemote || !localStorage.getItem(PAPER_BALANCE_KEY) || data.paperBalance !== 10000) {
+      localStorage.setItem(PAPER_BALANCE_KEY, String(data.paperBalance));
+    }
+  }
+
+  if (Array.isArray(data.paperPositions)) {
+    const localPos = readJsonArray<Record<string, unknown>>(PAPER_POSITIONS_KEY);
+    const mergedPos = preferRemote
+      ? data.paperPositions.slice(0, 100)
+      : mergeById(data.paperPositions, localPos, 100);
+    localStorage.setItem(PAPER_POSITIONS_KEY, JSON.stringify(mergedPos));
+  }
+
+  if (Array.isArray(data.closedTrades)) {
+    const localTrades = readJsonArray<Record<string, unknown>>(PAPER_TRADES_KEY);
+    const mergedTrades = mergeById(data.closedTrades, localTrades, 200);
+    localStorage.setItem(PAPER_TRADES_KEY, JSON.stringify(mergedTrades));
+  }
+
+  if (Array.isArray(data.trackedSignals)) {
+    const localSigs = readJsonArray<Record<string, unknown>>(SCORECARD_KEY);
+    const mergedSigs = mergeById(data.trackedSignals, localSigs, 120);
+    localStorage.setItem(SCORECARD_KEY, JSON.stringify(mergedSigs));
+  }
+
+  if (Array.isArray(data.customBots)) {
+    const localBots = readJsonArray<Record<string, unknown>>(CUSTOM_BOTS_KEY);
+    const mergedBots = mergeById(data.customBots, localBots, 40);
+    localStorage.setItem(CUSTOM_BOTS_KEY, JSON.stringify(mergedBots));
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(CLOUD_TRADING_HYDRATED_EVENT));
+    window.dispatchEvent(new CustomEvent('mullah-signal-scorecard-updated'));
+    window.dispatchEvent(new CustomEvent('njia-paper-positions-updated'));
+  }
+}
+
 export async function hydrateTradingCloudState(uid: string): Promise<boolean> {
   if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) return false;
-  if (lastHydratedUid === uid) return true;
+  if (lastHydratedUid === uid && activeUnsubscribe) return true;
+
+  if (activeUnsubscribe) {
+    activeUnsubscribe();
+    activeUnsubscribe = null;
+  }
 
   const docPath = `users/${uid}/trading/state`;
   try {
@@ -48,47 +95,27 @@ export async function hydrateTradingCloudState(uid: string): Promise<boolean> {
     const snap = await getDoc(ref);
 
     if (snap.exists()) {
-      const data = snap.data() as Record<string, any>;
-
-      if (typeof data.paperBalance === 'number' && !localStorage.getItem(PAPER_BALANCE_KEY)) {
-        localStorage.setItem(PAPER_BALANCE_KEY, String(data.paperBalance));
-      } else if (typeof data.paperBalance === 'number' && data.paperBalance !== 10000) {
-        localStorage.setItem(PAPER_BALANCE_KEY, String(data.paperBalance));
-      }
-
-      if (Array.isArray(data.paperPositions)) {
-        const localPos = readJsonArray<any>(PAPER_POSITIONS_KEY);
-        const mergedPos = mergeById(data.paperPositions, localPos, 100);
-        localStorage.setItem(PAPER_POSITIONS_KEY, JSON.stringify(mergedPos));
-      }
-
-      if (Array.isArray(data.closedTrades)) {
-        const localTrades = readJsonArray<any>(PAPER_TRADES_KEY);
-        const mergedTrades = mergeById(data.closedTrades, localTrades, 200);
-        localStorage.setItem(PAPER_TRADES_KEY, JSON.stringify(mergedTrades));
-      }
-
-      if (Array.isArray(data.trackedSignals)) {
-        const localSigs = readJsonArray<any>(SCORECARD_KEY);
-        const mergedSigs = mergeById(data.trackedSignals, localSigs, 120);
-        localStorage.setItem(SCORECARD_KEY, JSON.stringify(mergedSigs));
-      }
-
-      if (Array.isArray(data.customBots)) {
-        const localBots = readJsonArray<any>(CUSTOM_BOTS_KEY);
-        const mergedBots = mergeById(data.customBots, localBots, 40);
-        localStorage.setItem(CUSTOM_BOTS_KEY, JSON.stringify(mergedBots));
-      }
-
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent(CLOUD_TRADING_HYDRATED_EVENT));
-        window.dispatchEvent(new CustomEvent('mullah-signal-scorecard-updated'));
-        window.dispatchEvent(new CustomEvent('njia-paper-positions-updated'));
-      }
+      const data = snap.data() as Record<string, unknown>;
+      applyCloudTradingSnapshot(data, false);
     } else {
-      // Seed initial document with current local vault state
       await pushTradingCloudStateNow(uid);
     }
+
+    // Real-time cross-device sync via onSnapshot
+    activeUnsubscribe = onSnapshot(
+      ref,
+      (liveSnap) => {
+        if (!liveSnap.exists() || liveSnap.metadata.hasPendingWrites) return;
+        const liveData = liveSnap.data() as Record<string, unknown>;
+        if (typeof liveData.updatedAt === 'string' && liveData.updatedAt === lastPushedUpdatedAt) {
+          return;
+        }
+        applyCloudTradingSnapshot(liveData, true);
+      },
+      (err) => {
+        handleFirestoreError(err, OperationType.GET, docPath);
+      }
+    );
 
     lastHydratedUid = uid;
     return true;
@@ -106,9 +133,12 @@ export async function pushTradingCloudStateNow(explicitUid?: string): Promise<vo
   const paperBalance = rawBal ? Math.max(0, Number(parseFloat(rawBal) || 10000)) : 10000;
 
   // Strip non-serializable functions from customBots if any exist
-  const customBots = readJsonArray<Record<string, any>>(CUSTOM_BOTS_KEY)
+  const customBots = readJsonArray<Record<string, unknown>>(CUSTOM_BOTS_KEY)
     .slice(0, 40)
     .map(({ generateMql5Code: _fn, ...rest }) => rest);
+
+  const updatedAt = new Date().toISOString().slice(0, 64);
+  lastPushedUpdatedAt = updatedAt;
 
   const payload = {
     uid,
@@ -117,7 +147,7 @@ export async function pushTradingCloudStateNow(explicitUid?: string): Promise<vo
     closedTrades: readJsonArray(PAPER_TRADES_KEY).slice(0, 200),
     trackedSignals: readJsonArray(SCORECARD_KEY).slice(0, 120),
     customBots,
-    updatedAt: new Date().toISOString().slice(0, 64),
+    updatedAt,
   };
 
   try {
@@ -138,6 +168,11 @@ export function scheduleTradingCloudPush(): void {
 
 export function resetTradingCloudSession(): void {
   lastHydratedUid = null;
+  lastPushedUpdatedAt = '';
+  if (activeUnsubscribe) {
+    activeUnsubscribe();
+    activeUnsubscribe = null;
+  }
   if (pushTimer) {
     clearTimeout(pushTimer);
     pushTimer = null;
