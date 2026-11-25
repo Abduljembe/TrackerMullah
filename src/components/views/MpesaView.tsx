@@ -49,6 +49,7 @@ import {
   parseMpesaStatement,
   calculateMpesaSpending,
   generateLocalMpesaAdvice,
+  detectMpesaFlowRole,
 } from '../../utils/mpesaParser.ts';
 import {
   extractTextFromPdf,
@@ -135,11 +136,69 @@ export const MpesaView: React.FC = () => {
   const [tableFilter, setTableFilter] = useState<'ALL' | 'EXPENSE' | 'INCOME' | 'WITHDRAWAL'>('ALL');
   const [searchFilter, setSearchFilter] = useState('');
 
-  // 1. Calculate spending breakdown whenever parsed messages change
+  // 1. Calculate spending breakdown & specialized Broker / SACCO flows whenever parsed messages change
   const spendingBreakdown: MpesaSpendingBreakdown | null = useMemo(() => {
     if (parsedMessages.length === 0) return null;
     return calculateMpesaSpending(parsedMessages);
   }, [parsedMessages]);
+
+  const specializedFlows = useMemo(() => {
+    let brokerDeposits = 0;
+    let brokerWithdrawals = 0;
+    let saccoMmfTransfers = 0;
+    let brokerCount = 0;
+    let wealthCount = 0;
+
+    for (const msg of parsedMessages) {
+      const role = detectMpesaFlowRole(msg);
+      if (role === 'BROKER_DEPOSIT') {
+        brokerDeposits += msg.amount;
+        brokerCount++;
+      } else if (role === 'BROKER_WITHDRAWAL') {
+        brokerWithdrawals += msg.amount;
+        brokerCount++;
+      } else if (role === 'SACCO_MMF') {
+        saccoMmfTransfers += msg.amount;
+        wealthCount++;
+      }
+    }
+
+    return {
+      brokerDeposits,
+      brokerWithdrawals,
+      netBrokerCashflow: brokerWithdrawals - brokerDeposits,
+      saccoMmfTransfers,
+      brokerCount,
+      wealthCount,
+    };
+  }, [parsedMessages]);
+
+  const handlePasteClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text || !text.trim()) {
+        setParseError('Clipboard is empty. Copy one or more Safaricom M-Pesa SMS confirmations first.');
+        return;
+      }
+      setInputText(text);
+      setActiveInputMode('statement');
+      const results = parseMpesaStatement(text);
+      if (results.length > 0) {
+        setParsedMessages((prev) => {
+          const existingCodes = new Set(prev.map((m) => m.refCode));
+          const newItems = results.filter((m) => !existingCodes.has(m.refCode));
+          return [...newItems, ...prev];
+        });
+        setParseError(null);
+        setImportSuccess(`Auto-parsed ${results.length} M-Pesa transaction(s) directly from clipboard.`);
+        setTimeout(() => setImportSuccess(null), 5000);
+      } else {
+        setParseError('Clipboard text pasted below, but no standard Ksh confirmation lines were detected.');
+      }
+    } catch {
+      setParseError('Clipboard read was blocked by the browser. Use Paste inside the text box below.');
+    }
+  };
 
   // 2. Automatically generate local forensic advice or trigger AI audit
   useEffect(() => {
@@ -376,14 +435,28 @@ export const MpesaView: React.FC = () => {
     setTimeout(() => setAuditSuccessNotice(null), 6000);
   };
 
-  // Import all parsed transactions to FinanceContext
+  // Import all parsed transactions to FinanceContext (with refCode deduplication + smart broker/SACCO tagging)
   const handleImportAll = () => {
     if (parsedMessages.length === 0) return;
 
+    let importedRefs: string[] = [];
+    try {
+      const saved = localStorage.getItem('njia_mpesa_imported_refs_v1');
+      if (saved) importedRefs = JSON.parse(saved);
+    } catch {}
+    const refSet = new Set(Array.isArray(importedRefs) ? importedRefs : []);
+
     let expenseCount = 0;
     let incomeCount = 0;
+    let skippedDupes = 0;
 
     parsedMessages.forEach((item) => {
+      if (item.refCode && refSet.has(item.refCode)) {
+        skippedDupes++;
+        return;
+      }
+
+      const role = detectMpesaFlowRole(item);
       const finalAmount =
         currency === 'KES'
           ? item.amount
@@ -396,9 +469,9 @@ export const MpesaView: React.FC = () => {
 
       if (item.type === 'received') {
         addIncome({
-          source: item.counterparty || 'M-Pesa Received',
+          source: role === 'BROKER_WITHDRAWAL' ? `Broker Withdrawal (${item.counterparty})` : item.counterparty || 'M-Pesa Received',
           amount: finalAmount,
-          category: 'Side Hustle',
+          category: role === 'BROKER_WITHDRAWAL' ? 'Dividends' : 'Side Hustle',
           frequency: 'one-time',
           date: item.date,
           paymentMethod: 'M-Pesa',
@@ -409,16 +482,22 @@ export const MpesaView: React.FC = () => {
         addExpense({
           title: item.counterparty || 'M-Pesa Payment',
           amount: finalAmount,
-          category: item.suggestedCategory,
+          category: role === 'BROKER_DEPOSIT' || role === 'SACCO_MMF' ? 'Other' : item.suggestedCategory,
           date: item.date,
           paymentMethod: 'M-Pesa',
           isRecurring: false,
-          notes: `Imported via M-Pesa ref: ${item.refCode} at ${item.time}${item.fee ? ` (Fee: KSh ${item.fee})` : ''}${fxNote}`,
+          notes: `Imported via M-Pesa ref: ${item.refCode} at ${item.time}${role === 'BROKER_DEPOSIT' ? ' [Broker Deposit]' : role === 'SACCO_MMF' ? ' [SACCO/MMF]' : ''}${item.fee ? ` (Fee: KSh ${item.fee})` : ''}${fxNote}`,
           mpesaRef: item.refCode,
         });
         expenseCount++;
       }
+
+      if (item.refCode) refSet.add(item.refCode);
     });
+
+    try {
+      localStorage.setItem('njia_mpesa_imported_refs_v1', JSON.stringify(Array.from(refSet).slice(-1000)));
+    } catch {}
 
     confetti({
       particleCount: 85,
@@ -426,7 +505,9 @@ export const MpesaView: React.FC = () => {
       origin: { y: 0.6 },
     });
 
-    setImportSuccess(`Imported ${expenseCount} expense(s) and ${incomeCount} income stream(s) into your personal tracker!`);
+    setImportSuccess(
+      `Imported ${expenseCount} expense(s) and ${incomeCount} income stream(s) into your ledger${skippedDupes > 0 ? ` (${skippedDupes} duplicate ref skipped)` : ''}!`
+    );
     setTimeout(() => setImportSuccess(null), 5000);
   };
 
@@ -545,6 +626,15 @@ ${aiAdvice.emergencyFundRecommendation.rationale}
           </button>
 
           <button
+            onClick={handlePasteClipboard}
+            className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-[#13233c] hover:bg-[#1a3052] border border-[#233a5f] text-cyan-300 text-xs font-semibold transition-all shadow-sm cursor-pointer"
+            title="Paste Safaricom M-Pesa SMS batch directly from clipboard"
+          >
+            <Copy className="w-4 h-4 text-cyan-400" />
+            <span>Paste SMS Clipboard</span>
+          </button>
+
+          <button
             onClick={() => setIsImporterOpen(true)}
             className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-teal-500 to-emerald-500 hover:from-teal-400 hover:to-emerald-400 text-[#070b13] font-bold text-xs shadow-lg shadow-teal-500/20 transition-all cursor-pointer"
           >
@@ -563,6 +653,34 @@ ${aiAdvice.emergencyFundRecommendation.rationale}
           )}
         </div>
       </div>
+
+      {parsedMessages.length > 0 && (specializedFlows.brokerCount > 0 || specializedFlows.wealthCount > 0) && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="p-4 rounded-2xl bg-[#0b1220] border border-[#18263e]">
+            <div className="text-xs text-slate-400">Detected Broker Deposits</div>
+            <div className="text-lg font-bold font-mono tabular-nums text-amber-400 mt-1">
+              KSh {specializedFlows.brokerDeposits.toLocaleString()}
+            </div>
+            <div className="text-[11px] text-slate-500 mt-0.5">Auto-tagged Exness / Deriv / XM / Skrill transfers</div>
+          </div>
+          <div className="p-4 rounded-2xl bg-[#0b1220] border border-[#18263e]">
+            <div className="text-xs text-slate-400">Detected Broker Withdrawals</div>
+            <div className="text-lg font-bold font-mono tabular-nums text-emerald-400 mt-1">
+              KSh {specializedFlows.brokerWithdrawals.toLocaleString()}
+            </div>
+            <div className="text-[11px] text-slate-500 mt-0.5">
+              Net broker cashflow: {specializedFlows.netBrokerCashflow >= 0 ? '+' : ''}KSh {specializedFlows.netBrokerCashflow.toLocaleString()}
+            </div>
+          </div>
+          <div className="p-4 rounded-2xl bg-[#0b1220] border border-[#18263e]">
+            <div className="text-xs text-slate-400">SACCO / MMF / Chama Transfers</div>
+            <div className="text-lg font-bold font-mono tabular-nums text-[#0df2c9] mt-1">
+              KSh {specializedFlows.saccoMmfTransfers.toLocaleString()}
+            </div>
+            <div className="text-[11px] text-slate-500 mt-0.5">{specializedFlows.wealthCount} wealth transfer(s) identified</div>
+          </div>
+        </div>
+      )}
 
       <StatementImporterModal
         isOpen={isImporterOpen}

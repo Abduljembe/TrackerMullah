@@ -41,6 +41,8 @@ import { CentralBankCarryDesk } from '../common/CentralBankCarryDesk.tsx';
 import { LiquidityPoolMapDesk } from '../common/LiquidityPoolMapDesk.tsx';
 import { ExposureAndSpreadGuardDesk } from '../common/ExposureAndSpreadGuardDesk.tsx';
 import { ChartReplayTrainerDesk } from '../common/ChartReplayTrainerDesk.tsx';
+import { LiveBrokerBridgeCard } from '../common/LiveBrokerBridgeCard.tsx';
+import { MonteCarloPropSimulator } from '../common/MonteCarloPropSimulator.tsx';
 import { Candle, generateCandles } from '../../utils/stockCandles.ts';
 import { useTradingViewQuotes, lookupTradingViewQuote, resolveTradingViewPrice } from '../../utils/tradingViewSync.ts';
 
@@ -682,6 +684,10 @@ export const ForexPowerSuiteView: React.FC = () => {
             currentTicker={selectedAsset}
             currentPrice={currentPrice}
           />
+
+          <MonteCarloPropSimulator />
+
+          <LiveBrokerBridgeCard />
         </div>
       )}
 
@@ -770,10 +776,14 @@ export const ForexPowerSuiteView: React.FC = () => {
       )}
 
       {activeTabLocal === 'exposure-risk' && (
-        <ExposureAndSpreadGuardDesk
-          currentTicker={selectedAsset}
-          currentPrice={currentPrice}
-        />
+        <div className="space-y-6">
+          <ExposureAndSpreadGuardDesk
+            currentTicker={selectedAsset}
+            currentPrice={currentPrice}
+          />
+          <MonteCarloPropSimulator />
+          <LiveBrokerBridgeCard />
+        </div>
       )}
 
       {activeTabLocal === 'chart-replay' && (

@@ -16,10 +16,14 @@ import {
 } from 'lucide-react';
 import {
   disableBrowserPush,
+  getBackgroundWebPushStatus,
   isBrowserPushEnabled,
   relayExternalAlert,
   requestBrowserPushPermission,
+  sendTestBackgroundPush,
+  subscribeBackgroundWebPush,
   syncDaemonAlertChannels,
+  unsubscribeBackgroundWebPush,
 } from '../../utils/alertDispatcher.ts';
 
 interface SignalPayload {
@@ -74,10 +78,15 @@ export const TelegramSignalDispatcher: React.FC<TelegramSignalDispatcherProps> =
     return localStorage.getItem('mullah_auto_broadcast') === 'true';
   });
   const [browserPush, setBrowserPush] = useState<boolean>(() => isBrowserPushEnabled());
+  const [swPushSubscribed, setSwPushSubscribed] = useState<boolean>(false);
 
   const [copied, setCopied] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [dispatchStatus, setDispatchStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    getBackgroundWebPushStatus().then((st) => setSwPushSubscribed(st.subscribed));
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('mullah_tg_token', telegramToken);
@@ -97,20 +106,38 @@ export const TelegramSignalDispatcher: React.FC<TelegramSignalDispatcherProps> =
   }, [autoBroadcast, telegramToken, telegramChatId, discordWebhook]);
 
   const handleToggleBrowserPush = async () => {
-    if (browserPush) {
+    if (browserPush || swPushSubscribed) {
       disableBrowserPush();
+      await unsubscribeBackgroundWebPush();
       setBrowserPush(false);
+      setSwPushSubscribed(false);
+      setDispatchStatus('Background Web Push notifications paused on this device.');
       return;
     }
     const status = await requestBrowserPushPermission();
     if (status === 'granted') {
       setBrowserPush(true);
-      setDispatchStatus('Browser push notifications enabled for signal hits, TP/SL fills, and 15m red-folder news alerts.');
+      const swRes = await subscribeBackgroundWebPush();
+      setSwPushSubscribed(swRes.ok);
+      setDispatchStatus(
+        swRes.ok
+          ? 'Background PWA Web Push & OS alerts enabled for signals, TP/SL fills, and 15m red-folder news.'
+          : 'Foreground browser alerts enabled. Note: ' + (swRes.reason || 'Install PWA for closed-tab push.')
+      );
     } else if (status === 'unsupported') {
       setDispatchStatus('Browser push notifications are not supported on this device/iframe.');
     } else {
       setDispatchStatus('Browser notification permission was blocked. Allow notifications in browser site settings.');
     }
+  };
+
+  const handleTestBackgroundPush = async () => {
+    const res = await sendTestBackgroundPush();
+    setDispatchStatus(
+      res.ok && res.sent > 0
+        ? `Sent background Web Push to ${res.sent} subscribed device(s).`
+        : 'Enable Background Push Alerts first (or test in a standalone installed PWA window).'
+    );
   };
 
   // Generate formatted Telegram / Discord Markdown
@@ -300,27 +327,40 @@ ${signal.confluences}
               </button>
             </div>
 
-            <div className="pt-2 flex items-center justify-between border-t border-[#14233a]">
+            <div className="pt-2 flex items-center justify-between gap-2 border-t border-[#14233a]">
               <div>
                 <span className="text-white font-bold flex items-center gap-1.5">
                   <Bell className="w-3.5 h-3.5 text-amber-400" />
-                  Browser Push Notifications
+                  Background PWA Web Push
                 </span>
-                <span className="text-[11px] text-slate-500">Show native OS alerts even when minimized</span>
+                <span className="text-[11px] text-slate-500">
+                  {swPushSubscribed ? 'Service worker push active (alerts even when tab closed)' : 'Receive OS & mobile alerts when minimized or closed'}
+                </span>
               </div>
-              <button
-                type="button"
-                onClick={handleToggleBrowserPush}
-                className={`w-10 h-5 rounded-full transition-colors relative cursor-pointer ${
-                  browserPush ? 'bg-emerald-500' : 'bg-slate-700'
-                }`}
-              >
-                <div
-                  className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${
-                    browserPush ? 'translate-x-5' : 'translate-x-1'
+              <div className="flex items-center gap-2 shrink-0">
+                {(browserPush || swPushSubscribed) && (
+                  <button
+                    type="button"
+                    onClick={handleTestBackgroundPush}
+                    className="px-2 py-1 rounded bg-[#060b13] border border-[#1a2d48] hover:border-teal-500/40 text-[10px] text-teal-300 cursor-pointer"
+                  >
+                    Test Push
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleToggleBrowserPush}
+                  className={`w-10 h-5 rounded-full transition-colors relative cursor-pointer ${
+                    browserPush || swPushSubscribed ? 'bg-emerald-500' : 'bg-slate-700'
                   }`}
-                />
-              </button>
+                >
+                  <div
+                    className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${
+                      browserPush || swPushSubscribed ? 'translate-x-5' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
             </div>
           </div>
         </div>

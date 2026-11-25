@@ -64,3 +64,34 @@
 .glow-indigo {
   box-shadow: 0 0 25px -5px rgba(99, 102, 241, 0.15);
 }
+
+@media print {
+  aside,
+  header,
+  nav,
+  .no-print {
+    display: none !important;
+  }
+
+  body,
+  #root,
+  main {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .print-dossier-sheet {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    border: 1px solid #cbd5e1 !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+  }
+
+  .print-dossier-sheet * {
+    color: #0f172a !important;
+    border-color: #cbd5e1 !important;
+  }
+}

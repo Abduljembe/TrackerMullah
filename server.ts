@@ -2,8 +2,13 @@ import express from 'express';
 import { createServer } from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import { WebSocketServer, WebSocket } from 'ws';
+import type webpushTypes from 'web-push';
 import { GoogleGenAI, FunctionDeclaration, Type, ThinkingLevel, Modality, LiveServerMessage } from '@google/genai';
+
+const require = createRequire(import.meta.url);
+const webpush = require('web-push') as typeof webpushTypes;
 import dotenv from 'dotenv';
 import {
   MAX_RISK_REWARD,
@@ -2494,6 +2499,11 @@ setInterval(async () => {
             message: `*24/7 ENGINE ${tpHit ? 'TP HIT' : 'SL HIT'}*\n${pos.symbol} ${pos.type} (${pos.lots} lots)\nClose: \`${closePrice}\` | PnL: *${realizedPnl >= 0 ? '+' : ''}$${realizedPnl}*`,
           }).catch(() => {});
         }
+        sendWebPushToAll({
+          title: `24/7 Engine ${tpHit ? 'TP Hit' : 'SL Hit'}: ${pos.symbol}`,
+          body: `${pos.type} ${pos.lots} lots closed @ ${closePrice} (${realizedPnl >= 0 ? '+' : ''}$${realizedPnl})`,
+          tag: `daemon-${pos.ticket}`,
+        }).catch(() => {});
         continue;
       }
 
@@ -2561,7 +2571,7 @@ app.post('/api/ea/daemon-sync', (req, res) => {
 
 app.post('/api/alerts/dispatch', async (req, res) => {
   try {
-    const { message, telegramToken, telegramChatId, discordWebhook } = req.body || {};
+    const { message, telegramToken, telegramChatId, discordWebhook, title } = req.body || {};
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ success: false, error: 'Alert message is required' });
     }
@@ -2571,13 +2581,542 @@ app.post('/api/alerts/dispatch', async (req, res) => {
       telegramChatId,
       discordWebhook,
     });
+    const pushCount = await sendWebPushToAll({
+      title: typeof title === 'string' && title.trim() ? title.trim().slice(0, 80) : 'MullahTracker Trade Alert',
+      body: message.replace(/[*`_]/g, '').slice(0, 180),
+      tag: 'njia-signal-alert',
+    });
     return res.json({
-      success: result.telegramSent || result.discordSent,
+      success: result.telegramSent || result.discordSent || pushCount > 0,
       ...result,
+      pushCount,
     });
   } catch {
     return res.status(500).json({ success: false, error: 'Failed to dispatch alert' });
   }
+});
+
+// ============================================================================
+// BACKGROUND WEB PUSH (VAPID) SUBSCRIPTION & BROADCAST ENGINE
+// ============================================================================
+const runtimeVapid =
+  process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY
+    ? {
+        publicKey: process.env.VAPID_PUBLIC_KEY.trim(),
+        privateKey: process.env.VAPID_PRIVATE_KEY.trim(),
+      }
+    : webpush.generateVAPIDKeys();
+
+try {
+  webpush.setVapidDetails(
+    process.env.VAPID_SUBJECT?.trim() || 'mailto:alerts@mullahtracker.app',
+    runtimeVapid.publicKey,
+    runtimeVapid.privateKey
+  );
+} catch {
+  // Fallback if VAPID format in env is invalid
+  const fresh = webpush.generateVAPIDKeys();
+  runtimeVapid.publicKey = fresh.publicKey;
+  runtimeVapid.privateKey = fresh.privateKey;
+  webpush.setVapidDetails('mailto:alerts@mullahtracker.app', runtimeVapid.publicKey, runtimeVapid.privateKey);
+}
+
+const pushSubscriptions = new Map<string, webpushTypes.PushSubscription>();
+
+function isSafePushEndpoint(endpoint: string): boolean {
+  try {
+    const parsed = new URL(endpoint);
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '::1' ||
+      host.startsWith('10.') ||
+      host.startsWith('192.168.') ||
+      host.startsWith('169.254.') ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function sendWebPushToAll(payload: { title: string; body: string; tag?: string; url?: string }): Promise<number> {
+  if (pushSubscriptions.size === 0) return 0;
+  let sentCount = 0;
+  const serialized = JSON.stringify({
+    title: payload.title,
+    body: payload.body,
+    tag: payload.tag || 'mullahtracker-alert',
+    url: payload.url || '/',
+  });
+
+  for (const [endpoint, sub] of pushSubscriptions.entries()) {
+    try {
+      await webpush.sendNotification(sub, serialized);
+      sentCount++;
+    } catch (err: any) {
+      if (err?.statusCode === 404 || err?.statusCode === 410) {
+        pushSubscriptions.delete(endpoint);
+      }
+    }
+  }
+  return sentCount;
+}
+
+app.get('/api/push/vapid-public-key', (_req, res) => {
+  return res.json({
+    success: true,
+    publicKey: runtimeVapid.publicKey,
+    subscribersCount: pushSubscriptions.size,
+  });
+});
+
+app.post('/api/push/subscribe', (req, res) => {
+  const sub = req.body?.subscription || req.body;
+  if (!sub || typeof sub.endpoint !== 'string' || !isSafePushEndpoint(sub.endpoint) || !sub.keys?.p256dh || !sub.keys?.auth) {
+    return res.status(400).json({ success: false, error: 'Valid HTTPS Web Push subscription is required' });
+  }
+  pushSubscriptions.set(sub.endpoint, {
+    endpoint: sub.endpoint,
+    keys: {
+      p256dh: String(sub.keys.p256dh),
+      auth: String(sub.keys.auth),
+    },
+  });
+  return res.json({ success: true, subscribersCount: pushSubscriptions.size });
+});
+
+app.post('/api/push/unsubscribe', (req, res) => {
+  const endpoint = String(req.body?.endpoint || '');
+  if (endpoint) pushSubscriptions.delete(endpoint);
+  return res.json({ success: true, subscribersCount: pushSubscriptions.size });
+});
+
+app.post('/api/push/test', async (_req, res) => {
+  const sent = await sendWebPushToAll({
+    title: 'MullahTracker Push Active',
+    body: 'Background signal, TP/SL, and red-folder news alerts are live on this device.',
+    tag: 'njia-push-test',
+  });
+  return res.json({ success: true, sent, subscribersCount: pushSubscriptions.size });
+});
+
+// ============================================================================
+// LIVE BROKER API BRIDGE (OANDA v20 CLOUD + METAAPI MT5 + DESKTOP MT5 EA)
+// ============================================================================
+function getBrokerServerConfig() {
+  const oandaKey = (process.env.OANDA_API_KEY || '').trim();
+  const oandaAccountId = (process.env.OANDA_ACCOUNT_ID || '').trim();
+  const oandaEnv = (process.env.OANDA_ENV || 'practice').trim().toLowerCase() === 'live' ? 'live' : 'practice';
+  const oandaBaseUrl = oandaEnv === 'live' ? 'https://api-fxtrade.oanda.com' : 'https://api-fxpractice.oanda.com';
+
+  const metaApiToken = (process.env.METAAPI_TOKEN || '').trim();
+  const metaApiAccountId = (process.env.METAAPI_ACCOUNT_ID || '').trim();
+  const metaApiBaseUrl = 'https://mt-client-api-v1.agiliumtrade.agiliumtrade.ai';
+
+  return {
+    oandaConfigured: Boolean(oandaKey && oandaAccountId),
+    oandaKey,
+    oandaAccountId,
+    oandaEnv,
+    oandaBaseUrl,
+    metaApiConfigured: Boolean(metaApiToken && metaApiAccountId),
+    metaApiToken,
+    metaApiAccountId,
+    metaApiBaseUrl,
+  };
+}
+
+function toOandaInstrument(symbol: string): string {
+  const clean = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (clean.length === 6) return `${clean.slice(0, 3)}_${clean.slice(3)}`;
+  if (clean.includes('NAS100')) return 'NAS100_USD';
+  if (clean.includes('US30')) return 'US30_USD';
+  if (clean.includes('SPX') || clean.includes('US500')) return 'SPX500_USD';
+  return clean;
+}
+
+function maskAccountId(id: string): string {
+  if (!id) return '';
+  if (id.length <= 4) return '••••';
+  return `••••${id.slice(-4)}`;
+}
+
+app.get('/api/broker/status', async (_req, res) => {
+  const cfg = getBrokerServerConfig();
+  const isMt5DesktopActive = Date.now() - lastMt5ContactTime < 35000;
+
+  let activeBridge: 'oanda' | 'metaapi' | 'mt5_ea' | 'paper' = 'paper';
+  if (cfg.oandaConfigured) activeBridge = 'oanda';
+  else if (cfg.metaApiConfigured) activeBridge = 'metaapi';
+  else if (isMt5DesktopActive) activeBridge = 'mt5_ea';
+
+  let accountSummary: {
+    currency: string;
+    balance: number;
+    equity: number;
+    unrealizedPnl: number;
+    marginUsed: number;
+    openTradeCount: number;
+    maskedAccount: string;
+    environment: string;
+  } | null = null;
+  let brokerOpenTrades: any[] = [];
+  let errorDetail: string | null = null;
+
+  if (cfg.oandaConfigured) {
+    try {
+      const [summaryRes, tradesRes] = await Promise.all([
+        fetch(`${cfg.oandaBaseUrl}/v3/accounts/${encodeURIComponent(cfg.oandaAccountId)}/summary`, {
+          headers: { Authorization: `Bearer ${cfg.oandaKey}` },
+          signal: AbortSignal.timeout(5000),
+        }),
+        fetch(`${cfg.oandaBaseUrl}/v3/accounts/${encodeURIComponent(cfg.oandaAccountId)}/openTrades`, {
+          headers: { Authorization: `Bearer ${cfg.oandaKey}` },
+          signal: AbortSignal.timeout(5000),
+        }),
+      ]);
+      if (summaryRes.ok) {
+        const sJson: any = await summaryRes.json();
+        const acct = sJson?.account;
+        if (acct) {
+          accountSummary = {
+            currency: String(acct.currency || 'USD'),
+            balance: Number(acct.balance) || 0,
+            equity: Number(acct.NAV || acct.balance) || 0,
+            unrealizedPnl: Number(acct.unrealizedPL) || 0,
+            marginUsed: Number(acct.marginUsed) || 0,
+            openTradeCount: Number(acct.openTradeCount) || 0,
+            maskedAccount: maskAccountId(cfg.oandaAccountId),
+            environment: cfg.oandaEnv === 'live' ? 'OANDA Live' : 'OANDA Practice',
+          };
+        }
+      } else {
+        errorDetail = `OANDA HTTP ${summaryRes.status}`;
+      }
+      if (tradesRes.ok) {
+        const tJson: any = await tradesRes.json();
+        brokerOpenTrades = Array.isArray(tJson?.trades)
+          ? tJson.trades.map((t: any) => ({
+              id: String(t.id),
+              symbol: String(t.instrument || '').replace('_', '/'),
+              direction: Number(t.currentUnits) >= 0 ? 'LONG' : 'SHORT',
+              units: Math.abs(Number(t.currentUnits) || 0),
+              openPrice: Number(t.price) || 0,
+              unrealizedPnl: Number(t.unrealizedPL) || 0,
+              sl: t.stopLossOrder?.price ? Number(t.stopLossOrder.price) : undefined,
+              tp: t.takeProfitOrder?.price ? Number(t.takeProfitOrder.price) : undefined,
+              openTime: t.openTime,
+            }))
+          : [];
+      }
+    } catch {
+      errorDetail = 'OANDA connection timed out';
+    }
+  } else if (cfg.metaApiConfigured) {
+    try {
+      const [infoRes, posRes] = await Promise.all([
+        fetch(
+          `${cfg.metaApiBaseUrl}/users/current/accounts/${encodeURIComponent(cfg.metaApiAccountId)}/account-information`,
+          {
+            headers: { 'auth-token': cfg.metaApiToken },
+            signal: AbortSignal.timeout(5000),
+          }
+        ),
+        fetch(`${cfg.metaApiBaseUrl}/users/current/accounts/${encodeURIComponent(cfg.metaApiAccountId)}/positions`, {
+          headers: { 'auth-token': cfg.metaApiToken },
+          signal: AbortSignal.timeout(5000),
+        }),
+      ]);
+      if (infoRes.ok) {
+        const info: any = await infoRes.json();
+        accountSummary = {
+          currency: String(info.currency || 'USD'),
+          balance: Number(info.balance) || 0,
+          equity: Number(info.equity || info.balance) || 0,
+          unrealizedPnl: Number((info.equity || 0) - (info.balance || 0)),
+          marginUsed: Number(info.margin) || 0,
+          openTradeCount: 0,
+          maskedAccount: maskAccountId(cfg.metaApiAccountId),
+          environment: String(info.broker || 'MetaApi MT5'),
+        };
+      } else {
+        errorDetail = `MetaApi HTTP ${infoRes.status}`;
+      }
+      if (posRes.ok) {
+        const list: any = await posRes.json();
+        brokerOpenTrades = Array.isArray(list)
+          ? list.map((p: any) => ({
+              id: String(p.id),
+              symbol: String(p.symbol || ''),
+              direction: String(p.type || '').includes('BUY') ? 'LONG' : 'SHORT',
+              units: Number(p.volume) || 0,
+              openPrice: Number(p.openPrice) || 0,
+              unrealizedPnl: Number(p.profit) || 0,
+              sl: p.stopLoss ? Number(p.stopLoss) : undefined,
+              tp: p.takeProfit ? Number(p.takeProfit) : undefined,
+              openTime: p.time,
+            }))
+          : [];
+        if (accountSummary) accountSummary.openTradeCount = brokerOpenTrades.length;
+      }
+    } catch {
+      errorDetail = 'MetaApi connection timed out';
+    }
+  } else if (isMt5DesktopActive) {
+    brokerOpenTrades = realMt5Positions.map((p) => ({
+      id: String(p.ticket),
+      symbol: p.symbol,
+      direction: p.type === 'BUY' ? 'LONG' : 'SHORT',
+      units: p.volume,
+      openPrice: p.openPrice,
+      unrealizedPnl: p.profit,
+      sl: p.sl,
+      tp: p.tp,
+      openTime: p.openTime,
+    }));
+  }
+
+  return res.json({
+    success: true,
+    activeBridge,
+    oandaConfigured: cfg.oandaConfigured,
+    oandaEnv: cfg.oandaEnv,
+    metaApiConfigured: cfg.metaApiConfigured,
+    mt5DesktopActive: isMt5DesktopActive,
+    accountSummary,
+    openTrades: brokerOpenTrades,
+    errorDetail,
+  });
+});
+
+app.post('/api/broker/execute', async (req, res) => {
+  const cfg = getBrokerServerConfig();
+  const { symbol, direction, lots = 0.01, sl, tp } = req.body || {};
+  const cleanSymbol = String(symbol || '').trim().toUpperCase();
+  const dirUpper = String(direction || '').toUpperCase();
+  const isBuy = dirUpper === 'BUY' || dirUpper === 'LONG';
+  const safeLots = Math.max(0.01, Math.min(50, Number(lots) || 0.01));
+  const safeSl = Number(sl) > 0 && Number.isFinite(Number(sl)) ? Number(sl) : undefined;
+  const safeTp = Number(tp) > 0 && Number.isFinite(Number(tp)) ? Number(tp) : undefined;
+
+  if (!cleanSymbol || (!isBuy && dirUpper !== 'SELL' && dirUpper !== 'SHORT')) {
+    return res.status(400).json({ success: false, error: 'Valid symbol and direction are required.' });
+  }
+
+  if (cfg.oandaConfigured) {
+    try {
+      const instrument = toOandaInstrument(cleanSymbol);
+      const unitsPerLot = instrument.startsWith('XAU') ? 100 : instrument.includes('USD_') || instrument.includes('_USD') || instrument.length === 7 ? 100000 : 1;
+      const units = Math.max(1, Math.round(safeLots * unitsPerLot)) * (isBuy ? 1 : -1);
+      const orderBody: any = {
+        order: {
+          instrument,
+          units: String(units),
+          type: 'MARKET',
+          timeInForce: 'FOK',
+          positionFill: 'DEFAULT',
+        },
+      };
+      if (safeSl) orderBody.order.stopLossOnFill = { price: String(safeSl) };
+      if (safeTp) orderBody.order.takeProfitOnFill = { price: String(safeTp) };
+
+      const resp = await fetch(`${cfg.oandaBaseUrl}/v3/accounts/${encodeURIComponent(cfg.oandaAccountId)}/orders`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${cfg.oandaKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(orderBody),
+        signal: AbortSignal.timeout(7000),
+      });
+      const json: any = await resp.json();
+      if (!resp.ok || json.orderCancelTransaction) {
+        return res.status(resp.status || 400).json({
+          success: false,
+          bridge: 'oanda',
+          error: json?.errorMessage || json?.orderCancelTransaction?.reason || 'OANDA rejected market order',
+        });
+      }
+      const fill = json.orderFillTransaction;
+      return res.json({
+        success: true,
+        bridge: 'oanda',
+        ticket: fill?.id || json?.lastTransactionID,
+        fillPrice: fill?.price ? Number(fill.price) : undefined,
+        message: `OANDA filled ${isBuy ? 'BUY' : 'SELL'} ${units} units ${instrument}`,
+      });
+    } catch {
+      return res.status(502).json({ success: false, bridge: 'oanda', error: 'OANDA order gateway timeout' });
+    }
+  }
+
+  if (cfg.metaApiConfigured) {
+    try {
+      const mtSymbol = cleanSymbol.replace('/', '');
+      const tradeBody: any = {
+        actionType: isBuy ? 'ORDER_TYPE_BUY' : 'ORDER_TYPE_SELL',
+        symbol: mtSymbol,
+        volume: safeLots,
+      };
+      if (safeSl) tradeBody.stopLoss = safeSl;
+      if (safeTp) tradeBody.takeProfit = safeTp;
+
+      const resp = await fetch(`${cfg.metaApiBaseUrl}/users/current/accounts/${encodeURIComponent(cfg.metaApiAccountId)}/trade`, {
+        method: 'POST',
+        headers: {
+          'auth-token': cfg.metaApiToken,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(tradeBody),
+        signal: AbortSignal.timeout(7000),
+      });
+      const json: any = await resp.json();
+      if (!resp.ok) {
+        return res.status(resp.status || 400).json({
+          success: false,
+          bridge: 'metaapi',
+          error: json?.message || 'MetaApi rejected order',
+        });
+      }
+      return res.json({
+        success: true,
+        bridge: 'metaapi',
+        ticket: json.orderId || json.positionId,
+        message: `MetaApi MT5 executed ${isBuy ? 'BUY' : 'SELL'} ${safeLots} lots ${mtSymbol}`,
+      });
+    } catch {
+      return res.status(502).json({ success: false, bridge: 'metaapi', error: 'MetaApi execution timeout' });
+    }
+  }
+
+  // Fallback to Desktop MT5 EA WebRequest queue when connected
+  if (Date.now() - lastMt5ContactTime < 35000) {
+    const newOrder: MT5QueuedOrder = {
+      id: `BRK_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      action: isBuy ? 'BUY' : 'SELL',
+      symbol: cleanSymbol.replace('/', ''),
+      volume: safeLots,
+      sl: safeSl || 0,
+      tp: safeTp || 0,
+      magic: 445566,
+      timestamp: Date.now(),
+    };
+    mt5QueuedOrders.push(newOrder);
+    return res.json({
+      success: true,
+      bridge: 'mt5_ea',
+      ticket: newOrder.id,
+      message: `Queued ${newOrder.action} ${safeLots} lots ${newOrder.symbol} for connected MT5 terminal`,
+    });
+  }
+
+  return res.json({
+    success: false,
+    bridge: 'paper',
+    error: 'No live broker secret configured on server and desktop MT5 EA is offline.',
+  });
+});
+
+app.post('/api/broker/close', async (req, res) => {
+  const cfg = getBrokerServerConfig();
+  const { tradeId } = req.body || {};
+  const cleanId = String(tradeId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!cleanId) {
+    return res.status(400).json({ success: false, error: 'Valid tradeId is required' });
+  }
+
+  if (cfg.oandaConfigured) {
+    try {
+      const resp = await fetch(
+        `${cfg.oandaBaseUrl}/v3/accounts/${encodeURIComponent(cfg.oandaAccountId)}/trades/${encodeURIComponent(cleanId)}/close`,
+        {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${cfg.oandaKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ units: 'ALL' }),
+          signal: AbortSignal.timeout(6000),
+        }
+      );
+      const json: any = await resp.json();
+      return res.status(resp.ok ? 200 : 400).json({
+        success: resp.ok,
+        bridge: 'oanda',
+        pnl: Number(json?.orderFillTransaction?.pl) || 0,
+        error: resp.ok ? undefined : json?.errorMessage || 'Failed to close OANDA trade',
+      });
+    } catch {
+      return res.status(502).json({ success: false, error: 'OANDA close timeout' });
+    }
+  }
+
+  if (cfg.metaApiConfigured) {
+    try {
+      const resp = await fetch(`${cfg.metaApiBaseUrl}/users/current/accounts/${encodeURIComponent(cfg.metaApiAccountId)}/trade`, {
+        method: 'POST',
+        headers: { 'auth-token': cfg.metaApiToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actionType: 'POSITION_CLOSE_ID', positionId: cleanId }),
+        signal: AbortSignal.timeout(6000),
+      });
+      return res.status(resp.ok ? 200 : 400).json({ success: resp.ok, bridge: 'metaapi' });
+    } catch {
+      return res.status(502).json({ success: false, error: 'MetaApi close timeout' });
+    }
+  }
+
+  return res.status(400).json({ success: false, error: 'No cloud broker configured' });
+});
+
+app.get('/api/broker/closed-trades', async (_req, res) => {
+  const cfg = getBrokerServerConfig();
+  if (cfg.oandaConfigured) {
+    try {
+      const resp = await fetch(
+        `${cfg.oandaBaseUrl}/v3/accounts/${encodeURIComponent(cfg.oandaAccountId)}/trades?state=CLOSED&count=30`,
+        {
+          headers: { Authorization: `Bearer ${cfg.oandaKey}` },
+          signal: AbortSignal.timeout(6000),
+        }
+      );
+      if (resp.ok) {
+        const data: any = await resp.json();
+        const trades = Array.isArray(data?.trades)
+          ? data.trades.map((t: any) => ({
+              brokerId: `oanda-${t.id}`,
+              ticker: String(t.instrument || '').replace('_', '/'),
+              direction: Number(t.initialUnits) >= 0 ? 'LONG' : 'SHORT',
+              lots: Number((Math.abs(Number(t.initialUnits) || 0) / (String(t.instrument).startsWith('XAU') ? 100 : 100000)).toFixed(2)) || 0.01,
+              entryPrice: Number(t.price) || 0,
+              exitPrice: Number(t.averageClosePrice || t.price) || 0,
+              pnl: Math.round((Number(t.realizedPL) || 0) * 100) / 100,
+              closedAt: t.closeTime || new Date().toISOString(),
+              broker: 'OANDA',
+            }))
+          : [];
+        return res.json({ success: true, bridge: 'oanda', trades });
+      }
+    } catch {
+      // fall through to daemon trades
+    }
+  }
+
+  // Fallback: return server 24/7 daemon closed fills for cross-device reconciliation
+  const trades = daemonClosedTrades.slice(0, 30).map((t) => ({
+    brokerId: t.id,
+    ticker: t.symbol,
+    direction: t.type === 'BUY' ? 'LONG' : 'SHORT',
+    lots: t.lots,
+    entryPrice: t.openPrice,
+    exitPrice: t.closePrice,
+    pnl: t.pnl,
+    closedAt: t.closedAt,
+    broker: '24/7 Server Engine',
+  }));
+  return res.json({ success: true, bridge: 'daemon', trades });
 });
 
 // Endpoint 1: Stock & Forex deep analysis with trading signals, news & technical indicators

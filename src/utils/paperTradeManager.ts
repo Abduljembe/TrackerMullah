@@ -3,6 +3,7 @@ import { getAssetMarketSession } from './marketHours.ts';
 import { emitPaperPositionsUpdated } from './portfolioGuard.ts';
 import { syncRealizedTradePnlToProp, evaluatePropTradeBlock } from './propGuardian.ts';
 import { scheduleTradingCloudPush } from './tradingCloudSync.ts';
+import { executeBrokerOrder, isBrokerMirrorEnabled } from './brokerBridge.ts';
 
 export const PAPER_TRADE_ALERT_EVENT = 'njia-paper-trade-auto-event';
 export const MULLAH_PROACTIVE_ALERT_EVENT = 'mullah-proactive-speak';
@@ -487,6 +488,16 @@ export function openPaperTradeFromSignal(input: {
     timeframe: tf,
   };
   window.dispatchEvent(new CustomEvent<PaperTradeAlertDetail>(PAPER_TRADE_ALERT_EVENT, { detail }));
+
+  if (isBrokerMirrorEnabled()) {
+    executeBrokerOrder({
+      symbol: ticker,
+      direction,
+      lots: computedLots,
+      sl: input.sl,
+      tp: finalTp,
+    }).catch(() => {});
+  }
 
   return { opened: true, position: res.position };
 }

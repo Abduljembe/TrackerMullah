@@ -861,3 +861,66 @@ export function generateLocalMpesaAdvice(breakdown: MpesaSpendingBreakdown): Mpe
     actionChecklist,
   };
 }
+
+export type MpesaFlowRole = 'BROKER_DEPOSIT' | 'BROKER_WITHDRAWAL' | 'SACCO_MMF' | 'INCOME' | 'WITHDRAWAL' | 'EXPENSE';
+
+const BROKER_KEYWORDS = [
+  'EXNESS',
+  'DERIV',
+  'BINARY',
+  'XM',
+  'PEPPERSTONE',
+  'IC MARKETS',
+  'ICMARKETS',
+  'FXPESA',
+  'EGM SECURITIES',
+  'SCOPE MARKETS',
+  'BINANCE',
+  'SKRILL',
+  'NETELLER',
+  'PAYPAL',
+  'MPESA GLOBAL',
+  'M-PESA GLOBAL',
+  'FTMO',
+  'JUSTMARKETS',
+  'FBS',
+  'HFM',
+  'HOTFOREX',
+  'OCTA',
+  'TICKMILL',
+];
+
+const SACCO_MMF_KEYWORDS = [
+  'SACCO',
+  'STIMA',
+  'UNAITAS',
+  'IMARISHA',
+  'TOWER',
+  'ETICA',
+  'SANLAM',
+  'CIC',
+  'BRITAM',
+  'CYTONN',
+  'MALI',
+  'ZIIDI',
+  'OLD MUTUAL',
+  'NCBA LOOP',
+  'CHAMA',
+  'MMF',
+  'MONEY MARKET',
+];
+
+export function detectMpesaFlowRole(item: ParsedMpesaMessage): MpesaFlowRole {
+  const hay = `${item.counterparty || ''} ${item.channel || ''} ${item.accountNumber || ''}`.toUpperCase();
+  const isBroker = BROKER_KEYWORDS.some((kw) => hay.includes(kw));
+  if (isBroker) {
+    return item.type === 'received' ? 'BROKER_WITHDRAWAL' : 'BROKER_DEPOSIT';
+  }
+  const isWealth = SACCO_MMF_KEYWORDS.some((kw) => hay.includes(kw));
+  if (isWealth && item.type !== 'received') {
+    return 'SACCO_MMF';
+  }
+  if (item.type === 'received') return 'INCOME';
+  if (item.type === 'withdraw') return 'WITHDRAWAL';
+  return 'EXPENSE';
+}

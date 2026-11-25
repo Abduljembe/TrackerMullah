@@ -20,6 +20,8 @@ import {
   AUTO_SIGNAL_PAPER_TOGGLE_EVENT,
 } from '../../utils/paperTradeManager.ts';
 import { WealthProfitBridgeCard } from './WealthProfitBridgeCard.tsx';
+import { LiveBrokerBridgeCard } from './LiveBrokerBridgeCard.tsx';
+import { MonteCarloPropSimulator } from './MonteCarloPropSimulator.tsx';
 
 interface TradingJournalDeskProps {
   currentTicker?: string;
@@ -886,6 +888,12 @@ export const TradingJournalDesk: React.FC<TradingJournalDeskProps> = ({ currentT
 
       {/* Trading Profits -> Real Wealth Bridge */}
       <WealthProfitBridgeCard compact />
+
+      {/* Live Broker Bridge & Reconciler */}
+      <LiveBrokerBridgeCard compact />
+
+      {/* 1,000-Path Journal-Driven Monte Carlo Prop Odds */}
+      <MonteCarloPropSimulator />
     </div>
   );
 };

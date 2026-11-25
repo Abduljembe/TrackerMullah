@@ -14,7 +14,7 @@ export default defineConfig(() => {
         devOptions: {
           enabled: true,
         },
-        includeAssets: ['favicon.svg', 'pwa-192x192.png', 'pwa-512x512.png', 'apple-touch-icon.png'],
+        includeAssets: ['favicon.svg', 'pwa-192x192.png', 'pwa-512x512.png', 'apple-touch-icon.png', 'push-sw.js'],
         manifest: {
           name: 'MullahTracker - Your Financial Journey',
           short_name: 'MullahTrack',
@@ -54,6 +54,7 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          importScripts: ['/push-sw.js'],
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
           maximumFileSizeToCacheInBytes: 12 * 1024 * 1024,
           navigateFallbackDenylist: [/^\/api\//, /^\/ws\//],
