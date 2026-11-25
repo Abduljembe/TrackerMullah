@@ -66,6 +66,7 @@ import {
 } from 'lucide-react';
 import { fetchSharedCalendarEvents, evaluateNewsGuardForSymbol } from '../../utils/newsGuard.ts';
 import { EaParameters, DEFAULT_EA_PARAMS, generateMql5Code } from '../../utils/mql5Generator.ts';
+import { isMasterEngineRunning } from '../../utils/engineIgnition.ts';
 import { PropFirmRiskGuardian } from '../common/PropFirmRiskGuardian.tsx';
 import { CurrencyStrengthMeter } from '../common/CurrencyStrengthMeter.tsx';
 import { RetailSentimentDesk } from '../common/RetailSentimentDesk.tsx';
@@ -803,8 +804,15 @@ export const Mt5EaScalperStudio: React.FC = () => {
     return (localStorage.getItem('trader_deck_mode') as 'GAMER' | 'CLASSIC') || 'GAMER';
   });
 
-  // Master Bot State (Always STOPPED when website opens until user clicks START)
-  const [isBotRunning, setIsBotRunning] = useState<boolean>(() => sessionMt5BotRunning);
+  // Master Bot State (Starts STOPPED when website opens until user clicks START or Master Switch)
+  const [isBotRunning, setIsBotRunning] = useState<boolean>(() => {
+    if (sessionMt5BotRunning) return true;
+    if (isMasterEngineRunning() && !evaluatePropTradeBlock().blocked) {
+      sessionMt5BotRunning = true;
+      return true;
+    }
+    return false;
+  });
   const [botMode, setBotMode] = useState<'AUTO' | 'PAPER' | 'MANUAL'>('AUTO');
   const [audioAlerts, setAudioAlerts] = useState<boolean>(true);
 

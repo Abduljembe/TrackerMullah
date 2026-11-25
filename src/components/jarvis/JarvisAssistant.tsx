@@ -39,6 +39,7 @@ import {
 } from '../../utils/paperTradeManager.ts';
 import { parseMpesaSms } from '../../utils/mpesaParser.ts';
 import { fetchSharedCalendarEvents, CalendarNewsEvent } from '../../utils/newsGuard.ts';
+import { MASTER_ENGINE_EVENT, MasterEngineDetail } from '../../utils/engineIgnition.ts';
 import {
   MullahMemoryProfile,
   MullahVoiceGender,
@@ -3252,6 +3253,47 @@ export const JarvisAssistant: React.FC = () => {
       setVoiceError('Allow microphone permission in browser address bar to say "Hello Mullah" hands-free.');
     }
   }, [updateMullahMemory]);
+
+  // Arm / stand down hands-free "Hello Mullah" listener when Master Engine Ignition Switch toggles
+  useEffect(() => {
+    let armTimer: ReturnType<typeof setTimeout> | null = null;
+    const onMasterEngine = (event: Event) => {
+      const detail = (event as CustomEvent<MasterEngineDetail>).detail;
+      if (!detail || typeof detail.running !== 'boolean') return;
+
+      if (armTimer) {
+        clearTimeout(armTimer);
+        armTimer = null;
+      }
+
+      if (detail.running) {
+        hasUserGestureRef.current = true;
+        // Let the 3s car engine start audio ring out cleanly without overlapping queued boot speech
+        pendingWelcomeAudioRef.current = null;
+        pendingSpeechRef.current = null;
+        stopSpeaking();
+        armTimer = setTimeout(() => {
+          wakeCooldownUntilRef.current = 0;
+          updateMullahMemory((p) => ({ ...p, wakeWordEnabled: true, autoConversation: true }));
+          setWakeRetryNonce((n) => n + 1);
+        }, 1800);
+      } else {
+        stopLiveAudioStream();
+        try {
+          wakeRecognitionRef.current?.abort?.();
+        } catch {}
+        wakeRecognitionRef.current = null;
+        updateMullahMemory((p) => ({ ...p, wakeWordEnabled: false }));
+        setWakeMicState((prev) => (prev === 'denied' || prev === 'unsupported' ? prev : 'paused'));
+      }
+    };
+
+    window.addEventListener(MASTER_ENGINE_EVENT, onMasterEngine);
+    return () => {
+      window.removeEventListener(MASTER_ENGINE_EVENT, onMasterEngine);
+      if (armTimer) clearTimeout(armTimer);
+    };
+  }, [stopLiveAudioStream, stopSpeaking, updateMullahMemory]);
 
   // Passive "Hello Mullah" Wake Word Standby Listener (always ready when idle & hands-free wake mode is ON)
   useEffect(() => {

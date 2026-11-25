@@ -83,6 +83,7 @@ import { useNewsGuard } from '../../utils/newsGuard.ts';
 import { scheduleTradingCloudPush, CLOUD_TRADING_HYDRATED_EVENT } from '../../utils/tradingCloudSync.ts';
 import { generateCandles } from '../../utils/stockCandles.ts';
 import { evaluatePropTradeBlock, PROP_GUARD_EVENT } from '../../utils/propGuardian.ts';
+import { isMasterEngineRunning } from '../../utils/engineIgnition.ts';
 
 // =========================================================================
 // COMPREHENSIVE CURRENCIES & TRADING INSTRUMENTS CATALOG
@@ -298,7 +299,9 @@ export const BotStudioView: React.FC = () => {
   const [isMuted, setIsMuted] = useState(false);
 
   // Institutional Guardian & Execution Controls
-  const [autoPilotActive, setAutoPilotActive] = useState<boolean>(false);
+  const [autoPilotActive, setAutoPilotActive] = useState<boolean>(() => {
+    return isMasterEngineRunning() && !evaluatePropTradeBlock().blocked;
+  });
   const [propGuardBlock, setPropGuardBlock] = useState(() => evaluatePropTradeBlock());
   const [breakEvenFeatureEnabled, setBreakEvenFeatureEnabled] = useState<boolean>(true);
   const [autoRearmEnabled, setAutoRearmEnabled] = useState<boolean>(false);

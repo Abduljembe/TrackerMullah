@@ -52,6 +52,7 @@ import { useTradingViewQuotes, lookupTradingViewQuote } from '../../utils/tradin
 import { getMarketSession } from '../../utils/marketHours.ts';
 import { MAX_RISK_REWARD, getTimeframeProfile, resolveQuoteForTimeframe, evaluateDirectionalConfluence } from '../../utils/signalEngine.ts';
 import { BotLiveChart } from '../trading/BotLiveChart.tsx';
+import { isMasterEngineRunning } from '../../utils/engineIgnition.ts';
 
 // =========================================================================
 // TRADINGVIEW GOLD CHART ADVANCED EMBED
@@ -231,7 +232,13 @@ export const GoldScalperView: React.FC = () => {
   // -------------------------------------------------------------------------
   // 2. BOT RUNNING / EXECUTION STATE
   // -------------------------------------------------------------------------
-  const [isBotRunning, setIsBotRunning] = useState<boolean>(() => sessionGoldBotRunning); // Always STOPPED on website open until user clicks START
+  const [isBotRunning, setIsBotRunning] = useState<boolean>(() => {
+    if (sessionGoldBotRunning || isMasterEngineRunning()) {
+      sessionGoldBotRunning = true;
+      return true;
+    }
+    return false;
+  }); // Starts STOPPED on website open until user engages START or Master Switch
   const [audioFeedback, setAudioFeedback] = useState<boolean>(true);
   const [barTimerSeconds, setBarTimerSeconds] = useState<number>(48); // Seconds left in M1 bar
   const [eaLogs, setEaLogs] = useState<Array<{ id: string; time: string; text: string; type: 'info' | 'trade' | 'alert' | 'profit' }>>([
@@ -1078,6 +1085,27 @@ export const GoldScalperView: React.FC = () => {
       addLog('[CONTROL] Gold Scalper EA ARMED and RUNNING on XAUUSD M1! Scanning candles...', 'trade');
     }
   };
+
+  useEffect(() => {
+    const onBotControl = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { target?: string; action?: string } | undefined;
+      if (!detail) return;
+      const target = String(detail.target || 'ALL').toUpperCase();
+      if (target !== 'ALL' && target !== 'GOLD_SCALPER') return;
+      const shouldRun = detail.action === 'START';
+      if (sessionGoldBotRunning === shouldRun) return;
+      sessionGoldBotRunning = shouldRun;
+      setIsBotRunning(shouldRun);
+      addLog(
+        shouldRun
+          ? '[IGNITION] Gold Scalper EA engaged via Master System Switch. Scanning live XAUUSD candles...'
+          : '[IGNITION] Gold Scalper EA stood down via Master System Switch.',
+        shouldRun ? 'trade' : 'alert'
+      );
+    };
+    window.addEventListener('njia-bot-control', onBotControl);
+    return () => window.removeEventListener('njia-bot-control', onBotControl);
+  }, []);
 
   // Full MQL5 source code generator
   const generatedMql5Code = useMemo(() => {

@@ -94,6 +94,7 @@ import { computeTimeframeSignalLevels, getTimeframeProfile, resolveQuoteForTimef
 import { SignalScorecardDesk } from '../common/SignalScorecardDesk.tsx';
 import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../utils/signalScorecard.ts';
 import { openPaperTradeFromSignal, parseNumericLevel } from '../../utils/paperTradeManager.ts';
+import { MASTER_ENGINE_EVENT, MasterEngineDetail } from '../../utils/engineIgnition.ts';
 
 export interface TradingSignal {
   action: 'STRONG BUY' | 'BUY' | 'NEUTRAL' | 'HOLD' | 'SELL' | 'STRONG SELL';
@@ -1713,6 +1714,18 @@ export const StockRadarView: React.FC = () => {
       evaluateTrackedSignalsAgainstQuotes(liveTvQuotes);
     }
   }, [liveTvQuotes]);
+
+  // Sync live tick streaming with Master Engine Ignition Switch
+  useEffect(() => {
+    const onMasterEngine = (event: Event) => {
+      const detail = (event as CustomEvent<MasterEngineDetail>).detail;
+      if (detail && typeof detail.running === 'boolean') {
+        setIsLiveStreaming(detail.running);
+      }
+    };
+    window.addEventListener(MASTER_ENGINE_EVENT, onMasterEngine);
+    return () => window.removeEventListener(MASTER_ENGINE_EVENT, onMasterEngine);
+  }, []);
 
   // J.A.R.V.I.S. focus command bridge: switch asset, timeframe, and optional lower desk
   useEffect(() => {

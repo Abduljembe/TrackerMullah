@@ -19,12 +19,18 @@ import {
   Search,
   PanelLeftOpen,
   PanelLeftClose,
+  Power,
 } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
 import { AppLogoIcon } from './common/AppLogo.tsx';
 import { PWAInstallButton } from './pwa/PWAInstallButton.tsx';
 import { OPEN_COMMAND_PALETTE_EVENT } from './common/CommandPaletteModal.tsx';
+import {
+  isMasterEngineRunning,
+  setMasterEngineRunning,
+  subscribeMasterEngine,
+} from '../utils/engineIgnition.ts';
 
 interface HeaderProps {
   onOpenMobileMenu: () => void;
@@ -51,6 +57,7 @@ export const Header: React.FC<HeaderProps> = ({
     currency,
     setCurrency,
     exchangeRates,
+    refreshExchangeRates,
     refreshApp,
     currencyNotice,
     dismissCurrencyNotice,
@@ -63,6 +70,50 @@ export const Header: React.FC<HeaderProps> = ({
   const [showUserDropdown, setShowUserDropdown] = useState(false);
   const [isRefreshingRates, setIsRefreshingRates] = useState(false);
   const [ratesSyncSuccess, setRatesSyncSuccess] = useState(false);
+  const [engineState, setEngineState] = useState<'off' | 'starting' | 'on'>(() =>
+    isMasterEngineRunning() ? 'on' : 'off'
+  );
+  const crankTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  React.useEffect(() => {
+    const unsubscribe = subscribeMasterEngine((running) => {
+      if (!running) {
+        if (crankTimerRef.current) {
+          clearTimeout(crankTimerRef.current);
+          crankTimerRef.current = null;
+        }
+        setEngineState('off');
+      } else {
+        setEngineState((prev) => (prev === 'starting' ? 'starting' : 'on'));
+      }
+    });
+    return () => {
+      unsubscribe();
+      if (crankTimerRef.current) {
+        clearTimeout(crankTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleToggleMasterEngine = () => {
+    if (crankTimerRef.current) {
+      clearTimeout(crankTimerRef.current);
+      crankTimerRef.current = null;
+    }
+
+    if (engineState === 'off') {
+      setEngineState('starting');
+      setMasterEngineRunning(true);
+      refreshExchangeRates().catch(() => {});
+      crankTimerRef.current = setTimeout(() => {
+        setEngineState('on');
+        crankTimerRef.current = null;
+      }, 820);
+    } else {
+      setEngineState('off');
+      setMasterEngineRunning(false);
+    }
+  };
 
   const handleRefreshRates = async () => {
     if (isRefreshingRates) return;
@@ -239,6 +290,63 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Top Right: Actions & Tools */}
       <div className="flex items-center flex-wrap gap-1.5 lg:gap-2 justify-end text-xs min-w-0">
+        {/* Master System Ignition Switch */}
+        <button
+          type="button"
+          role="switch"
+          aria-checked={engineState !== 'off'}
+          onClick={handleToggleMasterEngine}
+          title={
+            engineState === 'off'
+              ? 'Switch ON to start car engine sound and launch all live streams, trading bots, auto-signals, and hands-free voice'
+              : 'Switch OFF to stop automated engines and live background systems'
+          }
+          className={`flex items-center gap-2 px-3 py-1.5 min-h-[36px] rounded-lg border text-xs font-semibold transition-all duration-200 cursor-pointer whitespace-nowrap shrink-0 active:scale-[0.98] ${
+            engineState === 'on'
+              ? 'bg-emerald-500/15 hover:bg-emerald-500/20 border-emerald-500/60 text-emerald-300 shadow-sm shadow-emerald-500/10'
+              : engineState === 'starting'
+              ? 'bg-amber-500/15 border-amber-400/70 text-amber-200'
+              : 'bg-[#0e1728] hover:bg-[#152238] border-[#243758] hover:border-teal-500/50 text-slate-200'
+          }`}
+        >
+          <Power
+            className={`w-3.5 h-3.5 shrink-0 transition-transform duration-200 ${
+              engineState === 'starting'
+                ? 'animate-spin text-amber-300'
+                : engineState === 'on'
+                ? 'text-emerald-400'
+                : 'text-slate-400'
+            }`}
+          />
+          <span>
+            {engineState === 'starting'
+              ? 'Starting...'
+              : engineState === 'on'
+              ? 'All Systems On'
+              : 'Start All'}
+          </span>
+          <span
+            aria-hidden="true"
+            className={`relative inline-flex h-4 w-7 items-center rounded-full border transition-colors duration-200 ${
+              engineState === 'on'
+                ? 'bg-emerald-500/35 border-emerald-400/70'
+                : engineState === 'starting'
+                ? 'bg-amber-500/35 border-amber-400/70'
+                : 'bg-[#070c16] border-[#283c5e]'
+            }`}
+          >
+            <span
+              className={`inline-block h-2.5 w-2.5 rounded-full transition-transform duration-200 ${
+                engineState === 'on'
+                  ? 'translate-x-3.5 bg-emerald-400'
+                  : engineState === 'starting'
+                  ? 'translate-x-2 bg-amber-300'
+                  : 'translate-x-0.5 bg-slate-400'
+              }`}
+            />
+          </span>
+        </button>
+
         {/* Currency Switcher & Real-time Rates */}
         <div className="flex items-center gap-1.5">
           <div className="flex items-center bg-[#0d1524] border border-[#1a273e] rounded-lg p-0.5 text-slate-300">
