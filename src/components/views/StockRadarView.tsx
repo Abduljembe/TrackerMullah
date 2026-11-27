@@ -90,6 +90,7 @@ import {
 import { generateCandles, enrichCandlesWithIndicators, computePeriodStats, Timeframe, Candle } from '../../utils/stockCandles.ts';
 import { getMarketSession, getAssetMarketSession, MarketSessionInfo } from '../../utils/marketHours.ts';
 import {
+  extractMacroCorrelationContext,
   forceRefreshTradingViewQuotes,
   lookupTradingViewQuote,
   resolveTradingViewPrice,
@@ -99,7 +100,7 @@ import { computeTimeframeSignalLevels, getTimeframeProfile, resolveQuoteForTimef
 import { SignalScorecardDesk } from '../common/SignalScorecardDesk.tsx';
 import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../utils/signalScorecard.ts';
 import { openPaperTradeFromSignal, parseNumericLevel } from '../../utils/paperTradeManager.ts';
-import { MASTER_ENGINE_EVENT, MasterEngineDetail } from '../../utils/engineIgnition.ts';
+import { useNewsGuard } from '../../utils/newsGuard.ts';
 
 export interface TradingSignal {
   action: 'STRONG BUY' | 'BUY' | 'NEUTRAL' | 'HOLD' | 'SELL' | 'STRONG SELL';
@@ -138,6 +139,19 @@ export interface TradingSignal {
     indicatorConfluence?: string;
     macroForexFactory?: string;
   };
+  isTradeable?: boolean;
+  waitReason?: string;
+  signalGrade?: string;
+  executionMode?: 'MARKET_NOW' | 'PULLBACK_LIMIT' | 'WAIT_FOR_CONFIRMATION';
+  entryNote?: string;
+  breakEvenTrigger?: string;
+  htfSummary?: string;
+  sessionName?: string;
+  sessionQuality?: 'PRIME' | 'ACTIVE' | 'OFF_PEAK';
+  macroAligned?: boolean;
+  macroNote?: string;
+  newsBlocked?: boolean;
+  candleTrigger?: string;
 }
 
 export interface StockProfile {
@@ -1631,6 +1645,7 @@ interface AiAnalysisResult {
   targetPrice: number;
   projectedUpside: string;
   riskRating: 'Low' | 'Moderate' | 'High';
+  timeframe?: string;
   signal?: TradingSignal;
   thesis: string[];
   risks: string[];
@@ -1658,7 +1673,7 @@ export const StockRadarView: React.FC = () => {
   const [selectedStock, setSelectedStock] = useState<StockProfile>(FEATURED_ASSETS[0]);
   const [filterMarket, setFilterMarket] = useState<'ALL' | 'FOREX' | 'METALS' | 'INDICES' | 'NSE' | 'US'>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
-  const [timeframe, setTimeframe] = useState<Timeframe>('1M');
+  const [timeframe, setTimeframe] = useState<Timeframe>('15m');
   const [chartType, setChartType] = useState<'candlestick' | 'line'>('candlestick');
 
   // Real-time market hours ticker (updates every 10s)
@@ -1693,9 +1708,12 @@ export const StockRadarView: React.FC = () => {
   const [isLiveStreaming, setIsLiveStreaming] = useState<boolean>(true);
   const [livePriceFlash, setLivePriceFlash] = useState<'up' | 'down' | null>(null);
   const [liveCandles, setLiveCandles] = useState<Candle[]>([]);
+  const [hasRealHistoryCandles, setHasRealHistoryCandles] = useState<boolean>(false);
 
   // Real-time TradingView WebSocket / SSE feed quotes
   const liveTvQuotes = useTradingViewQuotes(2000);
+  const macroContext = useMemo(() => extractMacroCorrelationContext(liveTvQuotes), [liveTvQuotes]);
+  const radarNewsGuard = useNewsGuard(selectedStock.ticker, 30);
 
   // Dual Chart Mode: Entire Forex, Metals, Indices & US use 'tradingview' live feed. NSE stocks use 'radar'.
   const [chartViewMode, setChartViewMode] = useState<'radar' | 'tradingview'>('tradingview');
@@ -1719,18 +1737,6 @@ export const StockRadarView: React.FC = () => {
       evaluateTrackedSignalsAgainstQuotes(liveTvQuotes);
     }
   }, [liveTvQuotes]);
-
-  // Sync live tick streaming with Master Engine Ignition Switch
-  useEffect(() => {
-    const onMasterEngine = (event: Event) => {
-      const detail = (event as CustomEvent<MasterEngineDetail>).detail;
-      if (detail && typeof detail.running === 'boolean') {
-        setIsLiveStreaming(detail.running);
-      }
-    };
-    window.addEventListener(MASTER_ENGINE_EVENT, onMasterEngine);
-    return () => window.removeEventListener(MASTER_ENGINE_EVENT, onMasterEngine);
-  }, []);
 
   // J.A.R.V.I.S. focus command bridge: switch asset, timeframe, and optional lower desk
   useEffect(() => {
@@ -1844,6 +1850,7 @@ export const StockRadarView: React.FC = () => {
         quote: tvQ,
         candles: candlesOverride,
         market: asset.market,
+        macroContext,
       });
       return {
         action: computed.action,
@@ -1855,7 +1862,7 @@ export const StockRadarView: React.FC = () => {
         tvQ,
       };
     },
-    [liveTvQuotes, timeframe]
+    [liveTvQuotes, timeframe, macroContext]
   );
 
   // Dedicated full roster of all 34 Forex pairs
@@ -2013,6 +2020,8 @@ export const StockRadarView: React.FC = () => {
         timeframe: tfProfile.label,
         quote: tvQuote,
         market: stock.market,
+        macroContext,
+        newsHazard: radarNewsGuard,
       });
       if (data?.signal) {
         data.signal.timeframe = tfProfile.label;
@@ -2022,7 +2031,7 @@ export const StockRadarView: React.FC = () => {
         const aiIsBuy = aiAct === 'STRONG BUY' || aiAct === 'BUY';
         const aiIsSell = aiAct === 'STRONG SELL' || aiAct === 'SELL';
         const liveIsBuy = liveComputed.direction === 'BUY';
-        if ((liveIsBuy && aiIsSell) || (!liveIsBuy && aiIsBuy) || (!aiIsBuy && !aiIsSell)) {
+        if ((liveIsBuy && aiIsSell) || (!liveIsBuy && aiIsBuy) || (!aiIsBuy && !aiIsSell) || !liveComputed.isTradeable) {
           const dec = liveComputed.decimals;
           const isFx = stock.market === 'FOREX' || stock.market === 'METALS' || stock.market === 'INDICES';
           const curPrefix = !isFx ? `${stock.currency} ` : '';
@@ -2036,12 +2045,24 @@ export const StockRadarView: React.FC = () => {
           data.signal.stopLoss = `${curPrefix}${liveComputed.sl.toFixed(dec)} (${slSignStr}${liveComputed.slUnitValue} ${liveComputed.unitLabel})`;
           data.signal.riskReward = liveComputed.riskReward;
           data.signal.confidenceScore = liveComputed.confidenceScore;
-          data.recommendation = liveComputed.action === 'STRONG BUY' ? 'Strong Buy' : liveComputed.action === 'BUY' ? 'Buy' : 'Trim';
+          data.recommendation = !liveComputed.isTradeable ? 'Hold' : liveComputed.action === 'STRONG BUY' ? 'Strong Buy' : liveComputed.action === 'BUY' ? 'Buy' : 'Trim';
         }
+        data.signal.isTradeable = liveComputed.isTradeable;
+        data.signal.waitReason = liveComputed.waitReason;
+        data.signal.signalGrade = liveComputed.signalGrade;
+        data.signal.executionMode = liveComputed.executionMode;
+        data.signal.entryNote = liveComputed.entryNote;
+        data.signal.htfSummary = liveComputed.htfSummary;
+        data.signal.sessionName = liveComputed.sessionName;
+        data.signal.sessionQuality = liveComputed.sessionQuality;
+        data.signal.macroAligned = liveComputed.macroAligned;
+        data.signal.macroNote = liveComputed.macroNote;
+        data.signal.newsBlocked = liveComputed.newsBlocked;
+        data.signal.candleTrigger = liveComputed.candleTrigger;
       }
       setAiReport(data);
 
-      // Log verified scanned signal to Signal Win-Rate Scorecard
+      // Log verified tradeable signal to Signal Win-Rate Scorecard (skip filtered WAIT setups)
       const sigObj = data?.signal || {};
       const parseNum = (str: unknown, fallback: number) => {
         if (typeof str !== 'string') return fallback;
@@ -2053,21 +2074,23 @@ export const StockRadarView: React.FC = () => {
       const parsedSl = parseNum(sigObj.stopLoss, liveComputed.sl);
       const parsedTp1 = parseNum(sigObj.takeProfit1, liveComputed.tp1);
       const parsedTp2 = parseNum(sigObj.takeProfit2, liveComputed.tp2);
-      const trackedRec = recordTrackedSignal({
-        symbol: stock.ticker,
-        market: stock.market,
-        timeframe: tfProfile.label,
-        source: 'RADAR',
-        direction: actUpper.includes('SELL') ? 'SELL' : 'BUY',
-        action: actUpper,
-        entryPrice: liveSpotPrice,
-        sl: parsedSl,
-        tp1: parsedTp1,
-        tp2: parsedTp2,
-        riskReward: sigObj.riskReward || liveComputed.riskReward,
-        confidenceScore: sigObj.confidenceScore || liveComputed.confidenceScore,
-      });
-      if ((tvQuote && tvQuote.price > 0) || stock.market === 'NSE') {
+      const trackedRec = liveComputed.isTradeable
+        ? recordTrackedSignal({
+            symbol: stock.ticker,
+            market: stock.market,
+            timeframe: tfProfile.label,
+            source: 'RADAR',
+            direction: actUpper.includes('SELL') ? 'SELL' : 'BUY',
+            action: actUpper,
+            entryPrice: liveComputed.entryPrice || liveSpotPrice,
+            sl: parsedSl,
+            tp1: parsedTp1,
+            tp2: parsedTp2,
+            riskReward: sigObj.riskReward || liveComputed.riskReward,
+            confidenceScore: sigObj.confidenceScore || liveComputed.confidenceScore,
+          })
+        : null;
+      if (liveComputed.isTradeable && ((tvQuote && tvQuote.price > 0) || stock.market === 'NSE')) {
         openPaperTradeFromSignal({
           symbol: stock.ticker,
           name: stock.name,
@@ -2097,6 +2120,8 @@ export const StockRadarView: React.FC = () => {
         timeframe: tfProfile.label,
         quote: tvQuote,
         market: stock.market,
+        macroContext,
+        newsHazard: radarNewsGuard,
       });
 
       const dec = computed.decimals;
@@ -2337,6 +2362,7 @@ Summary: ${sig.summary}`;
       selectedStock.historicalPoints
     );
     setLiveCandles(baseCandles);
+    setHasRealHistoryCandles(false);
 
     fetch(
       `/api/stocks/history?ticker=${encodeURIComponent(selectedStock.ticker)}&timeframe=${encodeURIComponent(timeframe)}`
@@ -2347,6 +2373,7 @@ Summary: ${sig.summary}`;
         const enriched = enrichCandlesWithIndicators(data.candles);
         if (enriched.length > 0) {
           setLiveCandles(enriched);
+          setHasRealHistoryCandles(true);
         }
       })
       .catch(() => {});
@@ -2553,22 +2580,23 @@ Summary: ${sig.summary}`;
       spotPrice: p,
       timeframe: tfProfile.label,
       quote: currentTv,
-      candles: chartViewMode === 'radar' ? activeCandles : undefined,
+      candles: chartViewMode === 'radar' && hasRealHistoryCandles ? activeCandles : undefined,
       market: selectedStock.market,
+      macroContext,
+      newsHazard: radarNewsGuard,
     });
 
-    if (aiReport?.signal) {
-      const aiAct = (aiReport.signal.action || '').toUpperCase();
-      const aiIsBuy = aiAct === 'STRONG BUY' || aiAct === 'BUY';
-      const aiIsSell = aiAct === 'STRONG SELL' || aiAct === 'SELL';
-      const liveIsBuy = computed.direction === 'BUY';
-      if ((liveIsBuy && aiIsBuy) || (!liveIsBuy && aiIsSell)) {
-        return {
-          ...aiReport.signal,
-          riskReward: sanitizeRiskRewardString(aiReport.signal.riskReward),
-        };
-      }
-    }
+    const matchedAiReport =
+      aiReport?.signal &&
+      aiReport.ticker === selectedStock.ticker &&
+      (!aiReport.timeframe || aiReport.timeframe === tfProfile.label)
+        ? aiReport.signal
+        : null;
+    const aiAct = (matchedAiReport?.action || '').toUpperCase();
+    const aiIsBuy = aiAct === 'STRONG BUY' || aiAct === 'BUY';
+    const aiIsSell = aiAct === 'STRONG SELL' || aiAct === 'SELL';
+    const liveIsBuy = computed.direction === 'BUY';
+    const aiAligned = Boolean(matchedAiReport && ((liveIsBuy && aiIsBuy) || (!liveIsBuy && aiIsSell)));
 
     const isBuy = computed.direction === 'BUY';
     const action = computed.action;
@@ -2645,25 +2673,40 @@ Summary: ${sig.summary}`;
     const fvgMin = parseFloat(fvgParts[0]) || p - slDelta * 0.1;
     const fvgMax = parseFloat(fvgParts[1]) || p + slDelta * 0.1;
     const liqTargetVal = isBuy ? p + tp1Delta * 1.08 : p - tp1Delta * 1.08;
-    const beTriggerVal = isBuy ? p + tp1Delta * 0.65 : p - tp1Delta * 0.65;
+    const beTriggerVal = computed.breakEvenTrigger;
 
     return {
       action,
-      setupType,
+      setupType: aiAligned && matchedAiReport?.setupType ? matchedAiReport.setupType : setupType,
       timeframe: tf,
       timeframeCategory: tfProfile.category,
-      confirmationScore: typeof adxVal === 'number'
-        ? (adxVal < 20
-            ? `Low Trend ADX: ${adxVal.toFixed(1)} (${tf} Consolidation Filter Active)`
-            : `4/4 Verified Confluences (${tf}): ADX ${adxVal.toFixed(1)} + TV Rating (${recAll && recAll >= 0 ? '+' : ''}${recAll?.toFixed(2)}) + Max 1:${MAX_RISK_REWARD} R:R`)
-        : `4/5 Confluences (${tf}): Sweep + FVG + RSI + EMA`,
+      isTradeable: computed.isTradeable,
+      waitReason: computed.waitReason,
+      signalGrade: computed.signalGrade,
+      executionMode: computed.executionMode,
+      entryNote: computed.entryNote,
+      breakEvenTrigger: formatPrice(beTriggerVal),
+      htfSummary: computed.htfSummary,
+      sessionName: computed.sessionName,
+      sessionQuality: computed.sessionQuality,
+      macroAligned: computed.macroAligned,
+      macroNote: computed.macroNote,
+      newsBlocked: computed.newsBlocked,
+      candleTrigger: computed.candleTrigger,
+      confirmationScore: !computed.isTradeable
+        ? (computed.waitReason || `Filtered (${computed.htfSummary})`)
+        : typeof adxVal === 'number'
+        ? `${computed.confluenceCount}/5 Verified (${tf}): ADX ${adxVal.toFixed(1)} · ${computed.htfSummary} · ${computed.sessionName}`
+        : `${computed.confluenceCount}/5 Verified (${tf}): ${computed.htfSummary} · ${computed.sessionName}`,
       entryZone: `${formatPrice(fvgMin)} - ${formatPrice(fvgMax)}`,
       takeProfit1: `${formatPrice(tp1Val)} (+${tp1PipsText})`,
       takeProfit2: `${formatPrice(tp2Val)} (+${tp2PipsText})`,
       stopLoss: `${formatPrice(stopLossVal)} (-${slPipsText})`,
       riskReward: computed.riskReward,
       confidenceScore,
-      summary: `${tf} (${tfProfile.category}) timeframe confirms ${setupType} with ${computed.riskReward} R:R (capped <= 1:${MAX_RISK_REWARD}.0) at ${formatPrice(p)}.`,
+      summary: aiAligned && matchedAiReport?.summary
+        ? matchedAiReport.summary
+        : `${tf} (${tfProfile.category}) [${computed.signalGrade}]: ${computed.htfSummary}. ${computed.macroNote}. ${computed.entryNote}. ${computed.breakEvenNote}.`,
       indicators: {
         rsi: typeof rsiVal === 'number'
           ? `${rsiVal.toFixed(1)} (${rsiVal > 60 ? 'Bullish Expansion' : rsiVal < 40 ? 'Oversold Discount' : 'Neutral Equilibrium'})`
@@ -2676,27 +2719,30 @@ Summary: ${sig.summary}`;
         movingAverages: typeof recAll === 'number'
           ? `TradingView MA Bias: ${recAll >= 0 ? '+' : ''}${recAll.toFixed(2)} (${isBuy ? 'Aligned with Uptrend' : 'Aligned with Downtrend'})`
           : `Trading ${isBuy ? 'above' : 'below'} 20 & 50 EMA on ${tf}`,
-        pivotPoint: formatPrice(pivotVal),
+        pivotPoint: typeof currentTv?.pivotMiddle === 'number'
+          ? `${formatPrice(currentTv.pivotMiddle)} (R1: ${formatPrice(currentTv.pivotR1 || p)} / S1: ${formatPrice(currentTv.pivotS1 || p)})`
+          : formatPrice(pivotVal),
         atr: atrText,
       },
       smc: {
         orderBlock: `${formatPrice(obMin)} - ${formatPrice(obMax)} (${isBuy ? 'Bullish Demand' : 'Bearish Supply'})`,
-        fairValueGap: `${formatPrice(fvgMin)} - ${formatPrice(fvgMax)} (${isBuy ? 'Bullish FVG' : 'Bearish FVG'})`,
-        liquidityTarget: `${isBuy ? 'Buy-Side Liquidity (BSL) resting above' : 'Sell-Side Liquidity (SSL) resting below'} ${formatPrice(liqTargetVal)}`,
-        marketStructure: isBuy ? `BOS (Break of Structure Bullish - ${tf})` : `CHoCH (Bearish Breakdown - ${tf})`,
+        fairValueGap: `${formatPrice(fvgMin)} - ${formatPrice(fvgMax)} (${computed.executionMode === 'PULLBACK_LIMIT' ? 'Pullback Limit Zone' : isBuy ? 'Bullish FVG' : 'Bearish FVG'})`,
+        liquidityTarget: `${isBuy ? 'Buy-Side Liquidity (BSL) resting above' : 'Sell-Side Liquidity (SSL) resting below'} ${formatPrice(liqTargetVal)} · ${computed.tp1Note}`,
+        marketStructure: `${computed.htfSummary} · ${isBuy ? `BOS Bullish (${tf})` : `CHoCH Bearish (${tf})`}`,
       },
       tradeManagement: {
-        breakEvenRule: `Move SL to Break-Even at ${formatPrice(beTriggerVal)}`,
-        partialProfitRule: `Close 70% volume at TP1; trail remaining 30% runner to TP2 (${computed.riskReward})`,
-        invalidationRule: `Close setup immediately if a ${tf} candle closes ${isBuy ? 'below' : 'above'} ${formatPrice(stopLossVal)}`,
+        breakEvenRule: computed.breakEvenNote,
+        partialProfitRule: `Close 70% at TP1 (${computed.tp1Note}); auto-trail remaining 30% to TP2 (${computed.riskReward})`,
+        invalidationRule: `${computed.slNote} — invalidate if ${tf} candle closes ${isBuy ? 'below' : 'above'} ${formatPrice(stopLossVal)}`,
       },
+      multiAspectAnalysis: aiAligned ? matchedAiReport?.multiAspectAnalysis : undefined,
     };
-  }, [aiReport, selectedStock, currentDisplayPrice, currentTvQuote, timeframe, chartViewMode, activeCandles]);
+  }, [aiReport, selectedStock, currentDisplayPrice, currentTvQuote, timeframe, chartViewMode, activeCandles, hasRealHistoryCandles, macroContext, radarNewsGuard]);
 
-  // Automatically open a deduplicated Paper Trade whenever an indicated BUY/SELL signal is live
+  // Automatically open a deduplicated Paper Trade ONLY when signal is tradeable (passes HTF + Anti-Chop filter)
   useEffect(() => {
     const hasLiveQuote = selectedStock.market === 'NSE' || Boolean(currentTvQuote && currentTvQuote.price > 0);
-    if (!hasLiveQuote || !(currentDisplayPrice > 0) || !activeSignal) return;
+    if (!hasLiveQuote || !(currentDisplayPrice > 0) || !activeSignal || activeSignal.isTradeable === false) return;
     const act = String(activeSignal.action || '').toUpperCase();
     if (!act.includes('BUY') && !act.includes('SELL')) return;
 
@@ -3950,6 +3996,8 @@ Summary: ${sig.summary}`;
                 timeframe: activeSignal.timeframe || timeframe || '15m',
                 quote: currentTvQuote,
                 market: selectedStock.market,
+                macroContext,
+                newsHazard: radarNewsGuard,
               });
               return (
                 <SignalScorecardDesk
@@ -4074,7 +4122,7 @@ Summary: ${sig.summary}`;
               <TelegramSignalDispatcher
                 activeSignal={{
                   symbol: selectedStock.ticker,
-                  action: (activeSignal.action === 'HOLD' || activeSignal.action === 'NEUTRAL' ? 'BUY' : activeSignal.action) as any,
+                  action: (activeSignal.action === 'NEUTRAL' ? 'BUY' : activeSignal.action) as any,
                   timeframe: activeSignal.timeframe,
                   price: currentDisplayPrice,
                   entryZone: activeSignal.entryZone,
@@ -4196,6 +4244,11 @@ Summary: ${sig.summary}`;
               </span>
 
               <div className="flex items-center gap-1.5">
+                {isAiLoading && (
+                  <span className="text-[10px] font-mono text-teal-300 bg-teal-500/10 border border-teal-500/30 px-2 py-0.5 rounded animate-pulse">
+                    AI Thesis...
+                  </span>
+                )}
                 <button
                   onClick={handleCopySignal}
                   className="p-1.5 rounded-lg bg-[#111e33] hover:bg-[#192b49] text-slate-300 hover:text-white transition-colors cursor-pointer"
@@ -4215,49 +4268,40 @@ Summary: ${sig.summary}`;
               </div>
             </div>
 
-            {isAiLoading ? (
-              <div className="py-12 text-center space-y-3">
-                <div className="w-8 h-8 rounded-full border-2 border-teal-400 border-t-transparent animate-spin mx-auto" />
-                <p className="text-xs text-slate-400 font-mono">
-                  Calculating {selectedStock.ticker} signal, order levels & indicator confluence...
-                </p>
-              </div>
-            ) : (
-              <InstitutionalSignalCard
-                ticker={selectedStock.ticker}
-                name={selectedStock.name}
-                market={selectedStock.market}
-                currency={selectedStock.currency}
-                currentPrice={currentDisplayPrice}
-                pipSpread={selectedStock.pipSpread}
-                activeTimeframe={timeframe}
-                onSelectTimeframe={(tf) => {
-                  setTimeframe(tf as Timeframe);
-                }}
-                signal={{
-                  action: (activeSignal.action as any) || 'BUY',
-                  setupType: activeSignal.setupType,
-                  timeframe: activeSignal.timeframe,
-                  timeframeCategory: activeSignal.timeframeCategory,
-                  confirmationScore: activeSignal.confirmationScore,
-                  entryZone: activeSignal.entryZone,
-                  takeProfit1: activeSignal.takeProfit1,
-                  takeProfit2: activeSignal.takeProfit2,
-                  stopLoss: activeSignal.stopLoss,
-                  riskReward: activeSignal.riskReward,
-                  confidenceScore: activeSignal.confidenceScore,
-                  summary: activeSignal.summary,
-                  indicators: activeSignal.indicators,
-                  smc: activeSignal.smc,
-                  tradeManagement: activeSignal.tradeManagement,
-                  multiAspectAnalysis: activeSignal.multiAspectAnalysis,
-                }}
-                onExecutePaperTrade={handleExecuteSignalToPaper}
-                onOpenPriceAlert={(_target) => {
-                  setIsAlertsModalOpen(true);
-                }}
-              />
-            )}
+            <InstitutionalSignalCard
+              ticker={selectedStock.ticker}
+              name={selectedStock.name}
+              market={selectedStock.market}
+              currency={selectedStock.currency}
+              currentPrice={currentDisplayPrice}
+              pipSpread={selectedStock.pipSpread}
+              activeTimeframe={timeframe}
+              onSelectTimeframe={(tf) => {
+                setTimeframe(tf as Timeframe);
+              }}
+              signal={{
+                action: (activeSignal.action as any) || 'BUY',
+                setupType: activeSignal.setupType,
+                timeframe: activeSignal.timeframe,
+                timeframeCategory: activeSignal.timeframeCategory,
+                confirmationScore: activeSignal.confirmationScore,
+                entryZone: activeSignal.entryZone,
+                takeProfit1: activeSignal.takeProfit1,
+                takeProfit2: activeSignal.takeProfit2,
+                stopLoss: activeSignal.stopLoss,
+                riskReward: activeSignal.riskReward,
+                confidenceScore: activeSignal.confidenceScore,
+                summary: activeSignal.summary,
+                indicators: activeSignal.indicators,
+                smc: activeSignal.smc,
+                tradeManagement: activeSignal.tradeManagement,
+                multiAspectAnalysis: activeSignal.multiAspectAnalysis,
+              }}
+              onExecutePaperTrade={handleExecuteSignalToPaper}
+              onOpenPriceAlert={(_target) => {
+                setIsAlertsModalOpen(true);
+              }}
+            />
           </div>
 
           {/* AI Fundamental Valuation Verdict */}

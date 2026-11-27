@@ -73,7 +73,7 @@ import {
 } from 'lucide-react';
 import { BOT_CATALOG, BotDefinition, BotCategory } from '../../utils/eaCatalog.ts';
 import { useFinance } from '../../context/FinanceContext.tsx';
-import { useTradingViewQuotes, resolveTradingViewPrice, lookupTradingViewQuote } from '../../utils/tradingViewSync.ts';
+import { useTradingViewQuotes, resolveTradingViewPrice, lookupTradingViewQuote, extractMacroCorrelationContext } from '../../utils/tradingViewSync.ts';
 import { getAssetMarketSession } from '../../utils/marketHours.ts';
 import { computeTimeframeSignalLevels, evaluateDirectionalConfluence, getTimeframeProfile, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
 import { BotLiveChart } from '../trading/BotLiveChart.tsx';
@@ -83,7 +83,6 @@ import { useNewsGuard } from '../../utils/newsGuard.ts';
 import { scheduleTradingCloudPush, CLOUD_TRADING_HYDRATED_EVENT } from '../../utils/tradingCloudSync.ts';
 import { generateCandles } from '../../utils/stockCandles.ts';
 import { evaluatePropTradeBlock, PROP_GUARD_EVENT } from '../../utils/propGuardian.ts';
-import { isMasterEngineRunning } from '../../utils/engineIgnition.ts';
 
 // =========================================================================
 // COMPREHENSIVE CURRENCIES & TRADING INSTRUMENTS CATALOG
@@ -299,9 +298,7 @@ export const BotStudioView: React.FC = () => {
   const [isMuted, setIsMuted] = useState(false);
 
   // Institutional Guardian & Execution Controls
-  const [autoPilotActive, setAutoPilotActive] = useState<boolean>(() => {
-    return isMasterEngineRunning() && !evaluatePropTradeBlock().blocked;
-  });
+  const [autoPilotActive, setAutoPilotActive] = useState<boolean>(false);
   const [propGuardBlock, setPropGuardBlock] = useState(() => evaluatePropTradeBlock());
   const [breakEvenFeatureEnabled, setBreakEvenFeatureEnabled] = useState<boolean>(true);
   const [autoRearmEnabled, setAutoRearmEnabled] = useState<boolean>(false);
@@ -445,8 +442,9 @@ export const BotStudioView: React.FC = () => {
       { tf: 'H1', label: 'Session Trend', indicator: 'SuperTrend Cloud' },
       { tf: 'H4', label: 'Institutional Anchor', indicator: 'MACD Divergence' },
     ];
+    const macroCtx = extractMacroCorrelationContext(liveTvQuotes);
     return tfConfigs.map((cfg) => {
-      const res = evaluateDirectionalConfluence(tvQuote, livePrice, cfg.tf, forcedDir);
+      const res = evaluateDirectionalConfluence(tvQuote, livePrice, cfg.tf, forcedDir, undefined, activeAsset.symbol, activeAsset.category, macroCtx);
       return {
         tf: cfg.tf,
         label: cfg.label,
@@ -455,7 +453,7 @@ export const BotStudioView: React.FC = () => {
         indicator: cfg.indicator,
       };
     });
-  }, [activeAsset.symbol, liveTvQuotes, livePrice, selectedBot.id]);
+  }, [activeAsset.symbol, activeAsset.category, liveTvQuotes, livePrice, selectedBot.id]);
 
   // =========================================================================
   // DORMANT SIGNAL FACTORY (Timeframe-Scaled, Max 1:5.0 R:R Cap)
@@ -482,6 +480,7 @@ export const BotStudioView: React.FC = () => {
       'FOREX';
 
     const tvQuote = lookupTradingViewQuote(liveTvQuotesRef.current, asset.symbol);
+    const macroCtx = extractMacroCorrelationContext(liveTvQuotesRef.current);
     const computed = computeTimeframeSignalLevels({
       symbol: asset.symbol,
       spotPrice: spot,
@@ -489,6 +488,7 @@ export const BotStudioView: React.FC = () => {
       quote: tvQuote,
       market: mappedMarket,
       preferredDirection: preferredDir,
+      macroContext: macroCtx,
     });
 
     const type: 'BUY' | 'SELL' = computed.direction;
@@ -566,7 +566,7 @@ export const BotStudioView: React.FC = () => {
         : selectedBot.id.includes('crash')
         ? 'SELL'
         : undefined;
-      const evalRes = evaluateDirectionalConfluence(tvQuote, tvSpot, selectedTimeframe || 'M5', forcedDir);
+      const evalRes = evaluateDirectionalConfluence(tvQuote, tvSpot, selectedTimeframe || 'M5', forcedDir, undefined, activeAsset.symbol, activeAsset.category, extractMacroCorrelationContext(liveTvQuotes));
       if (evalRes.direction !== dormantSignalRef.current.type) {
         const syncedSig = createDormantSignal(selectedBot, activeAsset, tvSpot, evalRes.direction, selectedTimeframe);
         dormantSignalRef.current = syncedSig;

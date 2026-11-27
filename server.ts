@@ -18,6 +18,8 @@ import {
   formatRiskReward,
   sanitizeRiskRewardString,
   resolveQuoteForTimeframe,
+  type MacroCorrelationContext,
+  type NewsHazardInput,
 } from './src/utils/signalEngine.ts';
 
 dotenv.config();
@@ -119,6 +121,15 @@ interface TradingViewQuote {
   ema200?: number;
   atr?: number;
   adx?: number;
+  bbUpper?: number;
+  bbLower?: number;
+  pivotMiddle?: number;
+  pivotR1?: number;
+  pivotS1?: number;
+  pivotR2?: number;
+  pivotS2?: number;
+  stochK?: number;
+  stochD?: number;
   volume?: number;
   marketCap?: number;
   peRatio?: number;
@@ -135,6 +146,10 @@ interface TradingViewQuote {
     ema20?: number;
     ema50?: number;
     changePercent?: number;
+    atr?: number;
+    adx?: number;
+    bbUpper?: number;
+    bbLower?: number;
   }>;
 }
 
@@ -619,8 +634,93 @@ async function fetchTradingViewWsSnapshot(symbols: string[], timeoutMs = 3200): 
   });
 }
 
+const derivLiveTelemetryCache: Record<string, { quote: TradingViewQuote; updatedAt: number }> = {};
+
+function extractServerMacroContext(quotes: Record<string, TradingViewQuote>): MacroCorrelationContext {
+  const dxy = quotes['DXY'] || quotes['TVC:DXY'];
+  const us10y = quotes['US10Y'] || quotes['TVC:US10Y'];
+  return {
+    dxyChangePercent: typeof dxy?.changePercent === 'number' ? dxy.changePercent : undefined,
+    dxyRecAll: typeof dxy?.recommendAll === 'number' ? dxy.recommendAll : undefined,
+    us10yChangePercent: typeof us10y?.changePercent === 'number' ? us10y.changePercent : undefined,
+    us10yRecAll: typeof us10y?.recommendAll === 'number' ? us10y.recommendAll : undefined,
+  };
+}
+
+function getRelevantNewsCurrenciesServer(symbol: string): string[] {
+  const clean = symbol.replace('/', '').toUpperCase();
+  if (clean.includes('XAU') || clean.includes('XAG') || clean.includes('WTI') || clean.includes('US500') || clean.includes('NAS100') || clean.includes('US30') || clean.includes('BTC') || clean.includes('ETH') || clean.includes('SOL')) {
+    return ['USD'];
+  }
+  if (clean.includes('GER40') || clean.includes('DAX')) return ['EUR', 'USD'];
+  if (clean.includes('UK100')) return ['GBP', 'USD'];
+  if (clean.includes('JPN225')) return ['JPY', 'USD'];
+  if (clean.includes('KES')) return ['KES', 'USD'];
+  if (clean.length >= 6 && !clean.startsWith('R_') && !clean.startsWith('1HZ') && !clean.startsWith('BOOM') && !clean.startsWith('CRASH') && clean !== 'STP') {
+    return Array.from(new Set([clean.slice(0, 3), clean.slice(3, 6), 'USD']));
+  }
+  return ['USD'];
+}
+
+async function getServerNewsHazardForSymbol(symbol: string, windowMinutes = 30): Promise<NewsHazardInput> {
+  try {
+    const rawEvents = await getLiveForexFactoryEvents();
+    if (!Array.isArray(rawEvents) || rawEvents.length === 0) {
+      return { isHazardWindow: false, severity: 'CLEAR' };
+    }
+    const nowMs = Date.now();
+    const relevantCurrencies = getRelevantNewsCurrenciesServer(symbol);
+    const matching = rawEvents
+      .filter((ev) => relevantCurrencies.includes(String(ev.country || '').toUpperCase()))
+      .map((ev) => {
+        const evTime = ev.date ? new Date(ev.date).getTime() : NaN;
+        const minsDiff = Number.isFinite(evTime) ? (evTime - nowMs) / 60000 : NaN;
+        return { ev, minsDiff };
+      })
+      .filter((x) => Number.isFinite(x.minsDiff));
+
+    const highHazard = matching
+      .filter((x) => String(x.ev.impact).toUpperCase() === 'HIGH' && x.minsDiff >= -10 && x.minsDiff <= windowMinutes)
+      .sort((a, b) => Math.abs(a.minsDiff) - Math.abs(b.minsDiff))[0];
+
+    if (highHazard) {
+      return {
+        isHazardWindow: true,
+        severity: 'HIGH_PAUSE',
+        title: String(highHazard.ev.title || 'High-Impact Release'),
+        currency: String(highHazard.ev.country || 'USD'),
+        minutesToNext: Math.round(highHazard.minsDiff),
+      };
+    }
+
+    const medHazard = matching
+      .filter((x) => String(x.ev.impact).toUpperCase() === 'MEDIUM' && x.minsDiff >= -5 && x.minsDiff <= 20)
+      .sort((a, b) => Math.abs(a.minsDiff) - Math.abs(b.minsDiff))[0];
+
+    if (medHazard) {
+      return {
+        isHazardWindow: false,
+        severity: 'MEDIUM_CAUTION',
+        title: String(medHazard.ev.title || 'Medium-Impact Release'),
+        currency: String(medHazard.ev.country || 'USD'),
+        minutesToNext: Math.round(medHazard.minsDiff),
+      };
+    }
+  } catch {}
+  return { isHazardWindow: false, severity: 'CLEAR' };
+}
+
 function injectDerivQuotes(target: Record<string, TradingViewQuote>, timeIso: string) {
+  const nowMs = Date.now();
   const populate = (clean: string, price: number, atr: number, rsi: number = 52.4) => {
+    const liveCached = derivLiveTelemetryCache[clean];
+    if (liveCached && nowMs - liveCached.updatedAt < 180_000 && liveCached.quote?.price > 0) {
+      const q = { ...liveCached.quote, symbol: clean, isFallback: false };
+      target[clean] = q;
+      target[clean.replace('_', '')] = q;
+      return;
+    }
+
     const isSynthetic = clean.startsWith('R_') || clean.includes('1HZ') || clean.includes('BOOM') || clean.includes('CRASH') || clean === 'STP' || clean.startsWith('JD') || clean.startsWith('RB');
     if (!target[clean] || isSynthetic) {
       const spread = price * 0.0015;
@@ -790,13 +890,17 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
   const baseTvColumns = [
     "close", "change", "change_abs", "high", "low", "open",
     "Recommend.All", "Recommend.MA", "Recommend.Other", "RSI",
-    "MACD.macd", "MACD.signal", "EMA20", "EMA50", "EMA200", "ATR", "ADX"
+    "MACD.macd", "MACD.signal", "EMA20", "EMA50", "EMA200", "ATR", "ADX",
+    "BB.upper", "BB.lower",
+    "Pivot.M.Classic.Middle", "Pivot.M.Classic.R1", "Pivot.M.Classic.S1",
+    "Pivot.M.Classic.R2", "Pivot.M.Classic.S2",
+    "Stoch.K", "Stoch.D"
   ];
   const stockExtraColumns = [
     "volume", "market_cap_basic", "price_earnings_ttm", "dividends_yield_current", "price_52_week_high", "price_52_week_low"
   ];
   const tfBuckets = ['1', '5', '15', '30', '60', '240', '1W', '1M'] as const;
-  const tfFields = ['Recommend.All', 'Recommend.MA', 'Recommend.Other', 'RSI', 'MACD.macd', 'MACD.signal', 'EMA20', 'EMA50', 'change'] as const;
+  const tfFields = ['Recommend.All', 'Recommend.MA', 'Recommend.Other', 'RSI', 'MACD.macd', 'MACD.signal', 'EMA20', 'EMA50', 'change', 'ATR', 'ADX', 'BB.upper', 'BB.lower'] as const;
   const tfColumns = tfBuckets.flatMap((tf) => tfFields.map((f) => `${f}|${tf}`));
 
   const tvColumns = [...baseTvColumns, ...tfColumns, 'bid', 'ask'];
@@ -864,6 +968,10 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
             ema20: typeof item.d[12] === 'number' ? Number(item.d[12]) : existing?.ema20,
             ema50: typeof item.d[13] === 'number' ? Number(item.d[13]) : existing?.ema50,
             changePercent: typeof item.d[1] === 'number' ? Math.round(Number(item.d[1]) * 100) / 100 : existing?.changePercent,
+            atr: typeof item.d[15] === 'number' ? Number(item.d[15]) : existing?.atr,
+            adx: typeof item.d[16] === 'number' ? Math.round(Number(item.d[16]) * 10) / 10 : existing?.adx,
+            bbUpper: typeof item.d[17] === 'number' ? Number(item.d[17]) : existing?.bbUpper,
+            bbLower: typeof item.d[18] === 'number' ? Number(item.d[18]) : existing?.bbLower,
           },
         };
 
@@ -879,10 +987,15 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
             ema20: typeof item.d[baseIdx + 6] === 'number' ? Number(item.d[baseIdx + 6]) : timeframeSignals[tfKey]?.ema20,
             ema50: typeof item.d[baseIdx + 7] === 'number' ? Number(item.d[baseIdx + 7]) : timeframeSignals[tfKey]?.ema50,
             changePercent: typeof item.d[baseIdx + 8] === 'number' ? Math.round(Number(item.d[baseIdx + 8]) * 100) / 100 : timeframeSignals[tfKey]?.changePercent,
+            atr: typeof item.d[baseIdx + 9] === 'number' ? Number(item.d[baseIdx + 9]) : timeframeSignals[tfKey]?.atr,
+            adx: typeof item.d[baseIdx + 10] === 'number' ? Math.round(Number(item.d[baseIdx + 10]) * 10) / 10 : timeframeSignals[tfKey]?.adx,
+            bbUpper: typeof item.d[baseIdx + 11] === 'number' ? Number(item.d[baseIdx + 11]) : timeframeSignals[tfKey]?.bbUpper,
+            bbLower: typeof item.d[baseIdx + 12] === 'number' ? Number(item.d[baseIdx + 12]) : timeframeSignals[tfKey]?.bbLower,
           };
         });
 
         const bidAskOffset = tfOffset + tfColumns.length;
+        const stockBaseIdx = baseTvColumns.length;
         const rawBid = typeof item.d[bidAskOffset] === 'number' ? Number(item.d[bidAskOffset]) : existing?.bid;
         const rawAsk = typeof item.d[bidAskOffset + 1] === 'number' ? Number(item.d[bidAskOffset + 1]) : existing?.ask;
         const scannerChp = typeof item.d[1] === 'number' && Number.isFinite(Number(item.d[1])) ? Math.round(Number(item.d[1]) * 100) / 100 : 0;
@@ -912,12 +1025,21 @@ export async function fetchLiveTradingViewQuotes(forceRefresh = false): Promise<
           ema200: typeof item.d[14] === 'number' ? Number(item.d[14]) : existing?.ema200,
           atr: typeof item.d[15] === 'number' ? Number(item.d[15]) : existing?.atr,
           adx: typeof item.d[16] === 'number' ? Math.round(Number(item.d[16]) * 10) / 10 : existing?.adx,
-          volume: isStock && typeof item.d[17] === 'number' ? Number(item.d[17]) : existing?.volume,
-          marketCap: isStock && typeof item.d[18] === 'number' ? Number(item.d[18]) : existing?.marketCap,
-          peRatio: isStock && typeof item.d[19] === 'number' ? Math.round(Number(item.d[19]) * 10) / 10 : existing?.peRatio,
-          dividendYield: isStock && typeof item.d[20] === 'number' ? Math.round(Number(item.d[20]) * 100) / 100 : existing?.dividendYield,
-          high52w: isStock && typeof item.d[21] === 'number' ? Number(item.d[21]) : existing?.high52w,
-          low52w: isStock && typeof item.d[22] === 'number' ? Number(item.d[22]) : existing?.low52w,
+          bbUpper: typeof item.d[17] === 'number' ? Number(item.d[17]) : existing?.bbUpper,
+          bbLower: typeof item.d[18] === 'number' ? Number(item.d[18]) : existing?.bbLower,
+          pivotMiddle: typeof item.d[19] === 'number' ? Number(item.d[19]) : existing?.pivotMiddle,
+          pivotR1: typeof item.d[20] === 'number' ? Number(item.d[20]) : existing?.pivotR1,
+          pivotS1: typeof item.d[21] === 'number' ? Number(item.d[21]) : existing?.pivotS1,
+          pivotR2: typeof item.d[22] === 'number' ? Number(item.d[22]) : existing?.pivotR2,
+          pivotS2: typeof item.d[23] === 'number' ? Number(item.d[23]) : existing?.pivotS2,
+          stochK: typeof item.d[24] === 'number' ? Math.round(Number(item.d[24]) * 10) / 10 : existing?.stochK,
+          stochD: typeof item.d[25] === 'number' ? Math.round(Number(item.d[25]) * 10) / 10 : existing?.stochD,
+          volume: isStock && typeof item.d[stockBaseIdx] === 'number' ? Number(item.d[stockBaseIdx]) : existing?.volume,
+          marketCap: isStock && typeof item.d[stockBaseIdx + 1] === 'number' ? Number(item.d[stockBaseIdx + 1]) : existing?.marketCap,
+          peRatio: isStock && typeof item.d[stockBaseIdx + 2] === 'number' ? Math.round(Number(item.d[stockBaseIdx + 2]) * 10) / 10 : existing?.peRatio,
+          dividendYield: isStock && typeof item.d[stockBaseIdx + 3] === 'number' ? Math.round(Number(item.d[stockBaseIdx + 3]) * 100) / 100 : existing?.dividendYield,
+          high52w: isStock && typeof item.d[stockBaseIdx + 4] === 'number' ? Number(item.d[stockBaseIdx + 4]) : existing?.high52w,
+          low52w: isStock && typeof item.d[stockBaseIdx + 5] === 'number' ? Number(item.d[stockBaseIdx + 5]) : existing?.low52w,
           timeframeSignals,
         };
         applyTvQuoteAliases(updated, rawSym, q);
@@ -1275,6 +1397,44 @@ app.get('/api/tradingview/price', async (req, res) => {
   return res.status(404).json({ error: `Price for ${sym} not found in TradingView scanner feed.` });
 });
 
+// Endpoint: Ingest browser-computed live Deriv WS ticks_history technicals so backend EA/scanners stay synced
+app.post('/api/deriv/telemetry', (req, res) => {
+  try {
+    const incoming = req.body?.quotes;
+    if (!incoming || typeof incoming !== 'object') {
+      return res.status(400).json({ error: 'Invalid quotes payload' });
+    }
+    const nowMs = Date.now();
+    let updatedCount = 0;
+    for (const [rawSym, rawQ] of Object.entries(incoming as Record<string, TradingViewQuote>)) {
+      if (!rawQ || typeof rawQ.price !== 'number' || rawQ.price <= 0) continue;
+      const clean = rawSym.toUpperCase().replace(/[^A-Z0-9_]/g, '');
+      const normalizedQ: TradingViewQuote = {
+        ...rawQ,
+        symbol: clean,
+        time: rawQ.time || new Date().toISOString(),
+        isFallback: false,
+      };
+      derivLiveTelemetryCache[clean] = { quote: normalizedQ, updatedAt: nowMs };
+      tvQuotesCache[clean] = normalizedQ;
+      tvQuotesCache[clean.replace('_', '')] = normalizedQ;
+      if (clean === 'R_75') {
+        tvQuotesCache['VOL75'] = normalizedQ;
+        tvQuotesCache['V75'] = normalizedQ;
+      } else if (clean === 'R_100') {
+        tvQuotesCache['VOL100'] = normalizedQ;
+      }
+      updatedCount++;
+    }
+    if (updatedCount > 0) {
+      broadcastTvQuotesToSse();
+    }
+    return res.json({ success: true, updatedCount });
+  } catch {
+    return res.status(500).json({ error: 'Failed to ingest Deriv telemetry' });
+  }
+});
+
 // Server-side Bot State & Remote MT5 Controller
 interface BotState {
   isRunning: boolean;
@@ -1526,11 +1686,16 @@ app.get('/api/ea/signal', async (req, res) => {
     else if (isIndex) basePrice = 27744.26;
   }
 
+  const macroContext = extractServerMacroContext(liveQuotes);
+  const newsHazard = await getServerNewsHazardForSymbol(clean, 30);
+
   const computed = computeTimeframeSignalLevels({
     symbol: clean,
     spotPrice: basePrice,
     timeframe: tf,
     quote,
+    macroContext,
+    newsHazard,
   });
 
   return res.json({
@@ -1540,18 +1705,33 @@ app.get('/api/ea/signal', async (req, res) => {
     symbol,
     timeframe: computed.timeframe,
     timeframeCategory: computed.category,
-    action: computed.direction,
+    action: computed.isTradeable ? computed.direction : 'WAIT',
+    biasedDirection: computed.direction,
+    isTradeable: computed.isTradeable,
+    waitReason: computed.waitReason,
+    signalGrade: computed.signalGrade,
+    htfAligned: computed.htfAligned,
+    htfSummary: computed.htfSummary,
+    macroAligned: computed.macroAligned,
+    macroNote: computed.macroNote,
+    newsBlocked: computed.newsBlocked,
+    candleTrigger: computed.candleTrigger,
+    executionMode: computed.executionMode,
     confidenceScore: computed.confidenceScore,
     setupType: computed.setupLabel,
     currentPrice: basePrice,
+    entryPrice: computed.entryPrice,
     entryZone: computed.entryZone,
     stopLoss: computed.sl,
     takeProfit1: computed.tp1,
     takeProfit2: computed.tp2,
+    breakEvenTrigger: computed.breakEvenTrigger,
     riskReward: computed.riskReward,
     maxRiskReward: `1:${MAX_RISK_REWARD.toFixed(1)}`,
     maxSpreadAllowedPoints: isGold ? 35 : isJpy || isIndex ? 25 : 20,
-    killzoneActive: true,
+    killzoneActive: computed.sessionQuality !== 'OFF_PEAK' && !computed.newsBlocked,
+    sessionName: computed.sessionName,
+    sessionQuality: computed.sessionQuality,
     source: 'TRADINGVIEW_REAL_TIME_FEED',
     serverTimeUtc: new Date().toISOString(),
   });
@@ -1715,7 +1895,13 @@ app.post('/api/ea/ai-scan-and-open', async (req, res) => {
       },
     ];
 
-    const buildOpportunity = (spec: (typeof scanSpecs)[number]) => {
+    const macroContext = extractServerMacroContext(liveQuotes);
+    await getLiveForexFactoryEvents();
+
+    const openCandidates = [];
+    for (const spec of scanSpecs) {
+      if (!isServerMarketOpen(spec.symbol)) continue;
+      const newsHazard = await getServerNewsHazardForSymbol(spec.symbol, 30);
       const q =
         liveQuotes[spec.symbol] ||
         liveQuotes[`OANDA:${spec.symbol}`] ||
@@ -1733,18 +1919,24 @@ app.post('/api/ea/ai-scan-and-open', async (req, res) => {
         quote: q,
         market: spec.market,
         preferredDirection: spec.symbol === 'BOOM1000' ? 'BUY' : spec.symbol === 'CRASH1000' ? 'SELL' : undefined,
+        macroContext,
+        newsHazard,
       });
 
       const tfQuote = resolveQuoteForTimeframe(q, tfProfile.normalized);
-      const adxVal = typeof q?.adx === 'number' ? q.adx : 26.4;
+      const adxVal = typeof tfQuote.adx === 'number' ? tfQuote.adx : typeof q?.adx === 'number' ? q.adx : 26.4;
       const rsiVal = typeof tfQuote.rsi === 'number' ? tfQuote.rsi : (computed.direction === 'BUY' ? 56.0 : 42.0);
       const recVal = typeof tfQuote.recommendAll === 'number' ? tfQuote.recommendAll : (computed.direction === 'BUY' ? 0.22 : -0.22);
 
-      const score = adxVal < 18 ? Math.min(81, computed.confidenceScore - 6) : computed.confidenceScore;
+      const score = !computed.isTradeable ? Math.min(72, computed.confidenceScore) : computed.confidenceScore;
       const grade =
-        score >= 90
+        computed.newsBlocked
+          ? 'NEWS BLACKOUT'
+          : !computed.isTradeable
+          ? 'WAIT / FILTERED'
+          : score >= 90 && computed.htfAligned
           ? `A+ PRIME ${tfProfile.category.toUpperCase()}`
-          : score >= 85
+          : score >= 84 && computed.htfAligned
           ? 'A HIGH PROBABILITY'
           : score >= 76
           ? 'B+ OPPORTUNITY'
@@ -1756,12 +1948,22 @@ app.post('/api/ea/ai-scan-and-open', async (req, res) => {
           ? `+${computed.tp1UnitValue} to +${computed.tp2UnitValue} pips`
           : `+$${Math.round(computed.tp1Distance * pointDollarMult * activeLots)} (TP1) / +$${Math.round(computed.tp2Distance * pointDollarMult * activeLots)} (TP2)`;
 
-      return {
+      openCandidates.push({
         symbol: spec.symbol,
         name: spec.name,
         basePrice: spot,
         timeframe: computed.timeframe,
         type: computed.direction,
+        isTradeable: computed.isTradeable,
+        waitReason: computed.waitReason,
+        htfSummary: computed.htfSummary,
+        macroAligned: computed.macroAligned,
+        macroNote: computed.macroNote,
+        newsBlocked: computed.newsBlocked,
+        candleTrigger: computed.candleTrigger,
+        executionMode: computed.executionMode,
+        breakEvenTrigger: computed.breakEvenTrigger,
+        sessionQuality: computed.sessionQuality,
         score,
         grade,
         category: spec.category,
@@ -1774,28 +1976,27 @@ app.post('/api/ea/ai-scan-and-open', async (req, res) => {
         riskReward: computed.riskReward,
         projectedGain,
         adx: Number(adxVal.toFixed(1)),
-        atr: q?.atr ? Number(q.atr.toFixed(computed.decimals)) : computed.slDistance,
+        atr: tfQuote.atr ? Number(tfQuote.atr.toFixed(computed.decimals)) : q?.atr ? Number(q.atr.toFixed(computed.decimals)) : computed.slDistance,
         tvScore: Number(recVal.toFixed(2)),
         confluences: {
-          smc: `${computed.direction === 'BUY' ? 'SSL' : 'BSL'} liquidity sweep on ${tfProfile.label} into ${computed.direction === 'BUY' ? 'demand' : 'supply'} at ${spot.toFixed(computed.decimals)}.`,
-          indicators: `TV Rating: ${recVal >= 0 ? '+' : ''}${recVal.toFixed(2)} | RSI: ${rsiVal.toFixed(1)} | ADX: ${adxVal.toFixed(1)} (${adxVal >= 22 ? 'Trending' : 'Chop Filter'})`,
-          macro: spec.macroNote,
-          killzone: spec.killzoneNote,
+          smc: `${computed.htfSummary} · ${computed.entryNote}`,
+          indicators: `TV: ${recVal >= 0 ? '+' : ''}${recVal.toFixed(2)} | RSI: ${rsiVal.toFixed(1)} | ADX: ${adxVal.toFixed(1)} (${adxVal >= 20 ? 'Trending' : 'Chop Guard'})`,
+          macro: `${computed.sessionName} (${computed.sessionQuality}) · ${computed.macroNote}`,
+          killzone: computed.newsBlocked ? `NEWS GUARD ACTIVE: ${computed.waitReason}` : `${computed.breakEvenNote}`,
         },
-        aiThesis: `${spec.symbol} evaluated on ${tfProfile.label} (${tfProfile.category}) at TradingView live rate ${spot.toFixed(computed.decimals)}. Timeframe-scaled SL (${computed.slUnitValue} ${computed.unitLabel}) & TP targets maintain disciplined ${computed.riskReward} R:R (strictly capped <= 1:${MAX_RISK_REWARD}). Risk allocation: ${riskPercent}%.`,
-      };
-    };
+        aiThesis: `${spec.symbol} [${computed.signalGrade}] on ${tfProfile.label} at ${spot.toFixed(computed.decimals)}. ${computed.htfSummary}. ${computed.macroNote}. ${computed.tp1Note}; ${computed.breakEvenNote}. R:R ${computed.riskReward}.`,
+      });
+    }
 
-    const openCandidates = scanSpecs
-      .filter((spec) => isServerMarketOpen(spec.symbol))
-      .map(buildOpportunity);
-
-    const sortedOpportunities = openCandidates.sort((a, b) => b.score - a.score);
+    const sortedOpportunities = openCandidates.sort((a, b) => {
+      if (a.isTradeable !== b.isTradeable) return a.isTradeable ? -1 : 1;
+      return b.score - a.score;
+    });
     const bestOpp = sortedOpportunities[0];
 
     let openedPosition = null;
 
-    if (autoOpen && bestOpp && bestOpp.score >= minScore && isServerMarketOpen(bestOpp.symbol)) {
+    if (autoOpen && bestOpp && bestOpp.isTradeable && bestOpp.score >= minScore && isServerMarketOpen(bestOpp.symbol)) {
       const lot = activeLots < 0.01 ? Math.round(activeLots * 1000) / 1000 : Math.round(activeLots * 100) / 100;
       const newTicket = Math.floor(Math.random() * 900000 + 98000000);
 
@@ -3167,6 +3368,9 @@ app.post('/api/stocks/analyze', async (req, res) => {
         ? 18.5
         : 185.0;
 
+    const macroContext = extractServerMacroContext(liveQuotes);
+    const newsHazard = await getServerNewsHazardForSymbol(cleanTick, 30);
+
     // Build timeframe-calibrated deterministic signal BEFORE prompting AI so Gemini aligns strictly with live TradingView chart direction
     const computedSignal = computeTimeframeSignalLevels({
       symbol: cleanTick,
@@ -3182,9 +3386,11 @@ app.post('/api/stocks/analyze', async (req, res) => {
         : market === 'US'
         ? 'US'
         : 'NSE',
+      macroContext,
+      newsHazard,
     });
     const tfMetrics = resolveQuoteForTimeframe(tvQuote, tfProfile.label);
-    const liveDirNote = `LIVE TRADINGVIEW TELEMETRY (${tfProfile.label}): Price=${resolvedSpotPrice}, Change=${typeof tfMetrics.changePercent === 'number' ? tfMetrics.changePercent.toFixed(2) + '%' : 'N/A'}, TV_Rating=${typeof tfMetrics.recommendAll === 'number' ? tfMetrics.recommendAll.toFixed(2) : 'N/A'}, RSI=${typeof tfMetrics.rsi === 'number' ? tfMetrics.rsi.toFixed(1) : 'N/A'}, EMA20=${tfMetrics.ema20 ?? 'N/A'}, EMA50=${tfMetrics.ema50 ?? 'N/A'}. MANDATORY VERIFIED DIRECTION: "${computedSignal.action}" (${computedSignal.direction}). You MUST NOT output BUY/STRONG BUY if the live chart direction is SELL, and MUST NOT output SELL/STRONG SELL if the live chart direction is BUY.`;
+    const liveDirNote = `LIVE TRADINGVIEW TELEMETRY (${tfProfile.label}): Price=${resolvedSpotPrice}, Change=${typeof tfMetrics.changePercent === 'number' ? tfMetrics.changePercent.toFixed(2) + '%' : 'N/A'}, TV_Rating=${typeof tfMetrics.recommendAll === 'number' ? tfMetrics.recommendAll.toFixed(2) : 'N/A'}, RSI=${typeof tfMetrics.rsi === 'number' ? tfMetrics.rsi.toFixed(1) : 'N/A'}, ADX=${typeof tfMetrics.adx === 'number' ? tfMetrics.adx.toFixed(1) : tvQuote?.adx ?? 'N/A'}, EMA20=${tfMetrics.ema20 ?? 'N/A'}, EMA50=${tfMetrics.ema50 ?? 'N/A'}, Pivot=${tvQuote?.pivotMiddle ?? 'N/A'}, R1=${tvQuote?.pivotR1 ?? 'N/A'}, S1=${tvQuote?.pivotS1 ?? 'N/A'}. HTF_Alignment=${computedSignal.htfSummary}. Macro=${computedSignal.macroNote}. NewsGuard=${computedSignal.newsBlocked ? 'RED-FOLDER BLACKOUT ACTIVE' : newsHazard.severity}. Session=${computedSignal.sessionName} (${computedSignal.sessionQuality}). ExecutionMode=${computedSignal.executionMode}. Grade=${computedSignal.signalGrade}. MANDATORY VERIFIED ACTION: "${computedSignal.action}" (${computedSignal.isTradeable ? computedSignal.direction : 'NEUTRAL / WAIT'}). ${computedSignal.waitReason ? 'Reason: ' + computedSignal.waitReason : ''}`;
 
     let prompt = '';
     if (isForex) {
@@ -3374,30 +3580,33 @@ Respond strictly in valid JSON format:
 }`;
     }
 
-    // Helper to call Gemini with retries and fallback models
+    // Helper to call Gemini with low thinking latency, strict timeout, and fast fallback model
     const callGeminiJson = async (promptText: string) => {
       const ai = getAiClient();
       if (!ai) return null;
       const candidateModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
       for (const model of candidateModels) {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            const response = await ai.models.generateContent({
+        try {
+          const response = await withServerTimeout(
+            ai.models.generateContent({
               model,
               contents: promptText,
               config: {
                 responseMimeType: 'application/json',
+                ...(model.startsWith('gemini-4') || model.includes('2.5') || model.includes('3')
+                  ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+                  : {}),
               },
-            });
-            if (response.text) {
-              const clean = response.text.replace(/^```json/i, '').replace(/```$/i, '').trim();
-              return JSON.parse(clean);
-            }
-          } catch {
-            if (attempt === 0) {
-              await new Promise((resolve) => setTimeout(resolve, 400));
-            }
+            }),
+            6500,
+            null as any
+          );
+          if (response?.text) {
+            const clean = response.text.replace(/^```json/i, '').replace(/```$/i, '').trim();
+            return JSON.parse(clean);
           }
+        } catch {
+          // Try next fast fallback model
         }
       }
       return null;
@@ -3411,6 +3620,7 @@ Respond strictly in valid JSON format:
       const aiSaidBuy = aiAct.includes('BUY');
       const aiSaidSell = aiAct.includes('SELL');
       const directionMismatch =
+        !computedSignal.isTradeable ||
         (computedSignal.direction === 'SELL' && aiSaidBuy) ||
         (computedSignal.direction === 'BUY' && aiSaidSell) ||
         (!aiSaidBuy && !aiSaidSell);
@@ -3437,13 +3647,13 @@ Respond strictly in valid JSON format:
       } else {
         const extractNum = (txt: unknown): number | undefined => {
           if (typeof txt !== 'string') return undefined;
-          const m = txt.match(/([0-9]+(?:\.[0-9]+)?)/);
+          const m = txt.replace(/,/g, '').match(/([0-9]+(?:\.[0-9]+)?)/);
           return m ? parseFloat(m[1]) : undefined;
         };
         const slNum = extractNum(aiData.signal.stopLoss);
         const tp2Num = extractNum(aiData.signal.takeProfit2);
         const tp1Num = extractNum(aiData.signal.takeProfit1);
-        const eMatch = typeof aiData.signal.entryZone === 'string' ? aiData.signal.entryZone.match(/([0-9]+(?:\.[0-9]+)?)/g) : null;
+        const eMatch = typeof aiData.signal.entryZone === 'string' ? aiData.signal.entryZone.replace(/,/g, '').match(/([0-9]+(?:\.[0-9]+)?)/g) : null;
         const entryMid = eMatch && eMatch.length >= 2 ? (parseFloat(eMatch[0]) + parseFloat(eMatch[1])) / 2 : eMatch?.[0] ? parseFloat(eMatch[0]) : resolvedSpotPrice;
 
         // Also validate SL/TP geometry matches signal direction
@@ -3481,6 +3691,17 @@ Respond strictly in valid JSON format:
       aiData.timeframe = tfProfile.label;
       aiData.signal.timeframe = tfProfile.label;
       aiData.signal.timeframeCategory = timeframeCategory;
+      aiData.signal.isTradeable = computedSignal.isTradeable;
+      aiData.signal.waitReason = computedSignal.waitReason;
+      aiData.signal.signalGrade = computedSignal.signalGrade;
+      aiData.signal.macroAligned = computedSignal.macroAligned;
+      aiData.signal.macroNote = computedSignal.macroNote;
+      aiData.signal.newsBlocked = computedSignal.newsBlocked;
+      aiData.signal.candleTrigger = computedSignal.candleTrigger;
+      aiData.signal.executionMode = computedSignal.executionMode;
+      aiData.signal.htfSummary = computedSignal.htfSummary;
+      aiData.signal.sessionName = computedSignal.sessionName;
+      aiData.signal.sessionQuality = computedSignal.sessionQuality;
       return res.json(aiData);
     }
 
@@ -3732,23 +3953,25 @@ Provide a crisp, actionable, financial analysis with real numbers, valuation con
     let text = '';
     if (ai) {
       for (const model of candidateModels) {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            const response = await ai.models.generateContent({
+        try {
+          const response = await withServerTimeout(
+            ai.models.generateContent({
               model,
               contents: prompt,
-            });
-            if (response.text) {
-              text = response.text.trim();
-              break;
-            }
-          } catch {
-            if (attempt === 0) {
-              await new Promise((resolve) => setTimeout(resolve, 400));
-            }
+              config: model.startsWith('gemini-4') || model.includes('3')
+                ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+                : undefined,
+            }),
+            6500,
+            null as any
+          );
+          if (response?.text) {
+            text = response.text.trim();
+            break;
           }
+        } catch {
+          // Try fallback model
         }
-        if (text) break;
       }
     }
 

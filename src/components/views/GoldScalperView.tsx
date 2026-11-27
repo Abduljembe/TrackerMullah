@@ -52,7 +52,6 @@ import { useTradingViewQuotes, lookupTradingViewQuote } from '../../utils/tradin
 import { getMarketSession } from '../../utils/marketHours.ts';
 import { MAX_RISK_REWARD, getTimeframeProfile, resolveQuoteForTimeframe, evaluateDirectionalConfluence } from '../../utils/signalEngine.ts';
 import { BotLiveChart } from '../trading/BotLiveChart.tsx';
-import { isMasterEngineRunning } from '../../utils/engineIgnition.ts';
 
 // =========================================================================
 // TRADINGVIEW GOLD CHART ADVANCED EMBED
@@ -233,12 +232,8 @@ export const GoldScalperView: React.FC = () => {
   // 2. BOT RUNNING / EXECUTION STATE
   // -------------------------------------------------------------------------
   const [isBotRunning, setIsBotRunning] = useState<boolean>(() => {
-    if (sessionGoldBotRunning || isMasterEngineRunning()) {
-      sessionGoldBotRunning = true;
-      return true;
-    }
-    return false;
-  }); // Starts STOPPED on website open until user engages START or Master Switch
+    return sessionGoldBotRunning;
+  }); // Starts STOPPED on website open until user clicks START BOT
   const [audioFeedback, setAudioFeedback] = useState<boolean>(true);
   const [barTimerSeconds, setBarTimerSeconds] = useState<number>(48); // Seconds left in M1 bar
   const [eaLogs, setEaLogs] = useState<Array<{ id: string; time: string; text: string; type: 'info' | 'trade' | 'alert' | 'profit' }>>([
@@ -341,7 +336,9 @@ export const GoldScalperView: React.FC = () => {
       }
       if (typeof tvGold.atr === 'number' && tvGold.atr > 0) {
         const tfProfile = getTimeframeProfile(activeTf);
-        setAtrVal(Number(Math.max(1.8, Math.min(24.0, tvGold.atr * tfProfile.volatilityScale * 0.45)).toFixed(2)));
+        // TradingView scanner quote.atr is Daily (1D) ATR (~$70-$105); convert cleanly to active scalp timeframe
+        const scaledAtr = tvGold.atr * 0.14 * tfProfile.volatilityScale;
+        setAtrVal(Number(Math.max(1.8, Math.min(22.0, scaledAtr)).toFixed(2)));
       }
     }
   }, [liveTvQuotes, spreadPoints, tvInterval]);
@@ -551,17 +548,12 @@ export const GoldScalperView: React.FC = () => {
     const isBullishCross = fastEmaVal > slowEmaVal && rsiVal >= strategyParams.buyRSI;
     const isBearishCross = fastEmaVal < slowEmaVal && rsiVal <= strategyParams.sellRSI;
 
-    // Map active chart interval to timeframe volatility multiplier & cap R:R <= 5.0
-    const tfMap: Record<string, string> = { '1': 'M1', '5': 'M5', '15': 'M15', '60': 'H1', '240': 'H4', 'D': 'D1' };
-    const tfProfile = getTimeframeProfile(tfMap[tvInterval] || 'M1');
-    const tfScale = Math.max(1.0, tfProfile.volatilityScale / 0.30);
-
-    // Open new positions if condition met and slot available
+    // atrVal is already calibrated to the active tvInterval timeframe; cap R:R <= 5.0
     if ((isBullishCross || isBearishCross) && positions.length < strategyParams.maxPositionsPerSymbol) {
       const type: 'BUY' | 'SELL' = isBullishCross ? 'BUY' : 'SELL';
       const entryPrice = type === 'BUY' ? askPrice : bidPrice;
-      const stopDist = Number((atrVal * strategyParams.stopLossATR * tfScale).toFixed(2));
-      const rawTpDist = Number((atrVal * strategyParams.takeProfitATR * tfScale).toFixed(2));
+      const stopDist = Number(Math.max(2.0, atrVal * strategyParams.stopLossATR).toFixed(2));
+      const rawTpDist = Number((atrVal * strategyParams.takeProfitATR).toFixed(2));
       const tpDist = Number(Math.min(rawTpDist, stopDist * MAX_RISK_REWARD).toFixed(2));
       const sl = type === 'BUY' ? Number((entryPrice - stopDist).toFixed(2)) : Number((entryPrice + stopDist).toFixed(2));
       const tp = type === 'BUY' ? Number((entryPrice + tpDist).toFixed(2)) : Number((entryPrice - tpDist).toFixed(2));

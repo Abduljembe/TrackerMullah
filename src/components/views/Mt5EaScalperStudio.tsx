@@ -66,7 +66,6 @@ import {
 } from 'lucide-react';
 import { fetchSharedCalendarEvents, evaluateNewsGuardForSymbol } from '../../utils/newsGuard.ts';
 import { EaParameters, DEFAULT_EA_PARAMS, generateMql5Code } from '../../utils/mql5Generator.ts';
-import { isMasterEngineRunning } from '../../utils/engineIgnition.ts';
 import { PropFirmRiskGuardian } from '../common/PropFirmRiskGuardian.tsx';
 import { CurrencyStrengthMeter } from '../common/CurrencyStrengthMeter.tsx';
 import { RetailSentimentDesk } from '../common/RetailSentimentDesk.tsx';
@@ -91,7 +90,7 @@ import { BotDefinition, getBotById } from '../../utils/eaCatalog.ts';
 import { getAssetMarketSession } from '../../utils/marketHours.ts';
 import { evaluatePropTradeBlock, PROP_GUARD_EVENT } from '../../utils/propGuardian.ts';
 import { computeTimeframeSignalLevels, resolveQuoteForTimeframe, MAX_RISK_REWARD } from '../../utils/signalEngine.ts';
-import { lookupTradingViewQuote, LiveTvQuote } from '../../utils/tradingViewSync.ts';
+import { lookupTradingViewQuote, LiveTvQuote, extractMacroCorrelationContext } from '../../utils/tradingViewSync.ts';
 import { recordTrackedSignal, evaluateTrackedSignalsAgainstQuotes } from '../../utils/signalScorecard.ts';
 import { openPaperTradeFromSignal } from '../../utils/paperTradeManager.ts';
 
@@ -804,14 +803,9 @@ export const Mt5EaScalperStudio: React.FC = () => {
     return (localStorage.getItem('trader_deck_mode') as 'GAMER' | 'CLASSIC') || 'GAMER';
   });
 
-  // Master Bot State (Starts STOPPED when website opens until user clicks START or Master Switch)
+  // Master Bot State (Starts STOPPED when website opens until user clicks START)
   const [isBotRunning, setIsBotRunning] = useState<boolean>(() => {
-    if (sessionMt5BotRunning) return true;
-    if (isMasterEngineRunning() && !evaluatePropTradeBlock().blocked) {
-      sessionMt5BotRunning = true;
-      return true;
-    }
-    return false;
+    return sessionMt5BotRunning;
   });
   const [botMode, setBotMode] = useState<'AUTO' | 'PAPER' | 'MANUAL'>('AUTO');
   const [audioAlerts, setAudioAlerts] = useState<boolean>(true);
@@ -1349,6 +1343,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
     setScannedOpportunities((prev) =>
       prev.map((opp) => {
         const q = lookupTradingViewQuote(anchorQuotesRef.current, opp.symbol);
+        const macroCtx = extractMacroCorrelationContext(anchorQuotesRef.current);
         const spot = q && q.price > 0 ? q.price : opp.basePrice;
         const computed = computeTimeframeSignalLevels({
           symbol: opp.symbol,
@@ -1356,6 +1351,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
           timeframe: newTf,
           quote: q,
           preferredDirection: opp.symbol === 'BOOM1000' ? 'BUY' : opp.symbol === 'CRASH1000' ? 'SELL' : undefined,
+          macroContext: macroCtx,
         });
         const tfSlice = resolveQuoteForTimeframe(q, newTf);
         const pointMult = opp.symbol.includes('XAU') ? 100 : opp.category === 'FOREX' ? 10000 : 1;
@@ -1367,7 +1363,13 @@ export const Mt5EaScalperStudio: React.FC = () => {
           timeframe: computed.timeframe,
           type: computed.direction,
           score: computed.confidenceScore,
-          grade: computed.confidenceScore >= 90 ? `A++ ${newTf} SNIPER` : computed.confidenceScore >= 82 ? `A+ ${newTf} SETUP` : `A ${newTf} SIGNAL`,
+          grade: !computed.isTradeable
+            ? `WAIT (${newTf} FILTERED)`
+            : computed.confidenceScore >= 88 && computed.htfAligned
+            ? `A+ ${newTf} SNIPER`
+            : computed.confidenceScore >= 80 && computed.htfAligned
+            ? `A ${newTf} SETUP`
+            : `B ${newTf} SIGNAL`,
           setup: computed.setupLabel,
           entryZone: computed.entryZone,
           sl: computed.sl,
@@ -1377,8 +1379,8 @@ export const Mt5EaScalperStudio: React.FC = () => {
           tvScore: tvRating,
           confluences: {
             ...opp.confluences,
-            smc: `${computed.direction === 'BUY' ? 'SSL Sweep -> Bullish BOS' : 'BSL Sweep -> Bearish CHoCH'} (${newTf})`,
-            indicators: `RSI(${rsiStr}) + TV ${tvRating >= 0 ? '+' : ''}${tvRating.toFixed(2)} (${computed.direction})`,
+            smc: `${computed.htfSummary} · ${computed.entryNote}`,
+            indicators: `RSI(${rsiStr}) + TV ${tvRating >= 0 ? '+' : ''}${tvRating.toFixed(2)} · ${computed.sessionName}`,
           },
           projectedGain:
             computed.unitLabel === 'pips'
@@ -1986,6 +1988,7 @@ export const Mt5EaScalperStudio: React.FC = () => {
                 timeframe: tfToUse,
                 quote: q,
                 preferredDirection: sym === 'BOOM1000' ? 'BUY' : sym === 'CRASH1000' ? 'SELL' : undefined,
+                macroContext: extractMacroCorrelationContext(quotes),
               });
               const tfSlice = resolveQuoteForTimeframe(q, tfToUse);
               const tvRating = typeof tfSlice.recommendAll === 'number' ? tfSlice.recommendAll : computed.compositeScore;

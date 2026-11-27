@@ -21,12 +21,17 @@ import {
   ChevronUp,
   Info,
   Send,
+  BarChart3,
 } from 'lucide-react';
 import { useNewsGuard } from '../../utils/newsGuard.ts';
 import { evaluatePortfolioExposure, PAPER_POSITIONS_EVENT, loadOpenPaperPositions, SimpleOpenPos } from '../../utils/portfolioGuard.ts';
 import { dispatchSignalWebhook } from '../../utils/signalScorecard.ts';
 import { evaluatePropTradeBlock, PROP_GUARD_EVENT, PropBlockStatus } from '../../utils/propGuardian.ts';
 import { isAutoOpenOnSignalEnabled, AUTO_SIGNAL_PAPER_TOGGLE_EVENT } from '../../utils/paperTradeManager.ts';
+import { useTradingViewQuotes, lookupTradingViewQuote } from '../../utils/tradingViewSync.ts';
+import { evaluateDirectionalConfluence, runSignalEngineBacktest, type SignalBacktestReport } from '../../utils/signalEngine.ts';
+import { fetchDerivCandlesOnce } from '../../utils/derivTechnicals.ts';
+import { generateCandles, type Timeframe } from '../../utils/stockCandles.ts';
 
 export interface SignalData {
   action: 'STRONG BUY' | 'BUY' | 'NEUTRAL' | 'SELL' | 'STRONG SELL';
@@ -65,6 +70,19 @@ export interface SignalData {
     indicatorConfluence?: string;
     macroForexFactory?: string;
   };
+  isTradeable?: boolean;
+  waitReason?: string;
+  signalGrade?: string;
+  executionMode?: 'MARKET_NOW' | 'PULLBACK_LIMIT' | 'WAIT_FOR_CONFIRMATION';
+  entryNote?: string;
+  breakEvenTrigger?: string;
+  htfSummary?: string;
+  sessionName?: string;
+  sessionQuality?: 'PRIME' | 'ACTIVE' | 'OFF_PEAK';
+  macroAligned?: boolean;
+  macroNote?: string;
+  newsBlocked?: boolean;
+  candleTrigger?: string;
 }
 
 interface InstitutionalSignalCardProps {
@@ -101,8 +119,9 @@ export const InstitutionalSignalCard: React.FC<InstitutionalSignalCardProps> = (
   const isForex = market === 'FOREX';
   const isGold = ticker.includes('XAU');
   const isKES = ticker.includes('KES');
-  const isBuy = signal.action.includes('BUY');
-  const isSell = signal.action.includes('SELL');
+  const isNeutralWait = signal.action === 'NEUTRAL' || signal.isTradeable === false;
+  const isBuy = !isNeutralWait && signal.action.includes('BUY');
+  const isSell = !isNeutralWait && signal.action.includes('SELL');
 
   // Interactive Risk & Position Sizing Calculator State
   const [accountBalance, setAccountBalance] = useState<number>(1000);
@@ -118,6 +137,12 @@ export const InstitutionalSignalCard: React.FC<InstitutionalSignalCardProps> = (
   const [openPaperPositions, setOpenPaperPositions] = useState<SimpleOpenPos[]>(() => loadOpenPaperPositions());
   const [propBlock, setPropBlock] = useState<PropBlockStatus>(() => evaluatePropTradeBlock());
   const [autoPaperOn, setAutoPaperOn] = useState<boolean>(() => isAutoOpenOnSignalEnabled());
+  const [btLoading, setBtLoading] = useState<boolean>(false);
+  const [btReport, setBtReport] = useState<(SignalBacktestReport & { dataSource: 'LIVE_OHLCV' | 'DERIV_WS' | 'SYNTHETIC_FALLBACK' }) | null>(null);
+
+  React.useEffect(() => {
+    setBtReport(null);
+  }, [ticker, activeTimeframe, signal.timeframe]);
 
   React.useEffect(() => {
     const syncPos = () => setOpenPaperPositions(loadOpenPaperPositions());
@@ -139,21 +164,52 @@ export const InstitutionalSignalCard: React.FC<InstitutionalSignalCardProps> = (
 
   const newsGuard = useNewsGuard(ticker, 30);
 
-  // Parse numerical values from signal strings for live calculations
+  const liveTvQuotes = useTradingViewQuotes(3500);
+
+  const mtfMatrixRows = useMemo(() => {
+    const tvQ = lookupTradingViewQuote(liveTvQuotes, ticker);
+    const fallbackDir = isBuy ? 'BUY' : 'SELL';
+    const frames = [
+      { tf: '15m', bullLabel: '▲ BUY', bearLabel: '▼ SELL' },
+      { tf: '1H', bullLabel: '▲ BULL', bearLabel: '▼ BEAR' },
+      { tf: '4H', bullLabel: '▲ UP', bearLabel: '▼ DOWN' },
+      { tf: '1D', bullLabel: '▲ TREND', bearLabel: '▼ TREND' },
+    ];
+    return frames.map((f) => {
+      const res = evaluateDirectionalConfluence(tvQ, currentPrice, f.tf, fallbackDir);
+      return {
+        tf: f.tf,
+        isBull: res.direction === 'BUY',
+        label: res.direction === 'BUY' ? f.bullLabel : f.bearLabel,
+      };
+    });
+  }, [liveTvQuotes, ticker, currentPrice, isBuy]);
+
+  const mtfAlignmentSummary = useMemo(() => {
+    const bullCount = mtfMatrixRows.filter((r) => r.isBull).length;
+    const aligned = Math.max(bullCount, 4 - bullCount);
+    const dominantDir = bullCount >= 2 ? 'Bullish' : 'Bearish';
+    return {
+      aligned,
+      text: aligned === 4 ? `4/4 Aligned` : `${aligned}/4 ${dominantDir}`,
+      isStrong: aligned >= 3,
+    };
+  }, [mtfMatrixRows]);
+
+  // Parse numerical values from signal strings (stripping commas so 3,572.81 isn't read as 3)
   const parsedLevels = useMemo(() => {
-    // Extract first number from entry zone
-    const entryMatch = signal.entryZone.match(/([0-9]+\.?[0-9]*)/g);
+    const entryMatch = signal.entryZone.replace(/,/g, '').match(/([0-9]+\.?[0-9]*)/g);
     const entryLow = entryMatch && entryMatch[0] ? parseFloat(entryMatch[0]) : currentPrice;
     const entryHigh = entryMatch && entryMatch[1] ? parseFloat(entryMatch[1]) : currentPrice;
     const entryMid = (entryLow + entryHigh) / 2;
 
-    const tp1Match = signal.takeProfit1.match(/([0-9]+\.?[0-9]*)/);
+    const tp1Match = signal.takeProfit1.replace(/,/g, '').match(/([0-9]+\.?[0-9]*)/);
     const tp1Val = tp1Match ? parseFloat(tp1Match[1]) : entryMid * (isBuy ? 1.015 : 0.985);
 
-    const tp2Match = signal.takeProfit2.match(/([0-9]+\.?[0-9]*)/);
+    const tp2Match = signal.takeProfit2.replace(/,/g, '').match(/([0-9]+\.?[0-9]*)/);
     const tp2Val = tp2Match ? parseFloat(tp2Match[1]) : entryMid * (isBuy ? 1.03 : 0.97);
 
-    const slMatch = signal.stopLoss.match(/([0-9]+\.?[0-9]*)/);
+    const slMatch = signal.stopLoss.replace(/,/g, '').match(/([0-9]+\.?[0-9]*)/);
     const slVal = slMatch ? parseFloat(slMatch[1]) : entryMid * (isBuy ? 0.992 : 1.008);
 
     const slDistance = Math.abs(entryMid - slVal);
@@ -177,11 +233,11 @@ export const InstitutionalSignalCard: React.FC<InstitutionalSignalCardProps> = (
   const liveTracking = useMemo(() => {
     const { entryLow, entryHigh, entryMid, tp1Val, tp2Val, slVal } = parsedLevels;
 
-    let status: 'PENDING_ENTRY' | 'ACTIVE' | 'TP1_HIT' | 'TP2_HIT' | 'STOPPED_OUT' = 'ACTIVE';
+    let status: 'WAIT_CONFIRMATION' | 'PENDING_ENTRY' | 'ACTIVE' | 'TP1_HIT' | 'TP2_HIT' | 'STOPPED_OUT' = isNeutralWait ? 'WAIT_CONFIRMATION' : 'ACTIVE';
     let pipsDelta = 0;
     let pointsDelta = 0;
 
-    if (isBuy) {
+    if (!isNeutralWait && isBuy) {
       pointsDelta = currentPrice - entryMid;
       if (currentPrice >= tp2Val) {
         status = 'TP2_HIT';
@@ -194,7 +250,7 @@ export const InstitutionalSignalCard: React.FC<InstitutionalSignalCardProps> = (
       } else {
         status = 'ACTIVE';
       }
-    } else if (isSell) {
+    } else if (!isNeutralWait && isSell) {
       pointsDelta = entryMid - currentPrice;
       if (currentPrice <= tp2Val) {
         status = 'TP2_HIT';
@@ -223,7 +279,7 @@ export const InstitutionalSignalCard: React.FC<InstitutionalSignalCardProps> = (
       pipsDelta: Math.round(pipsDelta * 10) / 10,
       isProfit: pointsDelta >= 0,
     };
-  }, [parsedLevels, currentPrice, isBuy, isSell, isGold, isForex]);
+  }, [parsedLevels, currentPrice, isBuy, isSell, isNeutralWait, isGold, isForex]);
 
   // Position Sizing & Lot Calculator
   const riskCalculations = useMemo(() => {
@@ -415,6 +471,13 @@ Generated by NjiaFedha Pro Quant Engine`;
   // Status Badge Helper
   const renderStatusBadge = () => {
     switch (liveTracking.status) {
+      case 'WAIT_CONFIRMATION':
+        return (
+          <span className="px-2.5 py-1 rounded-lg text-xs font-black bg-amber-500/20 text-amber-300 border border-amber-500/45 flex items-center gap-1.5">
+            <Clock className="w-3.5 h-3.5 text-amber-400" />
+            <span>WAIT / NO TRADE</span>
+          </span>
+        );
       case 'TP2_HIT':
         return (
           <span className="px-2.5 py-1 rounded-lg text-xs font-black bg-emerald-500/25 text-emerald-300 border border-emerald-500/50 flex items-center gap-1.5 animate-pulse">
@@ -426,7 +489,7 @@ Generated by NjiaFedha Pro Quant Engine`;
         return (
           <span className="px-2.5 py-1 rounded-lg text-xs font-black bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center gap-1.5">
             <Target className="w-3.5 h-3.5 text-emerald-400" />
-            <span>TP1 HIT (SECURED)</span>
+            <span>TP1 HIT (AUTO-BE)</span>
           </span>
         );
       case 'STOPPED_OUT':
@@ -440,14 +503,14 @@ Generated by NjiaFedha Pro Quant Engine`;
         return (
           <span className="px-2.5 py-1 rounded-lg text-xs font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1.5">
             <Clock className="w-3.5 h-3.5 text-amber-400" />
-            <span>PENDING ENTRY ZONE</span>
+            <span>{signal.executionMode === 'PULLBACK_LIMIT' ? 'PULLBACK LIMIT' : 'PENDING ENTRY ZONE'}</span>
           </span>
         );
       default:
         return (
           <span className="px-2.5 py-1 rounded-lg text-xs font-black bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center gap-1.5">
             <Activity className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-            <span>ACTIVE IN TRADE</span>
+            <span>{signal.executionMode === 'PULLBACK_LIMIT' ? 'PULLBACK LIMIT READY' : 'ACTIVE IN TRADE'}</span>
           </span>
         );
     }
@@ -518,7 +581,13 @@ Generated by NjiaFedha Pro Quant Engine`;
         </div>
 
         <div className="flex flex-wrap items-center gap-1 text-[9px] font-mono text-slate-300">
-          {['MTF 4/4', 'ATR 1.4x', 'ADX Anti-Chop', 'TV 26-Ind', 'SMC FVG'].map((guard) => (
+          {[
+            signal.htfSummary ? `HTF: ${signal.htfSummary.split('(')[0].trim()}` : 'MTF HTF Guard',
+            signal.sessionName ? `${signal.sessionName}` : 'Session Filter',
+            signal.executionMode === 'PULLBACK_LIMIT' ? 'Pullback Limit' : 'Market Timing',
+            'Auto-BE @ TP1',
+            'Pivot/BB Snap',
+          ].map((guard) => (
             <span
               key={guard}
               className="px-1.5 py-0.5 rounded bg-[#0b1b33]/90 border border-[#17325c] flex items-center gap-1"
@@ -527,8 +596,46 @@ Generated by NjiaFedha Pro Quant Engine`;
               <span>{guard}</span>
             </span>
           ))}
+          {signal.macroNote && (
+            <span
+              className={`px-1.5 py-0.5 rounded border flex items-center gap-1 ${
+                signal.macroAligned === false
+                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                  : 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300'
+              }`}
+              title="DXY & US10Y Treasury Yield Correlation Check"
+            >
+              <span>{signal.macroAligned === false ? '⚠️' : '🌐'}</span>
+              <span>{signal.macroNote}</span>
+            </span>
+          )}
+          {signal.candleTrigger && (
+            <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/40 text-cyan-200 font-bold flex items-center gap-1">
+              <span>🕯</span>
+              <span>{signal.candleTrigger}</span>
+            </span>
+          )}
         </div>
       </div>
+
+      {/* Wait / No-Trade / Red-Folder News Blackout Protection Banner */}
+      {isNeutralWait && signal.waitReason && (
+        <div
+          className={`px-2.5 py-2 rounded-xl border text-[11px] font-mono flex items-start gap-2 ${
+            signal.newsBlocked
+              ? 'bg-rose-500/15 border-rose-500/50 text-rose-200'
+              : 'bg-amber-500/15 border-amber-500/45 text-amber-200'
+          }`}
+        >
+          <AlertTriangle className={`w-4 h-4 shrink-0 mt-0.5 ${signal.newsBlocked ? 'text-rose-400' : 'text-amber-400'}`} />
+          <div className="space-y-0.5">
+            <div className={`font-black uppercase text-[10px] ${signal.newsBlocked ? 'text-rose-300' : 'text-amber-300'}`}>
+              {signal.newsBlocked ? 'Red-Folder News Blackout Active' : 'No-Trade Capital Guard Active'}
+            </div>
+            <p className="text-[11px] leading-snug">{signal.waitReason}</p>
+          </div>
+        </div>
+      )}
 
       {/* 2. Compact Hero Signal Badge & Real-Time Tracking Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-[#14233c]">
@@ -542,8 +649,19 @@ Generated by NjiaFedha Pro Quant Engine`;
                 : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
             }`}
           >
-            {signal.action}
+            {isNeutralWait ? 'WAIT / NO TRADE' : signal.action}
           </span>
+          {signal.signalGrade && (
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-black border ${
+              signal.signalGrade === 'A+'
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                : signal.signalGrade === 'WAIT'
+                ? 'bg-amber-500/15 text-amber-300 border-amber-500/35'
+                : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/35'
+            }`}>
+              Grade {signal.signalGrade}
+            </span>
+          )}
           <span className="text-[10px] font-mono text-slate-200 font-bold bg-[#101e38] px-1.5 py-0.5 rounded border border-[#1b345b]">
             {signal.timeframe}
           </span>
@@ -576,7 +694,7 @@ Generated by NjiaFedha Pro Quant Engine`;
 
       {/* Compact Setup & R:R Strip */}
       <div className="px-2.5 py-1.5 rounded-lg bg-[#070e1c] border border-teal-500/25 text-[11px] text-slate-300 flex items-center justify-between gap-2">
-        <span className="font-semibold text-white truncate" title={signal.setupType}>
+        <span className="font-semibold text-white truncate" title={signal.entryNote || signal.setupType}>
           🎯 {signal.setupType}
         </span>
         <span className="text-[10px] font-mono text-slate-400 shrink-0">
@@ -584,63 +702,120 @@ Generated by NjiaFedha Pro Quant Engine`;
         </span>
       </div>
 
-      {/* 3. Compact Multi-Timeframe (MTF) Confluence Matrix */}
+      {/* 3. Live Multi-Timeframe (MTF) Confluence Matrix */}
       <div className="p-2 rounded-xl bg-[#060c17] border border-[#152744] space-y-1.5">
         <div className="flex items-center justify-between text-[10px] font-mono">
           <span className="text-slate-400 uppercase tracking-wider font-bold flex items-center gap-1">
             <Layers className="w-3 h-3 text-teal-400" />
             <span>MTF Matrix</span>
           </span>
-          <span className="text-emerald-400 font-bold text-[10px]">
-            4/4 Aligned
+          <span className={`font-bold text-[10px] ${mtfAlignmentSummary.isStrong ? 'text-emerald-400' : 'text-amber-300'}`}>
+            {mtfAlignmentSummary.text}
           </span>
         </div>
 
         <div className="grid grid-cols-4 gap-1.5 text-center text-[10px] font-mono">
-          <div
-            className={`py-1 px-1 rounded-md border ${
-              isBuy
-                ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
-                : 'bg-rose-500/15 border-rose-500/30 text-rose-300'
-            }`}
-          >
-            <span className="text-[9px] text-slate-400 block">15m</span>
-            <span className="font-bold">{isBuy ? '▲ BUY' : '▼ SELL'}</span>
-          </div>
-
-          <div
-            className={`py-1 px-1 rounded-md border ${
-              isBuy
-                ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
-                : 'bg-rose-500/15 border-rose-500/30 text-rose-300'
-            }`}
-          >
-            <span className="text-[9px] text-slate-400 block">1H</span>
-            <span className="font-bold">{isBuy ? '▲ BULL' : '▼ BEAR'}</span>
-          </div>
-
-          <div
-            className={`py-1 px-1 rounded-md border ${
-              isBuy
-                ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-200'
-                : 'bg-rose-500/20 border-rose-500/40 text-rose-200'
-            }`}
-          >
-            <span className="text-[9px] text-slate-400 block">4H</span>
-            <span className="font-bold">{isBuy ? '▲ UP' : '▼ DOWN'}</span>
-          </div>
-
-          <div
-            className={`py-1 px-1 rounded-md border ${
-              isBuy
-                ? 'bg-teal-500/20 border-teal-500/40 text-[#0df2c9]'
-                : 'bg-rose-500/20 border-rose-500/40 text-rose-200'
-            }`}
-          >
-            <span className="text-[9px] text-slate-400 block">1D</span>
-            <span className="font-bold">{isBuy ? '▲ TREND' : '▼ TREND'}</span>
-          </div>
+          {mtfMatrixRows.map((row) => (
+            <div
+              key={row.tf}
+              className={`py-1 px-1 rounded-md border ${
+                row.isBull
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                  : 'bg-rose-500/15 border-rose-500/30 text-rose-300'
+              }`}
+            >
+              <span className="text-[9px] text-slate-400 block">{row.tf}</span>
+              <span className="font-bold">{row.label}</span>
+            </div>
+          ))}
         </div>
+      </div>
+
+      {/* 3b. Built-In Signal Engine Backtester (TP1 + Auto-BE + TP2 Replay) */}
+      <div className="p-2.5 rounded-xl bg-[#060c18] border border-cyan-500/25 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 text-[10px] font-mono text-cyan-300 font-bold uppercase tracking-wider">
+            <BarChart3 className="w-3.5 h-3.5 text-[#0df2c9]" />
+            <span>Signal Win-Rate Backtest ({currentTf})</span>
+          </div>
+          <button
+            type="button"
+            disabled={btLoading}
+            onClick={async () => {
+              setBtLoading(true);
+              try {
+                const clean = ticker.replace('/', '').toUpperCase();
+                const isDeriv = /^(R_|1HZ|BOOM|CRASH|STP|JD|RB)/.test(clean);
+                let bars: any[] = [];
+                let src: 'LIVE_OHLCV' | 'DERIV_WS' | 'SYNTHETIC_FALLBACK' = 'SYNTHETIC_FALLBACK';
+                if (isDeriv) {
+                  const sec = currentTf.toLowerCase().includes('1h') ? 3600 : currentTf.toLowerCase().includes('4h') ? 14400 : 900;
+                  bars = await fetchDerivCandlesOnce(clean, sec, 120);
+                  if (bars.length >= 25) src = 'DERIV_WS';
+                } else {
+                  const res = await fetch(`/api/stocks/history?ticker=${encodeURIComponent(ticker)}&timeframe=${encodeURIComponent(currentTf)}`);
+                  const json = res.ok ? await res.json() : null;
+                  if (json?.success && Array.isArray(json.candles) && json.candles.length >= 25) {
+                    bars = json.candles;
+                    src = 'LIVE_OHLCV';
+                  }
+                }
+                if (bars.length < 25) {
+                  bars = generateCandles(ticker, currentPrice || 100, 0, currentTf as Timeframe);
+                  src = 'SYNTHETIC_FALLBACK';
+                }
+                const rep = runSignalEngineBacktest(ticker, currentTf, bars);
+                setBtReport({ ...rep, dataSource: src });
+              } finally {
+                setBtLoading(false);
+              }
+            }}
+            className="px-2.5 py-1 rounded-md bg-cyan-500/15 hover:bg-cyan-500/25 text-[#0df2c9] border border-cyan-500/35 text-[10px] font-mono font-bold transition-colors cursor-pointer disabled:opacity-50"
+          >
+            {btLoading ? 'Replaying Bars...' : btReport ? 'Re-Verify' : 'Verify Win Rate'}
+          </button>
+        </div>
+
+        {btReport && (
+          <div className="space-y-1.5">
+            <div className="grid grid-cols-5 gap-1.5 text-center font-mono text-[10px]">
+              <div className="p-1.5 rounded bg-[#040913] border border-[#14233c]">
+                <span className="text-[9px] text-slate-400 block">TP1 Hit</span>
+                <strong className="text-emerald-400">{btReport.tp1HitRate}%</strong>
+              </div>
+              <div className="p-1.5 rounded bg-[#040913] border border-[#14233c]">
+                <span className="text-[9px] text-slate-400 block">TP2 Full</span>
+                <strong className="text-[#0df2c9]">{btReport.tp2HitRate}%</strong>
+              </div>
+              <div className="p-1.5 rounded bg-[#040913] border border-[#14233c]">
+                <span className="text-[9px] text-slate-400 block">BE Saves</span>
+                <strong className="text-cyan-300">{btReport.beSaves}</strong>
+              </div>
+              <div className="p-1.5 rounded bg-[#040913] border border-[#14233c]">
+                <span className="text-[9px] text-slate-400 block">PF</span>
+                <strong className="text-purple-300">{btReport.profitFactor}x</strong>
+              </div>
+              <div className="p-1.5 rounded bg-[#040913] border border-[#14233c]">
+                <span className="text-[9px] text-slate-400 block">Net R</span>
+                <strong className={btReport.netR >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                  {btReport.netR >= 0 ? '+' : ''}{btReport.netR}R
+                </strong>
+              </div>
+            </div>
+            <div className="flex items-center justify-between text-[9px] font-mono text-slate-400">
+              <span>
+                {btReport.totalTrades} signals ({btReport.tp1Hits} TP1 / {btReport.fullLosses} SL) across {btReport.barsEvaluated} bars
+              </span>
+              <span className="text-cyan-400">
+                {btReport.dataSource === 'LIVE_OHLCV'
+                  ? 'Live OHLCV'
+                  : btReport.dataSource === 'DERIV_WS'
+                  ? 'Deriv WS Candles'
+                  : 'Structural Model'}
+              </span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 4. Compact Order Ticket: SL, Entry, TP1, TP2 */}
@@ -801,18 +976,24 @@ Generated by NjiaFedha Pro Quant Engine`;
 
           <button
             onClick={handleExecute}
-            disabled={propBlock.blocked}
-            title={propBlock.blocked ? propBlock.reason : 'Open Paper Market Order Now & Log to Journal'}
-            className={`px-3 py-1.5 rounded-lg font-black font-mono text-[11px] flex items-center gap-1 transition-all shadow-md shrink-0 ${
+            disabled={propBlock.blocked || isNeutralWait}
+            title={
               propBlock.blocked
-                ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
+                ? propBlock.reason
+                : isNeutralWait
+                ? signal.waitReason || 'Blocked by Anti-Chop / HTF Conflict Filter'
+                : 'Open Paper Market Order Now & Log to Journal'
+            }
+            className={`px-3 py-1.5 rounded-lg font-black font-mono text-[11px] flex items-center gap-1 transition-all shadow-md shrink-0 ${
+              propBlock.blocked || isNeutralWait
+                ? 'bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-700'
                 : isBuy
                 ? 'bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 shadow-emerald-500/20 cursor-pointer active:scale-95'
                 : 'bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-400 hover:to-pink-400 text-white shadow-rose-500/20 cursor-pointer active:scale-95'
             }`}
           >
             <Zap className="w-3 h-3 fill-current" />
-            <span>{propBlock.blocked ? 'Risk Locked' : '1-Click Execute'}</span>
+            <span>{propBlock.blocked ? 'Risk Locked' : isNeutralWait ? 'Wait (Filtered)' : '1-Click Execute'}</span>
           </button>
         </div>
       </div>

@@ -7,6 +7,8 @@ import {
   Activity,
 } from 'lucide-react';
 import { generateCandles, enrichCandlesWithIndicators, Candle, Timeframe } from '../../utils/stockCandles.ts';
+import { runSignalEngineBacktest } from '../../utils/signalEngine.ts';
+import { fetchDerivCandlesOnce } from '../../utils/derivTechnicals.ts';
 
 interface StrategyBacktesterProps {
   currentTicker: string;
@@ -37,7 +39,7 @@ interface BacktestTradeLog {
 }
 
 interface BacktestResult {
-  strategyKey: 'trend' | 'breakout' | 'meanrevert' | 'momentum';
+  strategyKey: 'signalEnginePro' | 'trend' | 'breakout' | 'meanrevert' | 'momentum';
   strategyName: string;
   timeframe: string;
   barsEvaluated: number;
@@ -103,11 +105,126 @@ function runHistoricalCandleBacktest(
   ticker: string,
   rawCandles: Candle[],
   dataSource: 'LIVE_OHLCV' | 'SYNTHETIC_FALLBACK',
-  strat: 'trend' | 'breakout' | 'meanrevert' | 'momentum',
+  strat: 'signalEnginePro' | 'trend' | 'breakout' | 'meanrevert' | 'momentum',
   tf: '15m' | '1H' | '1D',
   rr: '1:1.5' | '1:2.0' | '1:2.5' | '1:3.0' | '1:4.0' | '1:5.0',
   riskPct: number
 ): BacktestResult {
+  if (strat === 'signalEnginePro') {
+    const rep = runSignalEngineBacktest(ticker, tf, rawCandles);
+    let capital = 10000;
+    const equity: number[] = [capital];
+    let peak = capital;
+    let maxDd = 0;
+    const wins = rep.tp1Hits;
+    const losses = rep.fullLosses;
+    const chronoTrades = [...rep.recentTrades].reverse();
+    const tradeLogs: BacktestTradeLog[] = [];
+    const returns: number[] = [];
+
+    // Reconstruct approximate equity trajectory using average per-trade R across all trades or exact recent + proportional earlier steps
+    const totalCount = Math.max(1, rep.totalTrades);
+    const avgR = rep.totalTrades > 0 ? rep.netR / totalCount : 0;
+    for (let idx = 0; idx < rep.totalTrades; idx++) {
+      const rStep = idx >= rep.totalTrades - chronoTrades.length
+        ? chronoTrades[idx - (rep.totalTrades - chronoTrades.length)].rMultiple
+        : avgR;
+      const riskAmt = capital * (riskPct / 100);
+      capital += riskAmt * rStep;
+      equity.push(Math.round(capital));
+      returns.push(rStep * riskPct);
+      if (capital > peak) peak = capital;
+      const dd = ((peak - capital) / peak) * 100;
+      if (dd > maxDd) maxDd = dd;
+    }
+
+    for (let idx = 0; idx < chronoTrades.length; idx++) {
+      const t = chronoTrades[idx];
+      const bar = rawCandles[t.barIndex];
+      const pnlDollars = Number((10000 * (riskPct / 100) * t.rMultiple).toFixed(2));
+      tradeLogs.push({
+        index: idx + 1,
+        direction: t.direction,
+        entry: t.entry,
+        exit: t.outcome === 'TP2_FULL' ? t.tp2 : t.outcome === 'TP1_BE' ? t.tp1 : t.sl,
+        sl: t.sl,
+        tp: t.tp2,
+        outcome: t.rMultiple >= 0 ? 'WIN' : 'LOSS',
+        pnlDollars,
+        timeLabel: t.timeLabel || bar?.timeLabel || `Bar ${t.barIndex}`,
+        session: classifyUtcSession(bar?.time || 0),
+      });
+    }
+
+    const sessionMap = new Map<SessionBucket, { trades: number; wins: number; netPnl: number }>([
+      ['Asian', { trades: 0, wins: 0, netPnl: 0 }],
+      ['London', { trades: 0, wins: 0, netPnl: 0 }],
+      ['LDN/NY Overlap', { trades: 0, wins: 0, netPnl: 0 }],
+      ['New York', { trades: 0, wins: 0, netPnl: 0 }],
+    ]);
+    let curW = 0;
+    let curL = 0;
+    let maxW = 0;
+    let maxL = 0;
+    for (const tl of tradeLogs) {
+      if (tl.outcome === 'WIN') {
+        curW++; curL = 0; maxW = Math.max(maxW, curW);
+      } else {
+        curL++; curW = 0; maxL = Math.max(maxL, curL);
+      }
+      const b = sessionMap.get(tl.session)!;
+      b.trades++;
+      if (tl.outcome === 'WIN') b.wins++;
+      b.netPnl = Math.round((b.netPnl + tl.pnlDollars) * 100) / 100;
+    }
+
+    const netProfit = Number((capital - 10000).toFixed(2));
+    const returnPct = Number((((capital - 10000) / 10000) * 100).toFixed(1));
+    const meanRet = returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : 0;
+    const varRet = returns.length > 1 ? returns.reduce((a, b) => a + (b - meanRet) ** 2, 0) / returns.length : 1;
+    const sharpe = rep.totalTrades > 0 ? Number(((meanRet / (Math.sqrt(varRet) || 1)) * Math.sqrt(Math.min(252, rep.totalTrades))).toFixed(2)) : 0;
+
+    return {
+      strategyKey: 'signalEnginePro',
+      strategyName: 'Signal Engine Pro (HTF + Anti-Chop + TP1 Auto-BE)',
+      timeframe: tf,
+      barsEvaluated: rep.barsEvaluated,
+      dataSource,
+      totalTrades: rep.totalTrades,
+      winCount: wins,
+      lossCount: losses,
+      winRate: rep.tp1HitRate,
+      initialCapital: 10000,
+      endingCapital: Math.round(capital),
+      netProfit,
+      returnPercent: returnPct,
+      profitFactor: rep.profitFactor,
+      maxDrawdown: Number(Math.max(maxDd, rep.maxDrawdownR * riskPct).toFixed(1)),
+      sharpeRatio: sharpe,
+      expectancyPerTrade: rep.totalTrades > 0 ? Math.round((netProfit / rep.totalTrades) * 100) / 100 : 0,
+      maxConsecutiveWins: maxW,
+      maxConsecutiveLosses: maxL,
+      sessionStats: Array.from(sessionMap.entries()).map(([session, s]) => ({
+        session,
+        trades: s.trades,
+        wins: s.wins,
+        winRate: s.trades > 0 ? Math.round((s.wins / s.trades) * 100) : 0,
+        netPnl: s.netPnl,
+      })),
+      equityCurve: equity,
+      recentTrades: tradeLogs.slice().reverse(),
+      aiAnalysis: {
+        verdict:
+          rep.totalTrades === 0
+            ? `No qualifying A/A+ candle-triggered setups passed Anti-Chop Efficiency Filter on ${tf}.`
+            : `${rep.tp1HitRate}% TP1 Hit Rate (${rep.tp2HitRate}% TP2 Full, ${rep.beSaves} Auto-BE Saves, ${rep.netR >= 0 ? '+' : ''}${rep.netR}R net) across ${rep.totalTrades} signals.`,
+        keyEdge: 'Replays exact EMA20/50 + RSI + Directional Efficiency Anti-Chop + Engulfing/Pinbar Confirmation + 60% TP1 Partial Close + Auto-Breakeven SL + TP2 Runner rules.',
+        primaryRisk: 'Consecutive reversals before TP1 triggers Auto-BE, or spread slippage during high-impact Forex Factory news.',
+        recommendedSettings: `Run ${riskPct}% risk with TP1 Auto-Breakeven enabled and Red-Folder News Blackout Guard ON.`,
+      },
+    };
+  }
+
   const enriched = enrichCandlesWithIndicators(rawCandles);
   const closes = enriched.map((c) => c.close);
   const rsiSeries = calcRsiSeries(closes, 14);
@@ -383,7 +500,7 @@ export const StrategyBacktester: React.FC<StrategyBacktesterProps> = ({
   currentTicker,
   currentPrice,
 }) => {
-  const [strategy, setStrategy] = useState<'trend' | 'breakout' | 'meanrevert' | 'momentum'>('trend');
+  const [strategy, setStrategy] = useState<'signalEnginePro' | 'trend' | 'breakout' | 'meanrevert' | 'momentum'>('signalEnginePro');
   const [timeframe, setTimeframe] = useState<'15m' | '1H' | '1D'>('1H');
   const [targetRr, setTargetRr] = useState<'1:1.5' | '1:2.0' | '1:2.5' | '1:3.0' | '1:4.0' | '1:5.0'>('1:2.0');
   const [riskPerTrade, setRiskPerTrade] = useState<number>(1.5);
@@ -394,6 +511,30 @@ export const StrategyBacktester: React.FC<StrategyBacktesterProps> = ({
 
   const fetchCandlesForBacktest = useCallback(async (): Promise<{ candles: Candle[]; source: 'LIVE_OHLCV' | 'SYNTHETIC_FALLBACK' }> => {
     try {
+      const clean = currentTicker.replace('/', '').toUpperCase();
+      if (/^(R_|1HZ|BOOM|CRASH|STP|JD|RB)/.test(clean)) {
+        const sec = timeframe === '1D' ? 86400 : timeframe === '1H' ? 3600 : 900;
+        const derivBars = await fetchDerivCandlesOnce(clean, sec, 120);
+        if (derivBars.length >= 25) {
+          return {
+            candles: derivBars.map((b, i) => {
+              const d = b.time ? new Date(b.time * 1000) : new Date();
+              const timeLabel = b.time ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : `Bar ${i}`;
+              return {
+                time: b.time || i,
+                timeLabel,
+                fullDate: b.time ? `${d.toLocaleDateString()} ${timeLabel}` : `Bar ${i}`,
+                open: b.open,
+                high: b.high,
+                low: b.low,
+                close: b.close,
+                volume: 0,
+              };
+            }),
+            source: 'LIVE_OHLCV',
+          };
+        }
+      }
       const res = await fetch(
         `/api/stocks/history?ticker=${encodeURIComponent(currentTicker)}&timeframe=${encodeURIComponent(timeframe)}`
       );
@@ -432,7 +573,8 @@ export const StrategyBacktester: React.FC<StrategyBacktesterProps> = ({
     setIsOptimizing(true);
     try {
       const { candles, source } = await fetchCandlesForBacktest();
-      const allStrats: Array<'trend' | 'breakout' | 'meanrevert' | 'momentum'> = [
+      const allStrats: Array<'signalEnginePro' | 'trend' | 'breakout' | 'meanrevert' | 'momentum'> = [
+        'signalEnginePro',
         'trend',
         'breakout',
         'meanrevert',
@@ -548,6 +690,7 @@ export const StrategyBacktester: React.FC<StrategyBacktesterProps> = ({
             onChange={(e) => setStrategy(e.target.value as any)}
             className="w-full px-2.5 py-1.5 rounded-lg bg-[#070b13] border border-[#162540] text-xs text-white focus:outline-none focus:border-emerald-400"
           >
+            <option value="signalEnginePro">Signal Engine Pro (HTF + Anti-Chop + TP1 Auto-BE)</option>
             <option value="trend">EMA 20/50 Trend Confluence + RSI</option>
             <option value="breakout">12-Bar Donchian High/Low Breakout</option>
             <option value="meanrevert">Bollinger + RSI Mean Reversion</option>

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { ensureDerivTechnicalsStream } from './derivTechnicals.ts';
 
 export interface TimeframeTechnicals {
   recommendAll?: number;
@@ -10,6 +11,10 @@ export interface TimeframeTechnicals {
   ema20?: number;
   ema50?: number;
   changePercent?: number;
+  atr?: number;
+  adx?: number;
+  bbUpper?: number;
+  bbLower?: number;
 }
 
 export interface LiveTvQuote {
@@ -24,6 +29,7 @@ export interface LiveTvQuote {
   open?: number;
   time?: string;
   isFallback?: boolean;
+  isLiveDerivTechnicals?: boolean;
   recommendAll?: number;
   recommendMa?: number;
   recommendOther?: number;
@@ -35,6 +41,15 @@ export interface LiveTvQuote {
   ema200?: number;
   atr?: number;
   adx?: number;
+  bbUpper?: number;
+  bbLower?: number;
+  pivotMiddle?: number;
+  pivotR1?: number;
+  pivotS1?: number;
+  pivotR2?: number;
+  pivotS2?: number;
+  stochK?: number;
+  stochD?: number;
   volume?: number;
   marketCap?: number;
   peRatio?: number;
@@ -230,6 +245,7 @@ function mergeQuotesSafely(
     if (!q || typeof q.price !== 'number' || q.price <= 0) continue;
     const existing = next[k];
     if (existing && !existing.isFallback && q.isFallback) continue;
+    if (existing?.isLiveDerivTechnicals && !q.isLiveDerivTechnicals) continue;
     next[k] = q;
   }
   return next;
@@ -245,7 +261,24 @@ function notifySubscribers() {
 }
 
 function ensureSharedStream() {
-  if (typeof window === 'undefined' || typeof EventSource === 'undefined' || sharedEventSource) return;
+  if (typeof window === 'undefined') return;
+  ensureDerivTechnicalsStream((derivQuotes) => {
+    const tagged: Record<string, LiveTvQuote> = {};
+    for (const [sym, q] of Object.entries(derivQuotes)) {
+      const enriched = { ...q, isLiveDerivTechnicals: true };
+      tagged[sym] = enriched;
+      tagged[sym.replace('_', '')] = enriched;
+      if (sym === 'R_75') {
+        tagged['VOL75'] = enriched;
+        tagged['V75'] = enriched;
+      } else if (sym === 'R_100') {
+        tagged['VOL100'] = enriched;
+      }
+    }
+    sharedQuotesCache = mergeQuotesSafely(sharedQuotesCache, tagged);
+    notifySubscribers();
+  });
+  if (typeof EventSource === 'undefined' || sharedEventSource) return;
   try {
     const es = new EventSource('/api/tradingview/stream');
     sharedEventSource = es;
@@ -414,6 +447,18 @@ export function resolveTradingViewPrice(
   const upper = symbol.toUpperCase().trim();
   const clean = upper.replace(/[/_\s-]/g, '');
   return TV_BENCHMARK_PRICES[upper] ?? TV_BENCHMARK_PRICES[clean] ?? fallbackPrice;
+}
+
+export function extractMacroCorrelationContext(quotes: Record<string, LiveTvQuote>) {
+  const dxy = lookupTradingViewQuote(quotes, 'DXY');
+  const us10y = lookupTradingViewQuote(quotes, 'US10Y');
+  if (!dxy && !us10y) return undefined;
+  return {
+    dxyChangePercent: dxy?.changePercent,
+    dxyRecAll: dxy?.recommendAll,
+    us10yChangePercent: us10y?.changePercent,
+    us10yRecAll: us10y?.recommendAll,
+  };
 }
 
 /**
